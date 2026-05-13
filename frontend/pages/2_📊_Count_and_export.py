@@ -1,15 +1,18 @@
-"""
-Count & Export page — enhanced line editor.
+"""Count & Export page — interactive line editor.
 
 Features:
-  ✏️  Draw mode   – click-drag to draw new counting lines with a colour picker.
-  ✋  Edit mode   – select any saved line on the canvas and drag its endpoints.
-  📊  Live counts – every line shows its trajectory count, direction split and
-                    dominant vehicle class; recomputed in the background after
-                    every change.
-  ✨  Suggest     – automatic line placement based on trajectory-density analysis.
-  📐  Presets     – horizontal/vertical/diagonal midlines created in one click.
-  📥/📤 Import/Export – JSON-based line config for portability across workspaces.
+  ✏️  Add line   – click "Add line" then drag on canvas to draw a new counting
+                  line. Named and saved in one step.
+  ✋  Drag       – existing lines are always live Fabric.js objects; drag any
+                  line or its endpoint handles directly on the canvas, then click
+                  "Apply edits" to persist the new positions.
+  🗑  Delete     – select a line in the canvas and press the trash icon, OR use
+                  the per-line button in the right panel, OR "Clear all" to wipe
+                  everything. All deletions sync to the DB on Apply edits.
+  📊  Live counts – recomputed in background after every change.
+  ✨  Suggest    – automatic line placement based on trajectory-density analysis.
+  📐  Presets    – midlines/diagonals in one click.
+  📥/📤 Import/Export – JSON-based line config.
   📊  Export XLSX – full counts workbook download.
 """
 from __future__ import annotations
@@ -46,8 +49,8 @@ if "canvas_version" not in st.session_state:
     st.session_state["canvas_version"] = 0
 if "drawing_color" not in st.session_state:
     st.session_state["drawing_color"] = "#e24b4a"
-if "canvas_mode" not in st.session_state:
-    st.session_state["canvas_mode"] = "draw"
+if "drawing_new_line" not in st.session_state:
+    st.session_state["drawing_new_line"] = False
 if "counts" not in st.session_state:
     st.session_state["counts"] = None
 if "needs_recount" not in st.session_state:
@@ -263,8 +266,8 @@ def _saved_lines_to_fabric(lines: List[Dict], scale: float) -> dict:
             "originY": "top",
             "left": min(ax, bx),
             "top": min(ay, by),
-            "width": abs(bx - ax),
-            "height": abs(by - ay),
+            "width": abs(bx - ax) or 0.01,
+            "height": abs(by - ay) or 0.01,
             "x1": 0 if ax <= bx else abs(bx - ax),
             "y1": 0 if ay <= by else abs(by - ay),
             "x2": abs(bx - ax) if ax <= bx else 0,
@@ -284,9 +287,11 @@ col_canvas, col_panel = st.columns([3, 2])
 
 # ─────────────────────────── LEFT: canvas ────────────────────────────────────
 with col_canvas:
-    # ── Heatmap toggle ────────────────────────────────────────────────────────
-    hm_col, mode_col = st.columns([1, 2])
-    with hm_col:
+
+    # ── Toolbar row ───────────────────────────────────────────────────────────
+    tb1, tb2, tb3 = st.columns([1.4, 1.2, 1])
+
+    with tb1:
         show_heatmap = st.toggle(
             "🌡️ Heatmap",
             value=st.session_state.get("show_heatmap", False),
@@ -294,6 +299,35 @@ with col_canvas:
             help="Overlay a track-density heatmap. Generated on first use and cached.",
         )
         st.session_state["show_heatmap"] = show_heatmap
+
+    with tb2:
+        if st.session_state["drawing_new_line"]:
+            if st.button("✖ Cancel drawing", use_container_width=True):
+                st.session_state["drawing_new_line"] = False
+                st.session_state["canvas_version"] += 1
+                st.rerun()
+        else:
+            if st.button("✏️ Add line", use_container_width=True, type="primary"):
+                st.session_state["drawing_new_line"] = True
+                # Don't bump canvas_version — keeps in-flight drag edits alive
+                st.rerun()
+
+    with tb3:
+        with st.popover("🗑 Clear all", use_container_width=True):
+            if saved_lines:
+                st.warning(f"Delete all **{len(saved_lines)}** saved line(s)?")
+                if st.button("Yes, delete all", type="primary", key="confirm_clear_all"):
+                    for ln in saved_lines:
+                        try:
+                            api.delete_line(ln["id"])
+                        except Exception:
+                            pass
+                    st.session_state["canvas_version"] += 1
+                    st.session_state["needs_recount"] = True
+                    st.toast("All lines deleted.", icon="🗑️")
+                    st.rerun()
+            else:
+                st.caption("No saved lines.")
 
     if show_heatmap:
         hm_url = api.get_heatmap_url(preview_video["id"])
@@ -303,10 +337,9 @@ with col_canvas:
             hm_resized = hm_img.resize((canvas_w, canvas_h)).convert("RGBA")
             canvas_bg = Image.alpha_composite(canvas_bg.convert("RGBA"), hm_resized)
         else:
-            with hm_col:
-                st.caption("Not ready")
+            st.caption("Heatmap not ready yet.")
 
-    # Apply busy-zone highlight on top of heatmap (re-read session state each render)
+    # Busy-zone highlight
     if (
         st.session_state.get("show_busy_zone")
         and _preview_stats
@@ -314,43 +347,26 @@ with col_canvas:
     ):
         canvas_bg = _draw_busy_zone(canvas_bg, _preview_stats["busy_zone"])
 
-    # Mode toggle
-    with mode_col:
-        mode_choice = st.radio(
-            "Mode",
-            options=["✏️ Draw", "✋ Edit"],
-            horizontal=True,
-            key="mode_radio",
-            label_visibility="collapsed",
-        )
-    new_mode = "draw" if mode_choice == "✏️ Draw" else "edit"
-    if new_mode != st.session_state["canvas_mode"]:
-        st.session_state["canvas_mode"] = new_mode
-        # Reset canvas when switching modes so fabric state is clean
-        st.session_state["canvas_version"] += 1
-
-    is_draw = st.session_state["canvas_mode"] == "draw"
-
-    if is_draw:
-        col_color, col_hint = st.columns([1, 4])
-        with col_color:
+    # ── Canvas: draw mode XOR transform mode, never both ─────────────────────
+    if st.session_state["drawing_new_line"]:
+        # ── DRAW mode ────────────────────────────────────────────────────────
+        color_col, hint_col = st.columns([1, 4])
+        with color_col:
             new_color = st.color_picker(
-                "Line color",
+                "Stroke",
                 value=st.session_state["drawing_color"],
-                key="color_picker",
+                key="color_picker_draw",
                 label_visibility="collapsed",
             )
-            if new_color != st.session_state["drawing_color"]:
-                st.session_state["drawing_color"] = new_color
-        with col_hint:
-            st.caption("Click and drag to draw a counting line.")
+            st.session_state["drawing_color"] = new_color
+        with hint_col:
+            st.caption("Click and drag to draw a line, then name it and hit **Save**.")
 
-        bg_with_lines = _bake_lines_on_image(canvas_bg, saved_lines, scale)
-        canvas_result = st_canvas(
+        draw_result = st_canvas(
             fill_color="rgba(0,0,0,0)",
             stroke_width=3,
             stroke_color=st.session_state["drawing_color"],
-            background_image=bg_with_lines,
+            background_image=_bake_lines_on_image(canvas_bg, saved_lines, scale),
             update_streamlit=True,
             height=canvas_h,
             width=canvas_w,
@@ -358,21 +374,18 @@ with col_canvas:
             key=f"canvas_draw_{preview_video['id']}_v{st.session_state['canvas_version']}",
         )
 
-        # ── New-line save form ──
         drawn = []
-        if canvas_result.json_data and canvas_result.json_data.get("objects"):
-            for obj in canvas_result.json_data["objects"]:
+        if draw_result.json_data and draw_result.json_data.get("objects"):
+            for obj in draw_result.json_data["objects"]:
                 if obj.get("type") == "line":
                     (ax, ay), (bx, by) = _line_endpoints_from_fabric(obj)
                     drawn.append({
                         "a": (ax / scale, ay / scale),
                         "b": (bx / scale, by / scale),
-                        "a_canvas": (ax, ay),
-                        "b_canvas": (bx, by),
                     })
 
         if drawn:
-            st.markdown("**New lines** — name them and save:")
+            st.markdown("**Save new line(s):**")
             for i, d in enumerate(drawn):
                 with st.container(border=True):
                     c1, c2, c3 = st.columns([3, 2, 1])
@@ -395,15 +408,17 @@ with col_canvas:
                                 d["a"][0], d["a"][1], d["b"][0], d["b"][1],
                                 color=st.session_state["drawing_color"],
                             )
+                            st.session_state["drawing_new_line"] = False
                             st.session_state["canvas_version"] += 1
                             st.session_state["needs_recount"] = True
                             st.toast(f"Line **{name_val}** saved!", icon="✅")
                             st.rerun()
 
-    else:  # Edit mode
+    else:
+        # ── TRANSFORM mode ────────────────────────────────────────────────────
         st.caption(
-            "Select a line on the canvas, drag its endpoints to reposition it, "
-            "then click **Apply edits**."
+            "Drag any line to reposition it, then click **Apply edits** to persist. "
+            "Use the 🗑 buttons in the right panel to delete individual lines."
         )
         initial_drawing = _saved_lines_to_fabric(saved_lines, scale)
         canvas_result = st_canvas(
@@ -419,12 +434,15 @@ with col_canvas:
             key=f"canvas_edit_{preview_video['id']}_v{st.session_state['canvas_version']}",
         )
 
+        # Apply edits: moves only. Deletions are NOT inferred from absent
+        # objects — canvas_result.json_data is None until the browser hydrates
+        # the canvas, so treating that as "deleted" would wipe all lines.
         c_apply, c_refresh = st.columns(2)
         with c_apply:
             if st.button("✅ Apply edits", use_container_width=True, type="primary"):
-                if canvas_result.json_data and canvas_result.json_data.get("objects"):
-                    updated = 0
-                    # Build lookup: line_id -> current DB points (canvas coords)
+                if not canvas_result.json_data:
+                    st.toast("Drag a line first, then apply.", icon="⚠️")
+                else:
                     db_pts = {
                         ln["id"]: (
                             (ln["points"]["a"][0] * scale, ln["points"]["a"][1] * scale),
@@ -432,18 +450,15 @@ with col_canvas:
                         )
                         for ln in saved_lines
                     }
-                    for obj in canvas_result.json_data["objects"]:
+                    updated = 0
+                    for obj in canvas_result.json_data.get("objects", []):
                         if obj.get("type") != "line":
                             continue
                         lid = obj.get("_line_id")
-                        if not lid:
+                        if not lid or lid not in db_pts:
                             continue
                         (ax, ay), (bx, by) = _line_endpoints_from_fabric(obj)
-                        orig = db_pts.get(lid)
-                        if orig is None:
-                            continue
-                        # Only push update if coordinates changed meaningfully (>1px)
-                        (oax, oay), (obx, oby) = orig
+                        (oax, oay), (obx, oby) = db_pts[lid]
                         if (
                             abs(ax - oax) > 1 or abs(ay - oay) > 1
                             or abs(bx - obx) > 1 or abs(by - oby) > 1
@@ -459,12 +474,10 @@ with col_canvas:
                     if updated:
                         st.session_state["canvas_version"] += 1
                         st.session_state["needs_recount"] = True
-                        st.toast(f"Updated {updated} line(s)!", icon="✅")
+                        st.toast(f"Saved {updated} line position(s).", icon="✅")
                         st.rerun()
                     else:
-                        st.toast("No changes detected.", icon="ℹ️")
-                else:
-                    st.toast("Canvas empty — nothing to apply.", icon="ℹ️")
+                        st.toast("No position changes detected.", icon="ℹ️")
 
         with c_refresh:
             if st.button("🔄 Refresh canvas", use_container_width=True):

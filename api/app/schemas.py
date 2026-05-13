@@ -108,3 +108,21 @@ class WorkspaceSummary(BaseModel):
 class AnalyzeResponse(BaseModel):
     video_id: str
     status: str
+
+
+class LineUpdate(BaseModel):
+    name: Optional[str] = None
+    color: Optional[str] = None
+    points: Optional[Dict[str, List[float]]] = None
+
+
+class SuggestLinesRequest(BaseModel):
+    video_ids: List[str]
+    n: int = 3
+
+
+class SuggestLineOut(BaseModel):
+    name: str
+    points: Dict[str, List[float]]
+    color: str
+    score: int  # number of tracks this line would cross

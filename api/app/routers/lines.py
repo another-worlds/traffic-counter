@@ -4,7 +4,7 @@ from typing import List
 
 from ..db import get_db
 from ..models import Project, CountingLine
-from ..schemas import LineCreate, LineOut
+from ..schemas import LineCreate, LineOut, LineUpdate
 
 router = APIRouter(tags=["lines"])
 
@@ -46,3 +46,21 @@ def delete_line(line_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, "line not found")
     db.delete(ln)
     db.commit()
+
+
+@router.patch("/lines/{line_id}", response_model=LineOut)
+def update_line(line_id: str, payload: LineUpdate, db: Session = Depends(get_db)):
+    ln = db.get(CountingLine, line_id)
+    if not ln:
+        raise HTTPException(404, "line not found")
+    if payload.name is not None:
+        ln.name = payload.name
+    if payload.color is not None:
+        ln.color = payload.color
+    if payload.points is not None:
+        if "a" not in payload.points or "b" not in payload.points:
+            raise HTTPException(422, "points must have keys 'a' and 'b'")
+        ln.points = payload.points
+    db.commit()
+    db.refresh(ln)
+    return ln

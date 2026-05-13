@@ -91,6 +91,15 @@ def get_trajectories_url(video_id: str) -> Optional[str]:
         return r.json()["url"]
 
 
+def get_heatmap_url(video_id: str) -> Optional[str]:
+    with _client() as c:
+        r = c.get(f"/videos/{video_id}/heatmap-url")
+        if r.status_code in (404, 409):
+            return None
+        _raise(r)
+        return r.json()["url"]
+
+
 # --- lines ---
 def list_lines(project_id: str) -> List[Dict]:
     with _client() as c:
@@ -112,6 +121,36 @@ def delete_line(line_id: str):
     with _client() as c:
         r = c.delete(f"/lines/{line_id}")
         _raise(r)
+
+
+def update_line(
+    line_id: str,
+    *,
+    name: Optional[str] = None,
+    color: Optional[str] = None,
+    points: Optional[Dict] = None,
+) -> Dict:
+    payload: Dict = {}
+    if name is not None:
+        payload["name"] = name
+    if color is not None:
+        payload["color"] = color
+    if points is not None:
+        payload["points"] = points
+    with _client() as c:
+        r = c.patch(f"/lines/{line_id}", json=payload)
+        _raise(r)
+        return r.json()
+
+
+def suggest_lines(project_id: str, video_ids: List[str], n: int = 3) -> List[Dict]:
+    with _client() as c:
+        r = c.post(
+            f"/projects/{project_id}/suggest-lines",
+            json={"video_ids": video_ids, "n": n},
+        )
+        _raise(r)
+        return r.json()
 
 
 # --- counts / export ---

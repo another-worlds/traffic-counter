@@ -7,7 +7,7 @@ from ..db import get_db
 from ..models import Project, Video
 from ..schemas import VideoOut, AnalyzeResponse
 from ..services.storage import (
-    get_storage, key_video, key_frame, key_trajectories,
+    get_storage, key_video, key_frame, key_trajectories, key_heatmap,
 )
 from ..services.jobs import get_job_runner
 
@@ -107,6 +107,26 @@ def get_trajectories_url(video_id: str, db: Session = Depends(get_db)):
     k = key_trajectories(v.project_id, v.id)
     if not storage.exists(k):
         raise HTTPException(404, "trajectories not ready yet")
+    return {"url": storage.signed_url(k, expires_minutes=60)}
+
+
+@router.get("/videos/{video_id}/heatmap-url")
+def get_heatmap_url(video_id: str, db: Session = Depends(get_db)):
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "video not found")
+    if v.status != "analyzed":
+        raise HTTPException(409, "video must be analyzed before a heatmap can be generated")
+    storage = get_storage()
+    k = key_heatmap(v.project_id, v.id)
+    if not storage.exists(k):
+        # Generate on first request and cache in storage.
+        import io as _io
+        from ..services.tracks import load_tracks_for_video
+        from ..services.heatmap import generate_heatmap
+        tracks = load_tracks_for_video(v.project_id, v.id)
+        png_bytes = generate_heatmap(tracks, v.width or 1920, v.height or 1080)
+        storage.upload_stream(k, _io.BytesIO(png_bytes))
     return {"url": storage.signed_url(k, expires_minutes=60)}
 
 

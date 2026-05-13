@@ -15,16 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY requirements.txt .
-# Layer 1 — full requirements install (cached as long as requirements.txt is unchanged).
+# ultralytics depends on opencv-python (GUI variant) by name; the system libs
+# libgl1 and libglib2.0-0 are already installed above so cv2 imports fine on
+# a headless server.  No swap needed — clean cache, simple build.
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Layer 2 — opencv swap.  ultralytics overwrites opencv-python-headless with
-# the GUI build (same cv2 namespace, ~90 MB larger).  Evict it and put headless
-# back.  ARG OPENCV_FIX busts only this small layer without re-running the
-# multi-minute torch/ultralytics download above.
-ARG OPENCV_FIX=2
-RUN pip uninstall -y opencv-python 2>/dev/null || true \
- && pip install --no-cache-dir opencv-python-headless==4.10.0.84
 
 COPY . .
 

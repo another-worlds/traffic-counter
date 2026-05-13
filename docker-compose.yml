@@ -44,6 +44,15 @@ services:
       DEVICE: cuda:0
       HALF: "true"
       NVIDIA_VISIBLE_DEVICES: all
+      # — Concurrency / GPU tuning (uncomment to override defaults) —
+      # WORKER_CONCURRENCY: "1"      # parallel jobs inside this container
+      # CUDA_MEM_FRACTION: "0.9"     # VRAM cap per process (0–1); lower when
+      #                               # WORKER_CONCURRENCY > 1
+      # STUCK_JOB_TIMEOUT_MINUTES: "30"
+      # FRAME_STRIDE: "2"            # skip every Nth frame (2 = 15fps from 30fps)
+      # IMGSZ: "640"                 # YOLO input resolution (640 or 1280)
+      # CONF: "0.40"                 # detection confidence threshold
+      # IOU: "0.45"                  # NMS IoU threshold
     volumes:
       - storage:/data
       - ./worker:/app

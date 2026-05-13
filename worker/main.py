@@ -2,25 +2,33 @@
 Worker entrypoint.
 
 Modes:
-  - WORKER_MODE=poll        long-running loop, claims status='queued' videos
-  - WORKER_MODE=single      processes one video (VIDEO_ID env var), then exits
+  WORKER_MODE=poll    long-running loop; claims status='queued' videos.
+  WORKER_MODE=single  processes one video (VIDEO_ID env var), then exits.
 
-The "single" mode is what Cloud Run Jobs invokes for each video. Per-execution
-env overrides set VIDEO_ID and WORKER_MODE; the rest comes from the job's
-configured environment.
+Concurrency (poll mode only):
+  WORKER_CONCURRENCY=N  spawn N independent worker processes inside this
+  container, each with its own YOLO model and DB connection.  Defaults to 1.
+  Uses multiprocessing 'spawn' start method so CUDA contexts are never forked
+  (fork+CUDA = undefined behaviour / crashes).
+
+  Alternatively, run multiple containers via docker-compose --scale worker=N;
+  SELECT FOR UPDATE SKIP LOCKED handles contention safely in both cases.
+
+Stuck-job recovery:
+  On startup each worker re-queues videos that have been stuck in 'analyzing'
+  state for longer than STUCK_JOB_TIMEOUT_MINUTES (default 30).
 """
 from __future__ import annotations
+import multiprocessing
 import os
+import signal
 import sys
 import time
 import logging
 import traceback
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-
-from pipeline import process_video
 
 logging.basicConfig(
     level=logging.INFO,
@@ -28,19 +36,21 @@ logging.basicConfig(
 )
 log = logging.getLogger("worker")
 
-
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
     "postgresql+psycopg://traffic:traffic@db:5432/traffic",
 )
+STUCK_TIMEOUT = int(os.environ.get("STUCK_JOB_TIMEOUT_MINUTES", "30"))
+
+# Engine is module-level; each spawned child re-imports the module and gets
+# its own fresh pool (safe).  Do NOT share an engine across fork().
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
-Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
 def claim_one_queued():
     """
-    Atomically claim one queued video. Uses SELECT ... FOR UPDATE SKIP LOCKED
-    to keep concurrent pollers from racing on the same row.
+    Atomically claim one queued video.  SELECT FOR UPDATE SKIP LOCKED lets
+    multiple pollers run concurrently without racing on the same row.
     """
     with engine.begin() as conn:
         row = conn.execute(text("""
@@ -72,7 +82,6 @@ def fetch_video(video_id: str):
         ).first()
         if not row:
             return None
-        # Mark as analyzing
         conn.execute(
             text("""UPDATE videos
                     SET status='analyzing',
@@ -120,7 +129,6 @@ def mark_error(video_id: str, err: Exception):
 
 
 def update_progress(video_id: str, pct: float):
-    """Lightweight progress update (called every ~50 frames during analysis)."""
     with engine.begin() as conn:
         conn.execute(
             text("UPDATE videos SET progress_pct=:pct WHERE id=:id"),
@@ -128,32 +136,47 @@ def update_progress(video_id: str, pct: float):
         )
 
 
-def handle(video: dict):
-    log.info("processing video %s (%s)", video["id"], video["filename"])
-    try:
-        def _on_progress(pct: float):
-            update_progress(video["id"], pct)
+def recover_stuck_jobs():
+    """Re-queue videos stuck in 'analyzing' beyond STUCK_TIMEOUT minutes."""
+    cutoff = datetime.utcnow() - timedelta(minutes=STUCK_TIMEOUT)
+    with engine.begin() as conn:
+        result = conn.execute(text("""
+            UPDATE videos
+               SET status='queued', progress_pct=0
+             WHERE status='analyzing'
+               AND started_analyzing_at < :cutoff
+            RETURNING id
+        """), {"cutoff": cutoff})
+        ids = [r[0] for r in result]
+    if ids:
+        log.warning("re-queued %d stuck job(s): %s", len(ids), ids)
 
+
+def handle(video: dict):
+    from pipeline import process_video  # deferred: each process loads its own model
+    log.info("processing video %s (%s) pid=%d", video["id"], video["filename"], os.getpid())
+    try:
         meta = process_video(
             project_id=video["project_id"],
             video_id=video["id"],
             filename=video["filename"],
-            on_progress=_on_progress,
+            on_progress=lambda pct: update_progress(video["id"], pct),
         )
         mark_analyzed(video["id"], meta)
-        log.info("done %s: %s tracks", video["id"], meta.get("num_tracks"))
+        log.info("done %s — %d tracks", video["id"], meta.get("num_tracks", 0))
     except Exception as e:
         log.exception("video %s failed", video["id"])
         mark_error(video["id"], e)
 
 
 def poll_loop():
-    log.info("worker started in poll mode")
+    log.info("poll loop started (pid=%d)", os.getpid())
+    recover_stuck_jobs()
     while True:
         try:
             v = claim_one_queued()
         except Exception:
-            log.exception("claim failed; retrying")
+            log.exception("claim failed; retrying in 5 s")
             time.sleep(5)
             continue
         if not v:
@@ -174,9 +197,54 @@ def single():
     handle(v)
 
 
+# ── Multi-process bootstrap ──────────────────────────────────────────────────
+def _child_worker():
+    """Entry point for each spawned child process."""
+    # Reset signal handlers so parent's SIGTERM handler doesn't get inherited.
+    signal.signal(signal.SIGINT,  signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    poll_loop()
+
+
 if __name__ == "__main__":
-    mode = os.environ.get("WORKER_MODE", "poll")
+    mode        = os.environ.get("WORKER_MODE",        "poll")
+    concurrency = int(os.environ.get("WORKER_CONCURRENCY", "1"))
+
     if mode == "single":
         single()
-    else:
+        sys.exit(0)
+
+    if concurrency <= 1:
         poll_loop()
+    else:
+        # 'spawn' creates a clean interpreter in each child — required for CUDA.
+        # 'fork' copies the parent's CUDA context which causes undefined behaviour.
+        ctx = multiprocessing.get_context("spawn")
+        log.info("spawning %d worker process(es)", concurrency)
+        procs = [
+            ctx.Process(target=_child_worker, name=f"worker-{i}", daemon=True)
+            for i in range(concurrency)
+        ]
+        for p in procs:
+            p.start()
+
+        def _shutdown(sig, _frame):
+            log.info("received signal %d — stopping %d worker(s)…", sig, len(procs))
+            for p in procs:
+                p.terminate()
+            for p in procs:
+                p.join(timeout=60)
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, _shutdown)
+        signal.signal(signal.SIGINT,  _shutdown)
+
+        # Supervise: if a child dies unexpectedly, restart it.
+        while True:
+            for i, p in enumerate(procs):
+                if not p.is_alive():
+                    log.warning("worker-%d died (exit %s); restarting", i, p.exitcode)
+                    new_p = ctx.Process(target=_child_worker, name=f"worker-{i}", daemon=True)
+                    new_p.start()
+                    procs[i] = new_p
+            time.sleep(5)

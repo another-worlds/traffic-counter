@@ -1,12 +1,14 @@
+# syntax=docker/dockerfile:1
 # Cloud Run L4 ships with NVIDIA driver 535.x (CUDA 12.2 compatible).
 # Match that with a CUDA 12.x runtime base.
 FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PYTHONUNBUFFERED=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip python3-venv \
         ffmpeg libgl1 libglib2.0-0 \
         ca-certificates \
@@ -18,7 +20,8 @@ COPY requirements.txt .
 # ultralytics depends on opencv-python (GUI variant) by name; the system libs
 # libgl1 and libglib2.0-0 are already installed above so cv2 imports fine on
 # a headless server.  No swap needed — clean cache, simple build.
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 COPY . .
 

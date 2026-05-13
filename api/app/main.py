@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .config import settings
 from .db import init_db
-from .routers import projects, videos, lines, analysis, worker
+from .routers import projects, videos, lines, analysis, worker, disk
 
 
 def create_app() -> FastAPI:
@@ -28,6 +28,7 @@ def create_app() -> FastAPI:
     app.include_router(lines.router)
     app.include_router(analysis.router)
     app.include_router(worker.router)
+    app.include_router(disk.router)
 
     @app.on_event("startup")
     def _startup():

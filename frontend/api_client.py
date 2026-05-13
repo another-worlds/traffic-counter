@@ -190,6 +190,26 @@ def file_url(relative: str) -> str:
     return f"{API_URL}{relative}"
 
 
+# --- yandex disk ---
+def browse_disk(path: str = "") -> Dict:
+    """List files/folders inside the Yandex.Disk root at *path*."""
+    with _client() as c:
+        r = c.get("/disk/browse", params={"path": path})
+        _raise(r)
+        return r.json()
+
+
+def import_from_disk(project_id: str, disk_path: str) -> Dict:
+    """Import a file from Yandex.Disk into a project."""
+    with _client() as c:
+        r = c.post(
+            f"/projects/{project_id}/videos/from-disk",
+            json={"disk_path": disk_path},
+        )
+        _raise(r)
+        return r.json()
+
+
 # --- worker / dashboard ---
 def worker_status() -> List[Dict]:
     """Return videos currently queued or being analyzed."""

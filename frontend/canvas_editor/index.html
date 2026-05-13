@@ -1,0 +1,994 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Canvas Editor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.3.0/fabric.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0e1117;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    overflow: hidden;
+  }
+
+  #wrap {
+    position: relative;
+    width: 100%;
+    background: #0e1117;
+  }
+
+  #canvas-container {
+    position: relative;
+    display: inline-block;
+    line-height: 0;
+  }
+
+  canvas { display: block; }
+
+  /* ── Floating Toolbar ──────────────────────────────────────────────────── */
+  #toolbar {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    z-index: 20;
+  }
+
+  #toolbar-main {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    background: rgba(14,17,23,0.82);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px;
+    padding: 6px 10px;
+    backdrop-filter: blur(8px);
+  }
+
+  #draw-sub {
+    display: none;
+    gap: 6px;
+    align-items: center;
+    background: rgba(14,17,23,0.82);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px;
+    padding: 6px 10px;
+    backdrop-filter: blur(8px);
+  }
+
+  #class-filter {
+    display: flex;
+    gap: 4px;
+    background: rgba(14,17,23,0.82);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 10px;
+    padding: 5px 8px;
+    backdrop-filter: blur(8px);
+  }
+
+  .tb-btn {
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 7px;
+    color: #cdd9e5;
+    font-size: 12px;
+    padding: 4px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s, border-color 0.15s;
+    user-select: none;
+  }
+  .tb-btn:hover { background: rgba(255,255,255,0.16); }
+  .tb-btn.active {
+    background: rgba(66,153,225,0.28);
+    border-color: rgba(66,153,225,0.7);
+    color: #90cdf4;
+  }
+  .tb-btn.danger {
+    background: rgba(226,75,74,0.15);
+    border-color: rgba(226,75,74,0.5);
+    color: #fc8181;
+  }
+  .tb-btn.danger:hover { background: rgba(226,75,74,0.3); }
+
+  .color-swatch {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.35);
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  /* class chip */
+  .cls-chip {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px 7px;
+    border-radius: 6px;
+    font-size: 11px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    color: #cdd9e5;
+    user-select: none;
+    transition: opacity 0.15s;
+  }
+  .cls-chip.off { opacity: 0.32; }
+  .cls-chip:hover { border-color: rgba(255,255,255,0.2); }
+  .cls-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+  /* ── Floating Line Card ─────────────────────────────────────────────────── */
+  #line-card {
+    position: absolute;
+    width: 240px;
+    background: rgba(14,17,23,0.93);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 12px;
+    padding: 12px 14px;
+    z-index: 30;
+    display: none;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+  }
+
+  .card-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 7px;
+  }
+
+  .card-name {
+    flex: 1;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 6px;
+    color: #e2e8f0;
+    font-size: 13px;
+    padding: 4px 8px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+  .card-name:focus { border-color: rgba(66,153,225,0.7); }
+
+  .card-color {
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.3);
+    cursor: pointer;
+    padding: 0;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+  .card-color input[type=color] {
+    width: 140%;
+    height: 140%;
+    margin: -20%;
+    border: none;
+    cursor: pointer;
+    opacity: 0;
+    position: absolute;
+  }
+  .card-color-wrap {
+    position: relative;
+    width: 26px; height: 26px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.3);
+    cursor: pointer;
+    flex-shrink: 0;
+    overflow: hidden;
+  }
+  .card-color-bg {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+  }
+  .card-color-input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* stats */
+  .card-count {
+    font-size: 22px;
+    font-weight: 700;
+    color: #e2e8f0;
+    line-height: 1;
+  }
+  .card-count-label {
+    font-size: 10px;
+    color: #718096;
+    margin-top: 1px;
+  }
+  .card-dir {
+    display: flex;
+    gap: 8px;
+    font-size: 12px;
+    color: #a0aec0;
+    margin-top: 2px;
+  }
+  .dir-pos { color: #68d391; }
+  .dir-neg { color: #fc8181; }
+
+  /* class mini-bars */
+  .cls-bars { margin-top: 8px; }
+  .cls-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin: 2px 0;
+    font-size: 10px;
+    color: #718096;
+  }
+  .cls-bar-label { width: 62px; text-align: right; }
+  .cls-bar-track { flex: 1; height: 5px; background: rgba(255,255,255,0.08); border-radius: 3px; overflow: hidden; }
+  .cls-bar-fill { height: 100%; border-radius: 3px; }
+  .cls-bar-val { width: 26px; text-align: right; }
+
+  /* card actions */
+  .card-actions {
+    display: flex;
+    gap: 5px;
+    margin-top: 9px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255,255,255,0.08);
+  }
+  .card-btn {
+    flex: 1;
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 7px;
+    color: #cdd9e5;
+    font-size: 11px;
+    padding: 4px 0;
+    cursor: pointer;
+    transition: background 0.15s;
+  }
+  .card-btn:hover { background: rgba(255,255,255,0.15); }
+  .card-btn.del {
+    background: rgba(226,75,74,0.12);
+    border-color: rgba(226,75,74,0.4);
+    color: #fc8181;
+  }
+  .card-btn.del:hover { background: rgba(226,75,74,0.28); }
+
+  /* ── Draw preview ─────────────────────────────────────────────────────── */
+  .draw-cursor { cursor: crosshair !important; }
+
+  /* ── No-data placeholder ─────────────────────────────────────────────── */
+  #loading {
+    color: #4a5568;
+    font-size: 14px;
+    padding: 40px;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="loading">Loading…</div>
+  <div id="canvas-container" style="display:none">
+
+    <!-- Floating toolbar -->
+    <div id="toolbar">
+      <div id="toolbar-main">
+        <button class="tb-btn" id="btn-draw" title="Add counting line">✏ Add line</button>
+        <button class="tb-btn" id="btn-heatmap" title="Toggle heatmap">🌡</button>
+      </div>
+      <div id="draw-sub">
+        <button class="tb-btn active" id="btn-drag-mode" title="Drag to draw">↔ Drag</button>
+        <button class="tb-btn" id="btn-click-mode" title="Click-click to draw">· · Click</button>
+        <div class="color-swatch" id="draw-swatch" title="Line color"></div>
+        <input type="color" id="draw-color-input" style="position:absolute;opacity:0;pointer-events:none;">
+        <button class="tb-btn danger" id="btn-cancel-draw">✖ Cancel</button>
+      </div>
+      <div id="class-filter">
+        <span class="cls-chip" data-cls="car">    <span class="cls-dot" style="background:#3788dd"></span>car</span>
+        <span class="cls-chip" data-cls="truck">  <span class="cls-dot" style="background:#e24b4a"></span>truck</span>
+        <span class="cls-chip" data-cls="bus">    <span class="cls-dot" style="background:#d75a30"></span>bus</span>
+        <span class="cls-chip" data-cls="motorcycle"><span class="cls-dot" style="background:#ef9f27"></span>moto</span>
+        <span class="cls-chip" data-cls="bicycle"><span class="cls-dot" style="background:#1c9e75"></span>bike</span>
+      </div>
+    </div>
+
+    <!-- Floating line-info card -->
+    <div id="line-card">
+      <div class="card-row">
+        <input class="card-name" id="card-name-input" type="text" placeholder="Line name…">
+        <div class="card-color-wrap" id="card-color-wrap">
+          <div class="card-color-bg" id="card-color-bg"></div>
+          <input type="color" class="card-color-input" id="card-color-input">
+        </div>
+      </div>
+      <div id="card-stats" style="display:none">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div>
+            <div class="card-count" id="card-total">—</div>
+            <div class="card-count-label">vehicles crossed</div>
+          </div>
+          <div class="card-dir">
+            <span class="dir-pos" id="card-dir-pos">▲ —</span>
+            <span class="dir-neg" id="card-dir-neg">▼ —</span>
+          </div>
+        </div>
+        <div class="cls-bars" id="card-cls-bars"></div>
+      </div>
+      <div id="card-no-stats" style="font-size:11px;color:#4a5568;margin-top:4px">
+        No count data — run counts below.
+      </div>
+      <div class="card-actions">
+        <button class="card-btn" id="card-btn-dup">⧉ Duplicate</button>
+        <button class="card-btn del" id="card-btn-del">🗑 Delete</button>
+      </div>
+    </div>
+
+    <canvas id="c"></canvas>
+  </div>
+</div>
+
+<script>
+// ── Constants ─────────────────────────────────────────────────────────────────
+const CLS_COLORS = {
+  car:        [55,  138, 221],
+  truck:      [226, 75,  74],
+  bus:        [215, 90,  48],
+  motorcycle: [239, 159, 39],
+  bicycle:    [28,  158, 117],
+};
+const CLS_ORDER = ["car", "truck", "bus", "motorcycle", "bicycle"];
+const COLOR_TOL = 45;
+const MIN_LINE_PX = 30;
+const HANDLE_R = 8;
+const LABEL_OFFSET_Y = -16;
+
+// ── State ─────────────────────────────────────────────────────────────────────
+let props = null;             // last render props from Python
+let canvas = null;            // Fabric.js canvas instance
+let lineObjects = {};         // lineId → {line, h1, h2, label}
+let selectedLineId = null;
+let drawing = false;
+let drawMode = "drag";        // "drag" | "click"
+let drawColor = "#e24b4a";
+let drawA = null;             // first point in click-click mode
+let drawPreview = null;       // preview fabric.Line
+let drawClickGhost = null;    // ghost circle in click-click mode
+let heatmapOn = false;
+let activeClasses = new Set(CLS_ORDER);
+let bgOffscreen = null;       // offscreen canvas for compositing
+let bgImageEl = null;         // loaded background Image element
+let overlayImageEl = null;    // loaded overlay Image element
+let heatmapImageEl = null;
+let needsBgRebuild = false;
+
+// ── Streamlit bootstrap ───────────────────────────────────────────────────────
+function sendAction(payload) {
+  Streamlit.setComponentValue(payload);
+}
+
+window.addEventListener("message", function(e) {
+  if (e.data.type === "streamlit:render") {
+    onRender(e.data.args);
+  }
+});
+
+// Signal ready so Streamlit will call render
+function init() {
+  if (window.Streamlit) {
+    Streamlit.setFrameHeight(0);
+    Streamlit.setComponentReady();
+  } else {
+    setTimeout(init, 50);
+  }
+}
+init();
+
+// ── Main render handler ───────────────────────────────────────────────────────
+async function onRender(data) {
+  const firstRender = !props;
+  const prevProps = props;
+  props = data;
+
+  document.getElementById("loading").style.display = "none";
+  document.getElementById("canvas-container").style.display = "inline-block";
+
+  const W = data.canvas_width || 900;
+  const H = data.canvas_height || 500;
+
+  if (!canvas) {
+    initCanvas(W, H);
+  }
+
+  // Load images if URLs changed
+  const imageChanged = !prevProps
+    || prevProps.image_url !== data.image_url
+    || prevProps.overlay_url !== data.overlay_url;
+
+  if (imageChanged) {
+    [bgImageEl, overlayImageEl] = await Promise.all([
+      loadImage(data.image_url),
+      loadImage(data.overlay_url),
+    ]);
+    needsBgRebuild = true;
+  }
+
+  if (data.heatmap_url && data.heatmap_url !== (prevProps && prevProps.heatmap_url)) {
+    heatmapImageEl = await loadImage(data.heatmap_url).catch(() => null);
+    needsBgRebuild = true;
+  }
+
+  if (needsBgRebuild) {
+    rebuildBackground(W, H);
+    needsBgRebuild = false;
+  }
+
+  // Rebuild lines only when line set changed or version bumped
+  const linesChanged = !prevProps
+    || JSON.stringify(prevProps.lines) !== JSON.stringify(data.lines)
+    || prevProps.canvas_version !== data.canvas_version;
+
+  if (linesChanged) {
+    rebuildLines(data.lines, data.counts, data.scale);
+  } else if (prevProps && JSON.stringify(prevProps.counts) !== JSON.stringify(data.counts)) {
+    // Only counts changed — update labels in-place
+    updateLabels(data.lines, data.counts, data.scale);
+    // Refresh open card if it's showing a line
+    if (selectedLineId) positionCard(selectedLineId, data.scale);
+  }
+
+  Streamlit.setFrameHeight(H + 4);
+}
+
+// ── Canvas setup ──────────────────────────────────────────────────────────────
+function initCanvas(W, H) {
+  canvas = new fabric.Canvas("c", {
+    width: W,
+    height: H,
+    selection: false,
+    preserveObjectStacking: true,
+  });
+
+  // Click on canvas background → deselect
+  canvas.on("mouse:down", onCanvasMouseDown);
+  canvas.on("mouse:move", onCanvasMouseMove);
+  canvas.on("mouse:up", onCanvasMouseUp);
+  canvas.on("object:moving", onObjectMoving);
+  canvas.on("object:modified", onObjectModified);
+}
+
+// ── Background compositing ────────────────────────────────────────────────────
+function rebuildBackground(W, H) {
+  if (!bgImageEl) return;
+  bgOffscreen = document.createElement("canvas");
+  bgOffscreen.width = W;
+  bgOffscreen.height = H;
+  const ctx = bgOffscreen.getContext("2d");
+
+  // Base frame
+  ctx.drawImage(bgImageEl, 0, 0, W, H);
+
+  // Filtered trajectory overlay
+  if (overlayImageEl) {
+    const tmp = document.createElement("canvas");
+    tmp.width = W; tmp.height = H;
+    const tc = tmp.getContext("2d");
+    tc.drawImage(overlayImageEl, 0, 0, W, H);
+    const idata = tc.getImageData(0, 0, W, H);
+    filterOverlayPixels(idata, activeClasses);
+    tc.putImageData(idata, 0, 0);
+    ctx.drawImage(tmp, 0, 0);
+  }
+
+  // Heatmap if active
+  if (heatmapOn && heatmapImageEl) {
+    ctx.globalAlpha = 0.65;
+    ctx.drawImage(heatmapImageEl, 0, 0, W, H);
+    ctx.globalAlpha = 1.0;
+  }
+
+  fabric.Image.fromURL(bgOffscreen.toDataURL(), function(img) {
+    canvas.setBackgroundImage(img, canvas.renderAll.bind(canvas), {
+      scaleX: 1, scaleY: 1, originX: "left", originY: "top",
+    });
+  });
+}
+
+function filterOverlayPixels(idata, keep) {
+  const d = idata.data;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i+3] < 10) continue;
+    const r = d[i], g = d[i+1], b = d[i+2];
+    let ok = false;
+    for (const cls of keep) {
+      const [cr, cg, cb] = CLS_COLORS[cls];
+      if (Math.abs(r-cr) < COLOR_TOL && Math.abs(g-cg) < COLOR_TOL && Math.abs(b-cb) < COLOR_TOL) {
+        ok = true; break;
+      }
+    }
+    if (!ok) d[i+3] = 0;
+  }
+}
+
+// ── Line object helpers ───────────────────────────────────────────────────────
+function makeLineObjects(ln, counts, scale) {
+  const a = ln.points.a, b = ln.points.b;
+  const ax = a[0] * scale, ay = a[1] * scale;
+  const bx = b[0] * scale, by = b[1] * scale;
+  const color = ln.color || "#e24b4a";
+
+  const line = new fabric.Line([ax, ay, bx, by], {
+    stroke: color,
+    strokeWidth: 3,
+    selectable: false,
+    evented: true,
+    hoverCursor: "pointer",
+    _lineId: ln.id,
+    _isLineBody: true,
+  });
+
+  const h1 = new fabric.Circle({
+    radius: HANDLE_R,
+    fill: color,
+    stroke: "#fff",
+    strokeWidth: 2,
+    left: ax - HANDLE_R,
+    top: ay - HANDLE_R,
+    selectable: true,
+    hasBorders: false,
+    hasControls: false,
+    hoverCursor: "grab",
+    moveCursor: "grabbing",
+    _lineId: ln.id,
+    _endpoint: "a",
+  });
+
+  const h2 = new fabric.Circle({
+    radius: HANDLE_R,
+    fill: color,
+    stroke: "#fff",
+    strokeWidth: 2,
+    left: bx - HANDLE_R,
+    top: by - HANDLE_R,
+    selectable: true,
+    hasBorders: false,
+    hasControls: false,
+    hoverCursor: "grab",
+    moveCursor: "grabbing",
+    _lineId: ln.id,
+    _endpoint: "b",
+  });
+
+  const cinfo = counts && counts[ln.id];
+  const labelText = ln.name + (cinfo ? `  [${cinfo.total}]` : "");
+  const mx = (ax + bx) / 2, my = (ay + by) / 2;
+  const label = new fabric.Text(labelText, {
+    left: mx,
+    top: my + LABEL_OFFSET_Y,
+    fontSize: 12,
+    fontFamily: "Arial, sans-serif",
+    fill: color,
+    shadow: new fabric.Shadow({color: "rgba(0,0,0,0.9)", blur: 3, offsetX: 1, offsetY: 1}),
+    selectable: false,
+    evented: false,
+    originX: "center",
+    originY: "bottom",
+    _lineId: ln.id,
+    _isLabel: true,
+  });
+
+  // Click on line body selects it
+  line.on("mousedown", () => selectLine(ln.id));
+
+  return { line, h1, h2, label };
+}
+
+function rebuildLines(lines, counts, scale) {
+  // Remove old line objects
+  Object.values(lineObjects).forEach(({ line, h1, h2, label }) => {
+    canvas.remove(line, h1, h2, label);
+  });
+  lineObjects = {};
+
+  for (const ln of (lines || [])) {
+    const objs = makeLineObjects(ln, counts, scale);
+    lineObjects[ln.id] = objs;
+    canvas.add(objs.line, objs.label, objs.h1, objs.h2);
+  }
+  canvas.renderAll();
+
+  // Refresh card if selected line still exists
+  if (selectedLineId && lineObjects[selectedLineId]) {
+    positionCard(selectedLineId, scale);
+  } else if (selectedLineId) {
+    hideCard();
+  }
+}
+
+function updateLabels(lines, counts, scale) {
+  for (const ln of (lines || [])) {
+    const obj = lineObjects[ln.id];
+    if (!obj) continue;
+    const cinfo = counts && counts[ln.id];
+    obj.label.set("text", ln.name + (cinfo ? `  [${cinfo.total}]` : ""));
+  }
+  canvas.renderAll();
+}
+
+// ── Selection & card ──────────────────────────────────────────────────────────
+function selectLine(id) {
+  selectedLineId = id;
+  const line = props.lines.find(l => l.id === id);
+  if (!line) return;
+
+  const card = document.getElementById("line-card");
+  document.getElementById("card-name-input").value = line.name;
+
+  const bg = document.getElementById("card-color-bg");
+  bg.style.background = line.color;
+  document.getElementById("card-color-input").value = line.color;
+
+  const counts = props.counts;
+  const cinfo = counts && counts[id];
+  if (cinfo) {
+    document.getElementById("card-stats").style.display = "";
+    document.getElementById("card-no-stats").style.display = "none";
+    document.getElementById("card-total").textContent = cinfo.total;
+    document.getElementById("card-dir-pos").textContent = `▲ ${cinfo.by_direction?.positive || 0}`;
+    document.getElementById("card-dir-neg").textContent = `▼ ${cinfo.by_direction?.negative || 0}`;
+    renderClassBars(cinfo.by_class || {});
+  } else {
+    document.getElementById("card-stats").style.display = "none";
+    document.getElementById("card-no-stats").style.display = "";
+  }
+
+  positionCard(id, props.scale);
+  card.style.display = "block";
+}
+
+function positionCard(id, scale) {
+  const line = props.lines.find(l => l.id === id);
+  if (!line) return;
+  const a = line.points.a, b = line.points.b;
+  const mx = ((a[0] + b[0]) / 2) * scale;
+  const my = ((a[1] + b[1]) / 2) * scale;
+  const card = document.getElementById("line-card");
+  const W = canvas.width, H = canvas.height;
+  const cw = 240, ch = card.offsetHeight || 200;
+  let cx = mx + 14, cy = my - ch / 2;
+  if (cx + cw > W - 10) cx = mx - cw - 14;
+  if (cy < 8) cy = 8;
+  if (cy + ch > H - 8) cy = H - ch - 8;
+  card.style.left = cx + "px";
+  card.style.top = cy + "px";
+}
+
+function hideCard() {
+  selectedLineId = null;
+  document.getElementById("line-card").style.display = "none";
+}
+
+function renderClassBars(byClass) {
+  const container = document.getElementById("card-cls-bars");
+  const total = Object.values(byClass).reduce((s, v) => s + v, 0) || 1;
+  container.innerHTML = CLS_ORDER.map(cls => {
+    const n = byClass[cls] || 0;
+    const pct = (n / total * 100).toFixed(0);
+    const [r,g,b] = CLS_COLORS[cls];
+    const hex = `rgb(${r},${g},${b})`;
+    return `<div class="cls-bar-row">
+      <span class="cls-bar-label">${cls}</span>
+      <div class="cls-bar-track"><div class="cls-bar-fill" style="width:${pct}%;background:${hex}"></div></div>
+      <span class="cls-bar-val">${n}</span>
+    </div>`;
+  }).join("");
+}
+
+// ── Handle dragging ───────────────────────────────────────────────────────────
+function onObjectMoving(e) {
+  const obj = e.target;
+  if (!obj._lineId || !obj._endpoint) return;
+  const objs = lineObjects[obj._lineId];
+  if (!objs) return;
+  const cx = obj.left + HANDLE_R, cy = obj.top + HANDLE_R;
+  if (obj._endpoint === "a") {
+    objs.line.set({ x1: cx, y1: cy });
+  } else {
+    objs.line.set({ x2: cx, y2: cy });
+  }
+  // Update label position to midpoint
+  const mx = (objs.line.x1 + objs.line.x2) / 2;
+  const my = (objs.line.y1 + objs.line.y2) / 2;
+  objs.label.set({ left: mx, top: my + LABEL_OFFSET_Y });
+  canvas.renderAll();
+
+  // Move card if this line is selected
+  if (selectedLineId === obj._lineId) {
+    const scale = props.scale;
+    const card = document.getElementById("line-card");
+    const W = canvas.width;
+    const cw = 240;
+    let cardX = mx + 14, cardY = my - (card.offsetHeight || 200) / 2;
+    if (cardX + cw > W - 10) cardX = mx - cw - 14;
+    if (cardY < 8) cardY = 8;
+    card.style.left = cardX + "px";
+    card.style.top = cardY + "px";
+  }
+}
+
+function onObjectModified(e) {
+  const obj = e.target;
+  if (!obj._lineId || !obj._endpoint) return;
+  const objs = lineObjects[obj._lineId];
+  if (!objs) return;
+  const scale = props.scale;
+  const a = [objs.line.x1 / scale, objs.line.y1 / scale];
+  const b = [objs.line.x2 / scale, objs.line.y2 / scale];
+  sendAction({ type: "move", line_id: obj._lineId, a, b });
+}
+
+// ── Draw mode ─────────────────────────────────────────────────────────────────
+function onCanvasMouseDown(e) {
+  if (!drawing) {
+    // Deselect if clicking canvas background (not a line or handle)
+    const target = canvas.findTarget(e.e);
+    if (!target || (!target._isLineBody && !target._endpoint)) {
+      hideCard();
+    }
+    return;
+  }
+
+  const p = canvas.getPointer(e.e);
+
+  if (drawMode === "drag") {
+    drawA = p;
+  } else {
+    // click-click mode
+    if (!drawA) {
+      drawA = p;
+      drawClickGhost = new fabric.Circle({
+        radius: 5, fill: drawColor, stroke: "#fff", strokeWidth: 2,
+        left: p.x - 5, top: p.y - 5,
+        selectable: false, evented: false,
+      });
+      canvas.add(drawClickGhost);
+      // Start preview line
+      drawPreview = new fabric.Line([p.x, p.y, p.x, p.y], {
+        stroke: drawColor, strokeWidth: 2, strokeDashArray: [6, 3],
+        selectable: false, evented: false, opacity: 0.7,
+      });
+      canvas.add(drawPreview);
+    } else {
+      // Second click — commit
+      finishDraw(drawA, p);
+    }
+  }
+}
+
+function onCanvasMouseMove(e) {
+  if (!drawing) return;
+  const p = canvas.getPointer(e.e);
+  if (drawMode === "drag" && drawA) {
+    if (!drawPreview) {
+      drawPreview = new fabric.Line([drawA.x, drawA.y, p.x, p.y], {
+        stroke: drawColor, strokeWidth: 2, strokeDashArray: [6, 3],
+        selectable: false, evented: false, opacity: 0.7,
+      });
+      canvas.add(drawPreview);
+    } else {
+      drawPreview.set({ x2: p.x, y2: p.y });
+      canvas.renderAll();
+    }
+  } else if (drawMode === "click" && drawA && drawPreview) {
+    drawPreview.set({ x2: p.x, y2: p.y });
+    canvas.renderAll();
+  }
+}
+
+function onCanvasMouseUp(e) {
+  if (!drawing || drawMode !== "drag") return;
+  if (!drawA) return;
+  const p = canvas.getPointer(e.e);
+  finishDraw(drawA, p);
+  drawA = null;
+}
+
+function finishDraw(a, b) {
+  // Remove preview artifacts
+  if (drawPreview) { canvas.remove(drawPreview); drawPreview = null; }
+  if (drawClickGhost) { canvas.remove(drawClickGhost); drawClickGhost = null; }
+  drawA = null;
+
+  const dx = b.x - a.x, dy = b.y - a.y;
+  if (Math.sqrt(dx*dx + dy*dy) < MIN_LINE_PX) return;
+
+  const scale = props.scale;
+  sendAction({
+    type: "create",
+    a: [a.x / scale, a.y / scale],
+    b: [b.x / scale, b.y / scale],
+    color: drawColor,
+  });
+
+  // Exit draw mode after one line (user can click Add again for more)
+  setDrawing(false);
+}
+
+function setDrawing(on) {
+  drawing = on;
+  const cc = document.getElementById("canvas-container");
+  const btn = document.getElementById("btn-draw");
+  const sub = document.getElementById("draw-sub");
+  if (on) {
+    cc.classList.add("draw-cursor");
+    canvas.defaultCursor = "crosshair";
+    canvas.hoverCursor = "crosshair";
+    btn.classList.add("active");
+    sub.style.display = "flex";
+  } else {
+    cc.classList.remove("draw-cursor");
+    canvas.defaultCursor = "default";
+    canvas.hoverCursor = "move";
+    btn.classList.remove("active");
+    sub.style.display = "none";
+    // Clean up any dangling preview
+    if (drawPreview) { canvas.remove(drawPreview); drawPreview = null; }
+    if (drawClickGhost) { canvas.remove(drawClickGhost); drawClickGhost = null; }
+    drawA = null;
+  }
+}
+
+// ── Keyboard shortcuts ────────────────────────────────────────────────────────
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") {
+    if (drawing) setDrawing(false);
+    else hideCard();
+  }
+  if ((e.key === "Delete" || e.key === "Backspace") && selectedLineId) {
+    // Prevent accidental deletes from text inputs
+    if (document.activeElement.tagName === "INPUT") return;
+    confirmDelete(selectedLineId);
+  }
+});
+
+function confirmDelete(id) {
+  const line = props && props.lines.find(l => l.id === id);
+  if (!line) return;
+  sendAction({ type: "delete", line_id: id });
+  hideCard();
+}
+
+// ── Image loading helper ──────────────────────────────────────────────────────
+function loadImage(url) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  });
+}
+
+// ── Toolbar wiring ────────────────────────────────────────────────────────────
+document.getElementById("btn-draw").addEventListener("click", () => {
+  setDrawing(!drawing);
+});
+
+document.getElementById("btn-cancel-draw").addEventListener("click", () => {
+  setDrawing(false);
+});
+
+document.getElementById("btn-drag-mode").addEventListener("click", () => {
+  drawMode = "drag";
+  document.getElementById("btn-drag-mode").classList.add("active");
+  document.getElementById("btn-click-mode").classList.remove("active");
+});
+
+document.getElementById("btn-click-mode").addEventListener("click", () => {
+  drawMode = "click";
+  document.getElementById("btn-click-mode").classList.add("active");
+  document.getElementById("btn-drag-mode").classList.remove("active");
+});
+
+// Draw color swatch
+const drawSwatch = document.getElementById("draw-swatch");
+const drawColorInput = document.getElementById("draw-color-input");
+drawSwatch.style.background = drawColor;
+drawSwatch.addEventListener("click", () => drawColorInput.click());
+drawColorInput.addEventListener("input", e => {
+  drawColor = e.target.value;
+  drawSwatch.style.background = drawColor;
+  if (drawPreview) drawPreview.set("stroke", drawColor);
+});
+
+// Heatmap toggle
+document.getElementById("btn-heatmap").addEventListener("click", () => {
+  heatmapOn = !heatmapOn;
+  document.getElementById("btn-heatmap").classList.toggle("active", heatmapOn);
+  if (props) {
+    needsBgRebuild = true;
+    rebuildBackground(canvas.width, canvas.height);
+  }
+});
+
+// Class filter chips
+document.querySelectorAll(".cls-chip").forEach(chip => {
+  chip.addEventListener("click", () => {
+    const cls = chip.dataset.cls;
+    if (activeClasses.has(cls)) {
+      if (activeClasses.size === 1) return; // keep at least one
+      activeClasses.delete(cls);
+      chip.classList.add("off");
+    } else {
+      activeClasses.add(cls);
+      chip.classList.remove("off");
+    }
+    if (props) {
+      needsBgRebuild = true;
+      rebuildBackground(canvas.width, canvas.height);
+    }
+  });
+});
+
+// ── Line card wiring ──────────────────────────────────────────────────────────
+// Name rename on Enter or blur
+const nameInput = document.getElementById("card-name-input");
+nameInput.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    e.target.blur();
+  }
+});
+nameInput.addEventListener("blur", () => {
+  if (!selectedLineId) return;
+  const line = props.lines.find(l => l.id === selectedLineId);
+  if (!line) return;
+  const newName = nameInput.value.trim();
+  if (newName && newName !== line.name) {
+    sendAction({ type: "rename", line_id: selectedLineId, name: newName });
+  }
+});
+
+// Color picker
+const cardColorInput = document.getElementById("card-color-input");
+cardColorInput.addEventListener("input", e => {
+  document.getElementById("card-color-bg").style.background = e.target.value;
+  // Live update line color in canvas
+  if (selectedLineId) {
+    const objs = lineObjects[selectedLineId];
+    if (objs) {
+      objs.line.set("stroke", e.target.value);
+      objs.h1.set("fill", e.target.value);
+      objs.h2.set("fill", e.target.value);
+      objs.label.set("fill", e.target.value);
+      canvas.renderAll();
+    }
+  }
+});
+cardColorInput.addEventListener("change", e => {
+  if (!selectedLineId) return;
+  sendAction({ type: "color", line_id: selectedLineId, color: e.target.value });
+});
+
+// Duplicate button
+document.getElementById("card-btn-dup").addEventListener("click", () => {
+  if (!selectedLineId) return;
+  sendAction({ type: "duplicate", line_id: selectedLineId });
+  hideCard();
+});
+
+// Delete button
+document.getElementById("card-btn-del").addEventListener("click", () => {
+  if (!selectedLineId) return;
+  sendAction({ type: "delete", line_id: selectedLineId });
+  hideCard();
+});
+</script>
+</body>
+</html>

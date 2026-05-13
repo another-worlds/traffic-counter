@@ -1,3 +1,7 @@
+x-buildkit: &buildkit
+  args:
+    BUILDKIT_INLINE_CACHE: "1"
+
 services:
   db:
     image: postgres:16
@@ -17,16 +21,21 @@ services:
   api:
     build:
       context: ./api
+      <<: *buildkit
     environment:
       DATABASE_URL: postgresql+psycopg://traffic:traffic@db:5432/traffic
       STORAGE_BACKEND: local
       LOCAL_STORAGE_ROOT: /data
       JOB_RUNNER: local
       ENV: dev
+      YADISK_ROOT: /yadisk
     ports: ["8000:8000"]
     volumes:
       - storage:/data
       - ./api:/app
+      # Yandex.Disk sync folder — set YADISK_HOST_PATH in your shell or .env
+      # e.g.  YADISK_HOST_PATH=/home/user/Yandex.Disk
+      - ${YADISK_HOST_PATH:-/tmp/yadisk-placeholder}:/yadisk:ro
     depends_on:
       db:
         condition: service_healthy
@@ -34,6 +43,7 @@ services:
   worker:
     build:
       context: ./worker
+      <<: *buildkit
     runtime: nvidia
     environment:
       DATABASE_URL: postgresql+psycopg://traffic:traffic@db:5432/traffic
@@ -64,6 +74,7 @@ services:
   frontend:
     build:
       context: ./frontend
+      <<: *buildkit
     environment:
       API_URL: http://api:8000
       STREAMLIT_SERVER_MAX_UPLOAD_SIZE: "10240"

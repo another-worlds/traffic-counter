@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     gcp_region: str = "europe-west4"
     worker_job_name: str = "traffic-counter-worker"
 
+    # Yandex.Disk integration
+    yadisk_root: str = ""  # absolute path inside the container, e.g. /yadisk
+
     # Misc
     env: Literal["dev", "prod"] = "dev"
     cors_origins: str = "*"

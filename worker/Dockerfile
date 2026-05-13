@@ -15,11 +15,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY requirements.txt .
-# ultralytics pulls in opencv-python (full GUI build, ~90 MB) as a transitive
-# dependency even though we only need the headless variant.  Remove it after
-# the normal install so only opencv-python-headless remains in the image.
+# ultralytics pulls in opencv-python (full GUI build) as a transitive dep,
+# which overwrites our headless install because they share the cv2 namespace.
+# Correct sequence: install everything, evict the GUI build, reinstall headless.
 RUN pip install --no-cache-dir -r requirements.txt \
- && pip uninstall -y opencv-python 2>/dev/null || true
+ && pip uninstall -y opencv-python 2>/dev/null || true \
+ && pip install --no-cache-dir opencv-python-headless==4.10.0.84
 
 COPY . .
 

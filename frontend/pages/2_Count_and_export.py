@@ -17,6 +17,7 @@ Features:
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import math
@@ -252,13 +253,19 @@ def _line_endpoints_from_fabric(obj: dict) -> Tuple[Tuple[float, float], Tuple[f
 
 
 def _saved_lines_to_fabric(lines: List[Dict], scale: float) -> dict:
-    """Build an ``initial_drawing`` JSON blob for st_canvas from saved lines."""
+    """Build an ``initial_drawing`` JSON blob for st_canvas from saved lines.
+
+    Each line is accompanied by a non-interactive Fabric.js Text object showing
+    its name and current count, so labels are always visible as live vector
+    objects without baking anything into the background image.
+    """
     objects = []
     for ln in lines:
         a = ln["points"]["a"]
         b = ln["points"]["b"]
         ax, ay = a[0] * scale, a[1] * scale
         bx, by = b[0] * scale, b[1] * scale
+        color = ln.get("color", "#e24b4a")
         objects.append({
             "type": "line",
             "version": "5.3.0",
@@ -272,12 +279,36 @@ def _saved_lines_to_fabric(lines: List[Dict], scale: float) -> dict:
             "y1": 0 if ay <= by else abs(by - ay),
             "x2": abs(bx - ax) if ax <= bx else 0,
             "y2": abs(by - ay) if ay <= by else 0,
-            "stroke": ln.get("color", "#e24b4a"),
+            "stroke": color,
             "strokeWidth": 3,
             "selectable": True,
             "evented": True,
             # Custom field — preserved by the canvas JSON roundtrip
             "_line_id": ln["id"],
+        })
+        # Text label — name + count, centred on the line.
+        # Non-interactive so it doesn't interfere with line dragging.
+        cinfo = counts_by_id.get(ln["id"])
+        label = ln["name"] + (f"  [{cinfo['total']}]" if cinfo else "")
+        cx_lbl = (ax + bx) / 2
+        cy_lbl = (ay + by) / 2 - 16
+        objects.append({
+            "type": "text",
+            "version": "5.3.0",
+            "originX": "left",
+            "originY": "top",
+            "left": cx_lbl,
+            "top": cy_lbl,
+            "text": label,
+            "fontSize": 13,
+            "fontFamily": "Arial, sans-serif",
+            "fill": color,
+            "shadow": {"color": "rgba(0,0,0,0.85)", "blur": 3, "offsetX": 1, "offsetY": 1},
+            "selectable": False,
+            "evented": False,
+            "hasControls": False,
+            "hasBorders": False,
+            "_line_label": ln["id"],
         })
     return {"version": "5.3.0", "objects": objects}
 
@@ -309,7 +340,7 @@ with col_canvas:
         else:
             if st.button("✏️ Add line", use_container_width=True, type="primary"):
                 st.session_state["drawing_new_line"] = True
-                # Don't bump canvas_version — keeps in-flight drag edits alive
+                st.session_state["canvas_version"] += 1  # remount in draw mode
                 st.rerun()
 
     with tb3:
@@ -347,142 +378,130 @@ with col_canvas:
     ):
         canvas_bg = _draw_busy_zone(canvas_bg, _preview_stats["busy_zone"])
 
-    # ── Canvas: draw mode XOR transform mode, never both ─────────────────────
-    if st.session_state["drawing_new_line"]:
-        # ── DRAW mode ────────────────────────────────────────────────────────
-        color_col, hint_col = st.columns([1, 4])
-        with color_col:
-            new_color = st.color_picker(
-                "Stroke",
-                value=st.session_state["drawing_color"],
-                key="color_picker_draw",
-                label_visibility="collapsed",
-            )
-            st.session_state["drawing_color"] = new_color
-        with hint_col:
-            st.caption("Click and drag to draw a line, then name it and hit **Save**.")
+    # ── Unified canvas ────────────────────────────────────────────────────────
+    # One Fabric.js canvas that switches between draw mode (add a new line) and
+    # transform mode (drag/select existing lines).  Version bumps on mode
+    # switches so Fabric.js re-mounts cleanly.  In transform mode, position
+    # changes are detected and persisted automatically — no save button needed.
+    _drawing = st.session_state["drawing_new_line"]
+    _canvas_key = f"canvas_{preview_video['id']}_v{st.session_state['canvas_version']}"
 
-        draw_result = st_canvas(
+    if _drawing:
+        st.caption(
+            "🖊 **Draw mode** — click and drag to place a new counting line. "
+            "Release when done; it will be saved automatically."
+        )
+        canvas_result = st_canvas(
             fill_color="rgba(0,0,0,0)",
             stroke_width=3,
             stroke_color=st.session_state["drawing_color"],
+            # Bake existing lines into background so they're visible as reference
             background_image=_bake_lines_on_image(canvas_bg, saved_lines, scale),
             update_streamlit=True,
             height=canvas_h,
             width=canvas_w,
             drawing_mode="line",
-            key=f"canvas_draw_{preview_video['id']}_v{st.session_state['canvas_version']}",
+            key=_canvas_key,
         )
 
-        drawn = []
-        if draw_result.json_data and draw_result.json_data.get("objects"):
-            for obj in draw_result.json_data["objects"]:
-                if obj.get("type") == "line":
-                    (ax, ay), (bx, by) = _line_endpoints_from_fabric(obj)
-                    drawn.append({
-                        "a": (ax / scale, ay / scale),
-                        "b": (bx / scale, by / scale),
-                    })
-
-        if drawn:
-            st.markdown("**Save new line(s):**")
-            for i, d in enumerate(drawn):
-                with st.container(border=True):
-                    c1, c2, c3 = st.columns([3, 2, 1])
-                    with c1:
-                        st.caption(
-                            f"({d['a'][0]:.0f}, {d['a'][1]:.0f}) → "
-                            f"({d['b'][0]:.0f}, {d['b'][1]:.0f})"
-                        )
-                    with c2:
-                        name_val = st.text_input(
-                            "Name",
-                            value=f"line {len(saved_lines) + i + 1}",
-                            key=f"new_name_{i}",
-                            label_visibility="collapsed",
-                        )
-                    with c3:
-                        if st.button("Save", key=f"save_new_{i}", type="primary"):
-                            api.create_line(
-                                ws["id"], name_val,
-                                d["a"][0], d["a"][1], d["b"][0], d["b"][1],
-                                color=st.session_state["drawing_color"],
-                            )
-                            st.session_state["drawing_new_line"] = False
-                            st.session_state["canvas_version"] += 1
-                            st.session_state["needs_recount"] = True
-                            st.toast(f"Line **{name_val}** saved!", icon="✅")
-                            st.rerun()
+        # Auto-save: as soon as a line of meaningful length is detected,
+        # name it automatically and switch back to transform mode.
+        if canvas_result.json_data:
+            for _obj in canvas_result.json_data.get("objects", []):
+                if _obj.get("type") != "line":
+                    continue
+                (_ax, _ay), (_bx, _by) = _line_endpoints_from_fabric(_obj)
+                if math.hypot(_bx - _ax, _by - _ay) < 30:
+                    continue  # too short — mid-drag or accidental tap
+                _auto_name = f"line {len(saved_lines) + 1}"
+                api.create_line(
+                    ws["id"], _auto_name,
+                    _ax / scale, _ay / scale,
+                    _bx / scale, _by / scale,
+                    color=st.session_state["drawing_color"],
+                )
+                st.session_state["drawing_new_line"] = False
+                st.session_state["canvas_version"] += 1
+                st.session_state["needs_recount"] = True
+                st.toast(
+                    f"**{_auto_name}** added — rename it in the panel →",
+                    icon="✅",
+                )
+                st.rerun()
+                break  # one line per rerun
 
     else:
-        # ── TRANSFORM mode ────────────────────────────────────────────────────
         st.caption(
-            "Drag any line to reposition it, then click **Apply edits** to persist. "
-            "Use the 🗑 buttons in the right panel to delete individual lines."
+            "Drag any line or its endpoint handles to reposition it — "
+            "changes are saved automatically."
         )
-        initial_drawing = _saved_lines_to_fabric(saved_lines, scale)
         canvas_result = st_canvas(
             fill_color="rgba(0,0,0,0)",
             stroke_width=3,
             stroke_color="#ffffff",
             background_image=canvas_bg,
-            initial_drawing=initial_drawing,
+            initial_drawing=_saved_lines_to_fabric(saved_lines, scale),
             update_streamlit=True,
             height=canvas_h,
             width=canvas_w,
             drawing_mode="transform",
-            key=f"canvas_edit_{preview_video['id']}_v{st.session_state['canvas_version']}",
+            key=_canvas_key,
         )
 
-        # Apply edits: moves only. Deletions are NOT inferred from absent
-        # objects — canvas_result.json_data is None until the browser hydrates
-        # the canvas, so treating that as "deleted" would wipe all lines.
-        c_apply, c_refresh = st.columns(2)
-        with c_apply:
-            if st.button("✅ Apply edits", use_container_width=True, type="primary"):
-                if not canvas_result.json_data:
-                    st.toast("Drag a line first, then apply.", icon="⚠️")
-                else:
-                    db_pts = {
-                        ln["id"]: (
-                            (ln["points"]["a"][0] * scale, ln["points"]["a"][1] * scale),
-                            (ln["points"]["b"][0] * scale, ln["points"]["b"][1] * scale),
-                        )
-                        for ln in saved_lines
-                    }
-                    updated = 0
-                    for obj in canvas_result.json_data.get("objects", []):
-                        if obj.get("type") != "line":
-                            continue
-                        lid = obj.get("_line_id")
-                        if not lid or lid not in db_pts:
-                            continue
-                        (ax, ay), (bx, by) = _line_endpoints_from_fabric(obj)
-                        (oax, oay), (obx, oby) = db_pts[lid]
-                        if (
-                            abs(ax - oax) > 1 or abs(ay - oay) > 1
-                            or abs(bx - obx) > 1 or abs(by - oby) > 1
-                        ):
-                            api.update_line(
-                                lid,
-                                points={
-                                    "a": [ax / scale, ay / scale],
-                                    "b": [bx / scale, by / scale],
-                                },
-                            )
-                            updated += 1
-                    if updated:
-                        st.session_state["canvas_version"] += 1
-                        st.session_state["needs_recount"] = True
-                        st.toast(f"Saved {updated} line position(s).", icon="✅")
-                        st.rerun()
-                    else:
-                        st.toast("No position changes detected.", icon="ℹ️")
+        # ── Auto-save moves ───────────────────────────────────────────────────
+        # Compare incoming canvas JSON to the last state we already persisted.
+        # Only call the API when something actually changed (content-hash gate),
+        # and rate-limit to at most once per 300 ms so rapid drag events don't
+        # flood the backend.
+        _hash_key = f"_ch_{preview_video['id']}"
+        _time_key = f"_ct_{preview_video['id']}"
+        if canvas_result.json_data:
+            _raw = json.dumps(canvas_result.json_data, sort_keys=True)
+            _cur_hash = hashlib.md5(_raw.encode()).hexdigest()
+            _last_hash = st.session_state.get(_hash_key)
+            _last_t = st.session_state.get(_time_key, 0.0)
 
-        with c_refresh:
-            if st.button("🔄 Refresh canvas", use_container_width=True):
-                st.session_state["canvas_version"] += 1
-                st.rerun()
+            if _cur_hash != _last_hash and (time.time() - _last_t) > 0.3:
+                st.session_state[_hash_key] = _cur_hash
+                st.session_state[_time_key] = time.time()
+                _db_pts = {
+                    ln["id"]: (
+                        (ln["points"]["a"][0] * scale, ln["points"]["a"][1] * scale),
+                        (ln["points"]["b"][0] * scale, ln["points"]["b"][1] * scale),
+                    )
+                    for ln in saved_lines
+                }
+                _updated = 0
+                for _obj in canvas_result.json_data.get("objects", []):
+                    if _obj.get("type") != "line":
+                        continue
+                    _lid = _obj.get("_line_id")
+                    if not _lid or _lid not in _db_pts:
+                        continue
+                    (_ax, _ay), (_bx, _by) = _line_endpoints_from_fabric(_obj)
+                    (_oax, _oay), (_obx, _oby) = _db_pts[_lid]
+                    if (
+                        abs(_ax - _oax) > 1 or abs(_ay - _oay) > 1
+                        or abs(_bx - _obx) > 1 or abs(_by - _oby) > 1
+                    ):
+                        api.update_line(
+                            _lid,
+                            points={
+                                "a": [_ax / scale, _ay / scale],
+                                "b": [_bx / scale, _by / scale],
+                            },
+                        )
+                        _updated += 1
+                if _updated:
+                    st.session_state["needs_recount"] = True
+                    # Don't bump canvas_version or rerun — the canvas stays
+                    # live with the user's current Fabric.js state.
+
+        # Refresh button: manual escape hatch if canvas drifts out of sync
+        if st.button("🔄 Refresh canvas", use_container_width=True):
+            st.session_state.pop(_hash_key, None)
+            st.session_state["canvas_version"] += 1
+            st.rerun()
 
     # ── Presets & Import/Export ───────────────────────────────────────────────
     with st.expander("📐 Quick presets"):

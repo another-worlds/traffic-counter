@@ -130,6 +130,82 @@ def get_heatmap_url(video_id: str, db: Session = Depends(get_db)):
     return {"url": storage.signed_url(k, expires_minutes=60)}
 
 
+@router.get("/videos/{video_id}/track-stats")
+def get_track_stats(video_id: str, db: Session = Depends(get_db)):
+    """Aggregate statistics derived from track data for a single analyzed video."""
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "video not found")
+    if v.status != "analyzed":
+        raise HTTPException(409, "video must be analyzed first")
+
+    import numpy as np
+    from ..services.tracks import load_tracks_for_video
+    from ..services.suggest import GRID_N
+
+    df = load_tracks_for_video(v.project_id, v.id)
+
+    _NAMES = {1: "bicycle", 2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
+    _empty = {"total_tracks": 0, "by_class": {}, "busy_zone": None,
+              "avg_track_frames": 0.0,
+              "direction_bins": {"right": 0, "left": 0, "up": 0, "down": 0}}
+    if df.empty:
+        return _empty
+
+    # ── by_class: modal class per track ──────────────────────────────────────
+    modal_cls = df.groupby("track_id")["class_id"].agg(lambda x: int(x.mode().iloc[0]))
+    by_class: dict = {}
+    for cls_id, cnt in modal_cls.value_counts().items():
+        by_class[_NAMES.get(int(cls_id), f"class_{cls_id}")] = int(cnt)
+
+    # ── avg track length (frames) ─────────────────────────────────────────────
+    avg_frames = float(df.groupby("track_id").size().mean())
+
+    # ── busiest zone via density grid ────────────────────────────────────────
+    W = float(v.width or 1920)
+    H = float(v.height or 1080)
+    cell_w, cell_h = W / GRID_N, H / GRID_N
+    col_arr = (df["cx"].to_numpy(dtype=np.float32) / cell_w).clip(0, GRID_N - 1).astype(int)
+    row_arr = (df["cy"].to_numpy(dtype=np.float32) / cell_h).clip(0, GRID_N - 1).astype(int)
+    cell_ids = row_arr * GRID_N + col_arr
+    counts_arr = np.bincount(cell_ids, minlength=GRID_N * GRID_N)
+    best = int(counts_arr.argmax())
+    br, bc = divmod(best, GRID_N)
+    busy_zone = {
+        "cx_pct": (bc + 0.5) * cell_w / W,
+        "cy_pct": (br + 0.5) * cell_h / H,
+        "r_pct": max(cell_w, cell_h) * 0.6 / max(W, H),
+    }
+
+    # ── direction bins ────────────────────────────────────────────────────────
+    agg = (
+        df.sort_values("frame_idx")
+        .groupby("track_id")
+        .agg(
+            cx_first=("cx", "first"), cy_first=("cy", "first"),
+            cx_last=("cx", "last"),  cy_last=("cy", "last"),
+        )
+    )
+    dx = (agg["cx_last"] - agg["cx_first"]).to_numpy(dtype=np.float32)
+    dy = (agg["cy_last"] - agg["cy_first"]).to_numpy(dtype=np.float32)
+    moving = np.hypot(dx, dy) > 5
+    dx, dy = dx[moving], dy[moving]
+    bins: dict = {"right": 0, "left": 0, "up": 0, "down": 0}
+    for _dx, _dy in zip(dx.tolist(), dy.tolist()):
+        if abs(_dx) >= abs(_dy):
+            bins["right" if _dx > 0 else "left"] += 1
+        else:
+            bins["down" if _dy > 0 else "up"] += 1
+
+    return {
+        "total_tracks": int(df["track_id"].nunique()),
+        "by_class": by_class,
+        "busy_zone": busy_zone,
+        "avg_track_frames": round(avg_frames, 1),
+        "direction_bins": bins,
+    }
+
+
 @router.delete("/videos/{video_id}", status_code=204)
 def delete_video(video_id: str, db: Session = Depends(get_db)):
     v = db.get(Video, video_id)

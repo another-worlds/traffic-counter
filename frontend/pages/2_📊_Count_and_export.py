@@ -22,6 +22,7 @@ import colorsys
 from typing import Dict, List, Optional, Tuple
 
 import httpx
+import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
 from streamlit_drawable_canvas import st_canvas
@@ -55,6 +56,12 @@ if "suggest_results" not in st.session_state:
     st.session_state["suggest_results"] = None
 if "suggest_open" not in st.session_state:
     st.session_state["suggest_open"] = False
+if "track_stats_cache" not in st.session_state:
+    st.session_state["track_stats_cache"] = {}
+if "active_classes" not in st.session_state:
+    st.session_state["active_classes"] = ["car", "truck", "bus", "motorcycle", "bicycle"]
+if "show_busy_zone" not in st.session_state:
+    st.session_state["show_busy_zone"] = False
 
 # ── Video selection ───────────────────────────────────────────────────────────
 videos = [v for v in api.list_videos(ws["id"]) if v["status"] == "analyzed"]
@@ -86,6 +93,56 @@ def fetch_image(url: str) -> Image.Image:
     r.raise_for_status()
     return Image.open(io.BytesIO(r.content)).convert("RGBA")
 
+
+# ── Track-overlay class palette (must match worker/pipeline.py) ───────────────
+_TRACK_COLORS = {
+    "car":        (55, 138, 221),
+    "truck":      (226, 75, 74),
+    "bus":        (215, 90, 48),
+    "motorcycle": (239, 159, 39),
+    "bicycle":    (28, 158, 117),
+}
+_ALL_CLASSES = list(_TRACK_COLORS.keys())
+_COLOR_TOL = 45  # per-channel pixel tolerance for class colour matching
+
+
+def _filter_overlay(overlay_img: Image.Image, keep_classes: tuple) -> Image.Image:
+    """Return the trajectory overlay with only *keep_classes* tracks visible."""
+    if not keep_classes or set(keep_classes) >= set(_ALL_CLASSES):
+        return overlay_img
+    arr = np.array(overlay_img.convert("RGBA"), dtype=np.int16)
+    mask = np.zeros(arr.shape[:2], dtype=bool)
+    for cls in keep_classes:
+        r0, g0, b0 = _TRACK_COLORS[cls]
+        mask |= (
+            (np.abs(arr[:, :, 0] - r0) < _COLOR_TOL)
+            & (np.abs(arr[:, :, 1] - g0) < _COLOR_TOL)
+            & (np.abs(arr[:, :, 2] - b0) < _COLOR_TOL)
+            & (arr[:, :, 3] > 10)
+        )
+    result = arr.copy()
+    result[~mask, 3] = 0
+    return Image.fromarray(result.astype(np.uint8), mode="RGBA")
+
+
+def _draw_busy_zone(img: Image.Image, busy_zone: dict) -> Image.Image:
+    """Draw a glowing ellipse over the densest trajectory area."""
+    out = img.copy().convert("RGBA")
+    draw = ImageDraw.Draw(out, "RGBA")
+    w, h = out.size
+    cx = int(busy_zone["cx_pct"] * w)
+    cy = int(busy_zone["cy_pct"] * h)
+    r  = int(busy_zone["r_pct"] * max(w, h))
+    for ring_r, alpha in [(r + 16, 20), (r + 8, 45), (r + 2, 80)]:
+        draw.ellipse(
+            [(cx - ring_r, cy - ring_r), (cx + ring_r, cy + ring_r)],
+            outline=(255, 220, 0, alpha),
+            width=3,
+        )
+    draw.ellipse([(cx - r, cy - r), (cx + r, cy + r)], fill=(255, 220, 0, 20))
+    return out
+
+
 with st.spinner("Loading frame…"):
     frame_url = api.get_frame_url(preview_video["id"])
     traj_url = api.get_trajectories_url(preview_video["id"])
@@ -95,7 +152,9 @@ with st.spinner("Loading frame…"):
     bg = fetch_image(api.file_url(frame_url))
     overlay = fetch_image(api.file_url(traj_url))
 
-composite = Image.alpha_composite(bg, overlay.resize(bg.size))
+_active_classes = tuple(sorted(st.session_state.get("active_classes", _ALL_CLASSES)))
+_filtered_ov = _filter_overlay(overlay, _active_classes)
+composite = Image.alpha_composite(bg, _filtered_ov.resize(bg.size))
 src_w, src_h = composite.size
 canvas_w = min(900, src_w)
 scale = canvas_w / src_w
@@ -125,6 +184,17 @@ if st.session_state["needs_recount"] and saved_lines:
     _run_counts_silently()
 
 counts_by_id: Dict = st.session_state.get("counts") or {}
+
+# ── Pre-fetch track stats (cached; used for busy-zone overlay + stats panel) ───
+_stats_cache = st.session_state.setdefault("track_stats_cache", {})
+if preview_video["id"] not in _stats_cache:
+    try:
+        _s = api.track_stats(preview_video["id"])
+        if _s:
+            _stats_cache[preview_video["id"]] = _s
+    except Exception:
+        pass
+_preview_stats: Optional[Dict] = _stats_cache.get(preview_video["id"])
 
 
 # ── Background composer: bake saved lines + labels into a PIL image ───────────
@@ -235,6 +305,14 @@ with col_canvas:
         else:
             with hm_col:
                 st.caption("Not ready")
+
+    # Apply busy-zone highlight on top of heatmap (re-read session state each render)
+    if (
+        st.session_state.get("show_busy_zone")
+        and _preview_stats
+        and _preview_stats.get("busy_zone")
+    ):
+        canvas_bg = _draw_busy_zone(canvas_bg, _preview_stats["busy_zone"])
 
     # Mode toggle
     with mode_col:
@@ -456,6 +534,81 @@ with col_canvas:
                     st.rerun()
             except Exception as e:
                 st.error(f"Invalid JSON: {e}")
+
+    # ── Track statistics & class filter ──────────────────────────────────────
+    with st.expander("📊 Track statistics & class filter"):
+        if not _preview_stats:
+            st.caption("Statistics unavailable — video must be analyzed first.")
+        else:
+            by_cls  = _preview_stats.get("by_class", {})
+            avg_f   = _preview_stats.get("avg_track_frames", 0.0)
+            dirs    = _preview_stats.get("direction_bins", {})
+            total_t = _preview_stats["total_tracks"]
+
+            dom_cls = max(by_cls, key=by_cls.get) if by_cls else "—"
+            dom_dir = max(dirs, key=dirs.get) if dirs else "—"
+            _dir_sym = {"right": "→", "left": "←", "up": "↑", "down": "↓"}
+
+            # Overview metrics
+            sm1, sm2, sm3, sm4 = st.columns(4)
+            sm1.metric("Total tracks", total_t)
+            sm2.metric("Dominant type", dom_cls)
+            sm3.metric("Avg length", f"{avg_f:.0f} fr")
+            sm4.metric("Main direction", _dir_sym.get(dom_dir, dom_dir))
+
+            # Class breakdown bars
+            st.markdown("**Counts by vehicle type:**")
+            cls_total = sum(by_cls.values()) or 1
+            for cls_name in _ALL_CLASSES:
+                cnt = by_cls.get(cls_name, 0)
+                pct = 100.0 * cnt / cls_total
+                rgb = _TRACK_COLORS.get(cls_name, (180, 180, 180))
+                color_hex = "#{:02x}{:02x}{:02x}".format(*rgb)
+                bar_w = max(int(pct * 2.6), 1)
+                st.markdown(
+                    f'<div style="display:flex;align-items:center;gap:8px;margin:2px 0">'
+                    f'<span style="width:82px;font-size:0.82em">{cls_name}</span>'
+                    f'<div style="width:{bar_w}px;height:9px;background:{color_hex};'
+                    f'border-radius:3px"></div>'
+                    f'<span style="font-size:0.78em;color:#999">{cnt} ({pct:.0f}%)</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # Direction distribution
+            st.markdown("**Direction distribution:**")
+            dir_total = sum(dirs.values()) or 1
+            dc1, dc2, dc3, dc4 = st.columns(4)
+            for dcol, dname in zip(
+                [dc1, dc2, dc3, dc4], ["right", "left", "up", "down"]
+            ):
+                cnt = dirs.get(dname, 0)
+                dcol.metric(
+                    _dir_sym.get(dname, dname),
+                    f"{cnt} ({100 * cnt // dir_total}%)",
+                )
+
+            st.divider()
+
+            # Class filter — changes active_classes, which filters the overlay
+            st.markdown(
+                "**Filter trajectory overlay by vehicle type** "
+                "(uncheck a type to hide its tracks on the canvas):"
+            )
+            st.multiselect(
+                "Show types",
+                options=_ALL_CLASSES,
+                default=st.session_state["active_classes"],
+                key="active_classes",
+                label_visibility="collapsed",
+            )
+
+            # Busy-zone highlight toggle
+            if _preview_stats.get("busy_zone"):
+                st.toggle(
+                    "📍 Highlight busiest zone on canvas",
+                    key="show_busy_zone",
+                )
 
 
 # ──────────────────────────── RIGHT: line panel ───────────────────────────────

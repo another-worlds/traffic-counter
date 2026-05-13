@@ -100,6 +100,16 @@ def get_heatmap_url(video_id: str) -> Optional[str]:
         return r.json()["url"]
 
 
+def track_stats(video_id: str) -> Optional[Dict]:
+    """Return aggregate track statistics for an analyzed video."""
+    with _client() as c:
+        r = c.get(f"/videos/{video_id}/track-stats")
+        if r.status_code in (404, 409):
+            return None
+        _raise(r)
+        return r.json()
+
+
 # --- lines ---
 def list_lines(project_id: str) -> List[Dict]:
     with _client() as c:

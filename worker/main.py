@@ -54,8 +54,12 @@ def claim_one_queued():
         if not row:
             return None
         conn.execute(
-            text("UPDATE videos SET status='analyzing' WHERE id=:id"),
-            {"id": row.id},
+            text("""UPDATE videos
+                    SET status='analyzing',
+                        started_analyzing_at=:ts,
+                        progress_pct=0
+                    WHERE id=:id"""),
+            {"id": row.id, "ts": datetime.utcnow()},
         )
         return {"id": row.id, "project_id": row.project_id, "filename": row.filename}
 
@@ -70,8 +74,13 @@ def fetch_video(video_id: str):
             return None
         # Mark as analyzing
         conn.execute(
-            text("UPDATE videos SET status='analyzing', error_message=NULL WHERE id=:id"),
-            {"id": video_id},
+            text("""UPDATE videos
+                    SET status='analyzing',
+                        error_message=NULL,
+                        started_analyzing_at=:ts,
+                        progress_pct=0
+                    WHERE id=:id"""),
+            {"id": video_id, "ts": datetime.utcnow()},
         )
         return {"id": row.id, "project_id": row.project_id, "filename": row.filename}
 
@@ -106,17 +115,30 @@ def mark_error(video_id: str, err: Exception):
     msg = f"{type(err).__name__}: {err}\n\n{traceback.format_exc()[-2000:]}"
     with engine.begin() as conn:
         conn.execute(text("""
-            UPDATE videos SET status='error', error_message=:msg WHERE id=:id
+            UPDATE videos SET status='error', error_message=:msg, progress_pct=NULL WHERE id=:id
         """), {"id": video_id, "msg": msg})
+
+
+def update_progress(video_id: str, pct: float):
+    """Lightweight progress update (called every ~50 frames during analysis)."""
+    with engine.begin() as conn:
+        conn.execute(
+            text("UPDATE videos SET progress_pct=:pct WHERE id=:id"),
+            {"pct": round(pct, 4), "id": video_id},
+        )
 
 
 def handle(video: dict):
     log.info("processing video %s (%s)", video["id"], video["filename"])
     try:
+        def _on_progress(pct: float):
+            update_progress(video["id"], pct)
+
         meta = process_video(
             project_id=video["project_id"],
             video_id=video["id"],
             filename=video["filename"],
+            on_progress=_on_progress,
         )
         mark_analyzed(video["id"], meta)
         log.info("done %s: %s tracks", video["id"], meta.get("num_tracks"))

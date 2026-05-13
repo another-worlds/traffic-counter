@@ -19,19 +19,20 @@ from PIL import Image
 from streamlit_drawable_canvas import st_canvas
 
 import api_client as api
+from sidebar import render_sidebar
 
 st.set_page_config(page_title="Count & export", page_icon="📏", layout="wide")
 st.title("📏 Count & export")
 
-proj = st.session_state.get("project")
-if not proj:
-    st.warning("Pick a project on the main page first.")
+ws = render_sidebar()
+if not ws:
+    st.warning("Pick a workspace in the sidebar to begin.")
     st.stop()
 
-st.caption(f"Project: **{proj['name']}**")
+st.caption(f"Workspace: **{ws['name']}**")
 
 # --- choose videos ---
-videos = [v for v in api.list_videos(proj["id"]) if v["status"] == "analyzed"]
+videos = [v for v in api.list_videos(ws["id"]) if v["status"] == "analyzed"]
 if not videos:
     st.info("No analyzed videos in this project yet — analyze one first.")
     st.stop()
@@ -79,7 +80,7 @@ canvas_bg = composite.resize((canvas_w, canvas_h))
 st.write(f"Canvas: {canvas_w}×{canvas_h} (source: {src_w}×{src_h}, scale={scale:.3f}×)")
 
 # --- existing saved lines ---
-saved_lines = api.list_lines(proj["id"])
+saved_lines = api.list_lines(ws["id"])
 
 # --- canvas: draw new lines ---
 col_left, col_right = st.columns([3, 2])
@@ -170,7 +171,7 @@ if drawn:
             with c3:
                 if st.button("Save", key=f"save_{i}"):
                     api.create_line(
-                        proj["id"], name,
+                        ws["id"], name,
                         d["a"][0], d["a"][1], d["b"][0], d["b"][1],
                     )
                     st.rerun()
@@ -201,7 +202,7 @@ if st.button("Compute counts", type="primary"):
 
     # Server-side counts (saved lines only)
     try:
-        result = api.compute_counts(proj["id"], video_ids, line_ids) if line_ids else {
+        result = api.compute_counts(ws["id"], video_ids, line_ids) if line_ids else {
             "total_unique_tracks": 0, "sum_across_lines": 0, "per_line": [],
         }
     except Exception as e:
@@ -213,13 +214,13 @@ if st.button("Compute counts", type="primary"):
         ephemeral_ids = []
         for i, d in enumerate(ephemeral_lines):
             ln = api.create_line(
-                proj["id"], f"(ephemeral {i+1})",
+                ws["id"], f"(ephemeral {i+1})",
                 d["a"][0], d["a"][1], d["b"][0], d["b"][1],
                 color="#888888",
             )
             ephemeral_ids.append(ln["id"])
         try:
-            extra = api.compute_counts(proj["id"], video_ids, ephemeral_ids)
+            extra = api.compute_counts(ws["id"], video_ids, ephemeral_ids)
             # Splice ephemeral results into the response — recompute pct_of_drawn after merge.
             merged_per_line = list(result["per_line"]) + list(extra["per_line"])
             sum_total = sum(p["total"] for p in merged_per_line)
@@ -274,10 +275,10 @@ if st.button("Generate xlsx"):
         st.error("No saved lines to export.")
     else:
         with st.spinner("Building workbook…"):
-            data = api.export_xlsx(proj["id"], video_ids, line_ids)
+            data = api.export_xlsx(ws["id"], video_ids, line_ids)
         st.download_button(
             "Download counts.xlsx",
             data=data,
-            file_name=f"counts-{proj['name'].replace(' ', '_')}.xlsx",
+            file_name=f"counts-{ws['name'].replace(' ', '_')}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )

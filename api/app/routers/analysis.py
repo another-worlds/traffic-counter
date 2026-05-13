@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from typing import List
+from datetime import datetime
 import io
 import uuid
 
@@ -87,6 +88,9 @@ def export(project_id: str, body: CountRequest, db: Session = Depends(get_db)):
 
     video_rows = [{"id": v.id, "filename": v.filename} for v in videos]
     data = build_xlsx(project_id, project.name, video_rows, _lines_to_dict(lines))
+
+    project.last_exported_at = datetime.utcnow()
+    db.commit()
 
     fname = f"counts-{project.name.replace(' ', '_')}-{uuid.uuid4().hex[:6]}.xlsx"
     return StreamingResponse(

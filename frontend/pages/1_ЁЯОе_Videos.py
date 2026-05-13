@@ -1,16 +1,17 @@
 import streamlit as st
 import time
 import api_client as api
+from sidebar import render_sidebar
 
 st.set_page_config(page_title="Videos", page_icon="🎥", layout="wide")
 st.title("🎥 Videos")
 
-proj = st.session_state.get("project")
-if not proj:
-    st.warning("Pick a project in the sidebar on the main page first.")
+ws = render_sidebar()
+if not ws:
+    st.warning("Pick or create a workspace in the sidebar to begin.")
     st.stop()
 
-st.caption(f"Project: **{proj['name']}**")
+st.caption(f"Workspace: **{ws['name']}**")
 
 # Upload
 with st.expander("Upload video", expanded=True):
@@ -18,7 +19,7 @@ with st.expander("Upload video", expanded=True):
     if file is not None and st.button("Upload"):
         with st.spinner("Uploading..."):
             try:
-                v = api.upload_video(proj["id"], file.name, file.getvalue())
+                v = api.upload_video(ws["id"], file.name, file.getvalue())
                 st.success(f"Uploaded {file.name}")
                 st.session_state["just_uploaded_id"] = v["id"]
                 st.rerun()
@@ -26,12 +27,12 @@ with st.expander("Upload video", expanded=True):
                 st.error(str(e))
 
 # List
-videos = api.list_videos(proj["id"])
+videos = api.list_videos(ws["id"])
 if not videos:
     st.info("No videos yet. Upload one above.")
     st.stop()
 
-st.subheader("Videos in this project")
+st.subheader("Videos in this workspace")
 auto_refresh = st.checkbox("Auto-refresh status (3s)", value=True,
                            help="Useful while videos are queued or being analyzed.")
 
@@ -51,6 +52,8 @@ for v in videos:
                 "error": "🟥 error",
             }.get(status, status)
             st.write(badge)
+            if status == "analyzing" and v.get("progress_pct") is not None:
+                st.progress(v["progress_pct"], text=f"{v['progress_pct']*100:.0f}%")
             if v.get("num_tracks") is not None and status == "analyzed":
                 st.caption(f"{v['num_tracks']} tracks · "
                            f"{(v['duration_s'] or 0):.1f}s · "
@@ -74,3 +77,4 @@ for v in videos:
 if auto_refresh and any(v["status"] in ("queued", "analyzing") for v in videos):
     time.sleep(3)
     st.rerun()
+

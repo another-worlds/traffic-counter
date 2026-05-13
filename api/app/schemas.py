@@ -13,6 +13,7 @@ class ProjectOut(BaseModel):
     name: str
     description: Optional[str]
     created_at: datetime
+    last_exported_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -23,15 +24,18 @@ class VideoOut(BaseModel):
     project_id: str
     filename: str
     status: str
+    size_bytes: Optional[int] = None
     fps: Optional[float]
     duration_s: Optional[float]
     width: Optional[int]
     height: Optional[int]
     num_frames: Optional[int]
     num_tracks: Optional[int]
+    progress_pct: Optional[float] = None
     error_message: Optional[str]
     created_at: datetime
     analyzed_at: Optional[datetime]
+    started_analyzing_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -77,6 +81,28 @@ class CountResponse(BaseModel):
     total_unique_tracks: int        # T in (count/T)
     sum_across_lines: int           # Σ Cᵢ
     per_line: List[LineCountResult]
+
+
+class WorkerVideoStatus(BaseModel):
+    video_id: str
+    project_id: str
+    project_name: str
+    filename: str
+    status: str
+    progress_pct: float
+    started_analyzing_at: Optional[datetime]
+
+
+class WorkspaceSummary(BaseModel):
+    project_id: str
+    total_videos: int
+    analyzed_videos: int
+    queued_or_analyzing: int
+    error_videos: int
+    total_duration_s: Optional[float]
+    total_size_bytes: Optional[int]
+    lines_count: int
+    last_exported_at: Optional[datetime]
 
 
 class AnalyzeResponse(BaseModel):

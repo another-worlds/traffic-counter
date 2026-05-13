@@ -139,3 +139,20 @@ def file_url(relative: str) -> str:
     if relative.startswith("http"):
         return relative
     return f"{API_URL}{relative}"
+
+
+# --- worker / dashboard ---
+def worker_status() -> List[Dict]:
+    """Return videos currently queued or being analyzed."""
+    with _client() as c:
+        r = c.get("/worker/status")
+        _raise(r)
+        return r.json()
+
+
+def workspace_summary(project_id: str) -> Dict:
+    """Single-query aggregate stats for a workspace."""
+    with _client() as c:
+        r = c.get(f"/projects/{project_id}/summary")
+        _raise(r)
+        return r.json()

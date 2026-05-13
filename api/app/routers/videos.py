@@ -49,6 +49,12 @@ def upload_video(
     db.flush()  # get v.id
 
     v.storage_path = key_video(project_id, v.id, v.filename)
+
+    # Measure file size before streaming (SpooledTemporaryFile supports seek/tell)
+    file.file.seek(0, 2)
+    v.size_bytes = file.file.tell()
+    file.file.seek(0)
+
     get_storage().upload_stream(v.storage_path, file.file)
 
     db.commit()

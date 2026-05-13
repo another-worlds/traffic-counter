@@ -345,7 +345,7 @@ with col_canvas:
         with col_hint:
             st.caption("Click and drag to draw a counting line.")
 
-        bg_with_lines = _bake_lines_on_image(canvas_bg, saved_lines, 1.0)
+        bg_with_lines = _bake_lines_on_image(canvas_bg, saved_lines, scale)
         canvas_result = st_canvas(
             fill_color="rgba(0,0,0,0)",
             stroke_width=3,

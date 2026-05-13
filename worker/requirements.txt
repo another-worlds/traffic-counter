@@ -1,10 +1,13 @@
-git commit -m "first commit"# Torch wheels are pulled from PyPI; they auto-detect CUDA at runtime via the
+# Torch wheels are pulled from PyPI; they auto-detect CUDA at runtime via the
 # pre-installed driver. For matching CUDA 12.2, the default PyPI torch==2.4.* CUDA 12.1
 # wheel works on driver 535+ (forward-compatible).
 torch==2.4.1
 torchvision==0.19.1
 ultralytics==8.3.27
 lapx>=0.5.2
+# opencv-python-headless is listed here so it is installed first.  The GUI
+# variant (opencv-python) pulled in transitively by ultralytics is removed in
+# the Dockerfile immediately after pip finishes.
 opencv-python-headless==4.10.0.84
 numpy==1.26.4
 pandas==2.2.2

@@ -15,14 +15,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY requirements.txt .
-# ultralytics pulls in opencv-python (full GUI build) as a transitive dep,
-# which overwrites our headless install because they share the cv2 namespace.
-# Correct sequence: install everything, evict the GUI build, reinstall headless.
-# OPENCV_FIX is a build-arg bump to invalidate the Docker cache for this layer
-# whenever the fix logic changes (e.g. `docker compose build --build-arg OPENCV_FIX=2`).
+# Layer 1 — full requirements install (cached as long as requirements.txt is unchanged).
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Layer 2 — opencv swap.  ultralytics overwrites opencv-python-headless with
+# the GUI build (same cv2 namespace, ~90 MB larger).  Evict it and put headless
+# back.  ARG OPENCV_FIX busts only this small layer without re-running the
+# multi-minute torch/ultralytics download above.
 ARG OPENCV_FIX=2
-RUN pip install --no-cache-dir -r requirements.txt \
- && pip uninstall -y opencv-python 2>/dev/null || true \
+RUN pip uninstall -y opencv-python 2>/dev/null || true \
  && pip install --no-cache-dir opencv-python-headless==4.10.0.84
 
 COPY . .

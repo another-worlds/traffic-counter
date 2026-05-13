@@ -1,0 +1,189 @@
+"""
+Worker pipeline.
+
+Steps:
+  1. Pull source video from storage to a local temp file.
+  2. Run Ultralytics YOLO + ByteTrack with stream mode (process frame-by-frame).
+  3. For each frame, append every tracked vehicle's center to a list.
+  4. Pull a representative frame (the one with the most active tracks) for the UI.
+  5. Render trajectory overlay PNG (transparent PNG, lines per track).
+  6. Write tracks.parquet, frame.jpg, trajectories.png back to storage.
+
+Outputs (Parquet schema):
+  frame_idx int32, t_seconds float64, track_id int32,
+  class_id int16, conf float32, cx float32, cy float32, w float32, h float32
+"""
+from __future__ import annotations
+import os
+import tempfile
+from pathlib import Path
+from typing import Dict, List
+
+import cv2
+import numpy as np
+import pandas as pd
+from PIL import Image, ImageDraw
+
+from ultralytics import YOLO
+
+from storage import (
+    get_storage, key_video, key_tracks, key_frame, key_trajectories,
+)
+
+# Vehicle classes (COCO defaults that Ultralytics yolov8 uses).
+VEHICLE_CLASSES = [1, 2, 3, 5, 7]  # bicycle, car, motorcycle, bus, truck
+
+MODEL_NAME = os.environ.get("MODEL_NAME", "yolov8m.pt")
+DEVICE = os.environ.get("DEVICE", "cuda:0")
+HALF = os.environ.get("HALF", "true").lower() == "true"
+TRACKER = os.environ.get("TRACKER", "bytetrack.yaml")
+FRAME_STRIDE = int(os.environ.get("FRAME_STRIDE", "1"))  # process every Nth frame (1=all)
+
+
+def _load_model() -> YOLO:
+    model = YOLO(MODEL_NAME)
+    # Warm up to surface device/half issues early
+    try:
+        model.to(DEVICE)
+    except Exception:
+        pass
+    return model
+
+
+def _video_meta(path: str) -> Dict:
+    cap = cv2.VideoCapture(path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    cap.release()
+    return {"fps": fps, "width": w, "height": h, "num_frames": n}
+
+
+def _grab_frame(video_path: str, frame_idx: int, out_path: str) -> bool:
+    cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_idx))
+    ok, frame = cap.read()
+    cap.release()
+    if not ok:
+        return False
+    cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    return True
+
+
+def _render_trajectories(df: pd.DataFrame, w: int, h: int, out_path: str) -> None:
+    """
+    Render a transparent PNG of all tracks as polylines.
+    Colors are stable per class.
+    """
+    palette = {
+        1: (28, 158, 117, 200),   # bicycle - teal
+        2: (55, 138, 221, 200),   # car - blue
+        3: (239, 159, 39, 220),   # motorcycle - amber
+        5: (215, 90, 48, 220),    # bus - coral
+        7: (226, 75, 74, 220),    # truck - red
+    }
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    for tid, g in df.sort_values("frame_idx").groupby("track_id", sort=False):
+        pts = g[["cx", "cy"]].to_numpy()
+        if pts.shape[0] < 2:
+            continue
+        cls = int(g["class_id"].mode().iloc[0])
+        color = palette.get(cls, (180, 180, 180, 200))
+        # Draw as connected lines
+        flat = [(float(x), float(y)) for x, y in pts]
+        draw.line(flat, fill=color, width=2)
+
+    img.save(out_path, optimize=True)
+
+
+def process_video(
+    project_id: str,
+    video_id: str,
+    filename: str,
+) -> Dict:
+    storage = get_storage()
+    src_key = key_video(project_id, video_id, filename)
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        local_video = str(td / Path(filename).name)
+        local_tracks = str(td / "tracks.parquet")
+        local_frame = str(td / "frame.jpg")
+        local_traj = str(td / "trajectories.png")
+
+        storage.download_to(src_key, local_video)
+        meta = _video_meta(local_video)
+        fps = meta["fps"]
+        w, h = meta["width"], meta["height"]
+
+        model = _load_model()
+
+        rows: List[dict] = []
+        per_frame_counts: Dict[int, int] = {}
+
+        # Ultralytics' track() handles ByteTrack and ID assignment for us.
+        # stream=True yields a Results object per frame without storing them all.
+        results_iter = model.track(
+            source=local_video,
+            stream=True,
+            persist=True,
+            classes=VEHICLE_CLASSES,
+            tracker=TRACKER,
+            half=HALF,
+            device=DEVICE,
+            vid_stride=FRAME_STRIDE,
+            verbose=False,
+        )
+
+        for r in results_iter:
+            frame_idx = int(getattr(r, "frame_id", 0) or 0)
+            if r.boxes is None or r.boxes.id is None:
+                continue
+            xywh = r.boxes.xywh.cpu().numpy()
+            ids = r.boxes.id.cpu().numpy().astype(np.int32)
+            cls = r.boxes.cls.cpu().numpy().astype(np.int16)
+            conf = r.boxes.conf.cpu().numpy().astype(np.float32)
+            per_frame_counts[frame_idx] = len(ids)
+
+            for k in range(len(ids)):
+                rows.append({
+                    "frame_idx": frame_idx,
+                    "t_seconds": frame_idx / fps if fps > 0 else 0.0,
+                    "track_id": int(ids[k]),
+                    "class_id": int(cls[k]),
+                    "conf": float(conf[k]),
+                    "cx": float(xywh[k][0]),
+                    "cy": float(xywh[k][1]),
+                    "w": float(xywh[k][2]),
+                    "h": float(xywh[k][3]),
+                })
+
+        df = pd.DataFrame(rows)
+        if df.empty:
+            df = pd.DataFrame(columns=[
+                "frame_idx", "t_seconds", "track_id", "class_id", "conf",
+                "cx", "cy", "w", "h",
+            ])
+
+        # Choose representative frame = the one with the most simultaneous tracks
+        if per_frame_counts:
+            rep_idx = max(per_frame_counts, key=per_frame_counts.get)
+        else:
+            rep_idx = meta["num_frames"] // 2
+
+        _grab_frame(local_video, rep_idx, local_frame)
+        _render_trajectories(df, w, h, local_traj)
+
+        df.to_parquet(local_tracks, index=False)
+
+        storage.upload_file(key_tracks(project_id, video_id), local_tracks)
+        storage.upload_file(key_frame(project_id, video_id), local_frame)
+        storage.upload_file(key_trajectories(project_id, video_id), local_traj)
+
+    return {
+        **meta,
+        "num_tracks": int(df["track_id"].nunique()) if not df.empty else 0,
+    }

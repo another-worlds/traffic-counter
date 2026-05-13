@@ -1,0 +1,16 @@
+# Torch wheels are pulled from PyPI; they auto-detect CUDA at runtime via the
+# pre-installed driver. For matching CUDA 12.2, the default PyPI torch==2.4.* CUDA 12.1
+# wheel works on driver 535+ (forward-compatible).
+torch==2.4.1
+torchvision==0.19.1
+ultralytics==8.3.27
+lapx>=0.5.2
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
+pandas==2.2.2
+pyarrow==17.0.0
+Pillow==10.4.0
+SQLAlchemy==2.0.34
+psycopg[binary]==3.2.2
+google-cloud-storage==2.18.2
+pydantic-settings==2.5.2

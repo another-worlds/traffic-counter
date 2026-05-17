@@ -2,6 +2,31 @@
 
 This document describes the configuration for supporting video file uploads larger than 20GB.
 
+## Quick Start
+
+**For local development:**
+
+```bash
+# Create Streamlit config for large uploads
+mkdir -p frontend/.streamlit
+cat > frontend/.streamlit/config.toml << 'EOF'
+[client]
+maxUploadSize = 100000
+
+[server]
+maxUploadSize = 100000
+
+[logger]
+level = "info"
+EOF
+
+# Restart Streamlit app
+```
+
+**For Docker deployment:**
+
+The Docker images are pre-configured via `api/start.sh` and require no additional setup.
+
 ## Configuration Changes
 
 ### 1. Streamlit Frontend (`frontend/.streamlit/config.toml`)

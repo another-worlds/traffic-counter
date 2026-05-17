@@ -238,18 +238,22 @@ canvas_bg = composite.resize((canvas_w, canvas_h))
 
 # ── Fabric.js object helpers ──────────────────────────────────────────────────
 def _line_endpoints_from_fabric(obj: dict) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-    """Extract (A, B) canvas-pixel coords from a fabric.js Line JSON object."""
+    """Extract (A, B) canvas-pixel coords from a fabric.js Line JSON object.
+
+    Fabric.js stores endpoints as local offsets from the object origin (left, top),
+    which may be the bounding-box corner OR the centre depending on originX/Y.
+    The transform is always: global = origin + local * scale.
+    Do NOT reconstruct from bounding-box corners — that only works for axis-aligned lines.
+    """
     left = float(obj.get("left", 0))
     top = float(obj.get("top", 0))
-    w = float(obj.get("width", 0))
-    h = float(obj.get("height", 0))
-    x1, x2 = float(obj.get("x1", 0)), float(obj.get("x2", w))
-    y1, y2 = float(obj.get("y1", 0)), float(obj.get("y2", h))
-    ax = left if x1 <= x2 else left + w
-    bx = left + w if x1 <= x2 else left
-    ay = top if y1 <= y2 else top + h
-    by = top + h if y1 <= y2 else top
-    return (ax, ay), (bx, by)
+    x1 = float(obj.get("x1", 0))
+    y1 = float(obj.get("y1", 0))
+    x2 = float(obj.get("x2", 0))
+    y2 = float(obj.get("y2", 0))
+    sx = float(obj.get("scaleX", 1.0))
+    sy = float(obj.get("scaleY", 1.0))
+    return (left + x1 * sx, top + y1 * sy), (left + x2 * sx, top + y2 * sy)
 
 
 def _saved_lines_to_fabric(lines: List[Dict], scale: float) -> dict:

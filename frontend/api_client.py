@@ -1,10 +1,14 @@
 """Tiny HTTP wrapper around the API."""
 from __future__ import annotations
 import os
+import io
 import httpx
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, BinaryIO
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
+
+# For large files, stream in chunks to avoid buffering entire file in memory
+_CHUNK_SIZE = 64 * 1024  # 64KB chunks
 
 
 class APIError(Exception):
@@ -12,7 +16,9 @@ class APIError(Exception):
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(base_url=API_URL, timeout=120.0)
+    # Increased timeout for large file uploads (can take 10+ minutes for 100GB over slow networks)
+    # Timeout is per request, not per connection, so 3600s (1 hour) is reasonable for very large files
+    return httpx.Client(base_url=API_URL, timeout=3600.0)
 
 
 def _raise(r: httpx.Response):
@@ -50,6 +56,31 @@ def list_videos(project_id: str) -> List[Dict]:
         _raise(r)
         return r.json()
 
+def _stream_multipart(filename: str, file_obj: BinaryIO, chunk_size: int = _CHUNK_SIZE):
+    """Generate multipart/form-data body chunks without buffering entire file.
+
+    This allows streaming large files without loading them entirely into memory.
+    """
+    boundary = b"----traffic_counter_upload"
+
+    # Part 1: filename header
+    yield (
+        f"--{boundary.decode()}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: video/mp4\r\n\r\n"
+    ).encode()
+
+    # Part 2: file data in chunks
+    while True:
+        chunk = file_obj.read(chunk_size)
+        if not chunk:
+            break
+        yield chunk
+
+    # Part 3: closing boundary
+    yield f"\r\n--{boundary.decode()}--\r\n".encode()
+
+
 def upload_video(project_id: str, filename: str, data) -> Dict:
     """Upload a video file. data can be bytes or a file-like object (for large files).
 
@@ -57,8 +88,21 @@ def upload_video(project_id: str, filename: str, data) -> Dict:
     For files >1GB, pass file-like object from file.file or open(..., 'rb') to avoid memory exhaustion.
     """
     with _client() as c:
-        files = {"file": (filename, data, "video/mp4")}
-        r = c.post(f"/projects/{project_id}/videos", files=files, timeout=None)
+        if isinstance(data, bytes):
+            # Small file: use standard multipart
+            files = {"file": (filename, data, "video/mp4")}
+            r = c.post(f"/projects/{project_id}/videos", files=files, timeout=None)
+        else:
+            # Large file: stream with custom multipart generator
+            boundary = b"----traffic_counter_upload"
+            stream = _stream_multipart(filename, data, _CHUNK_SIZE)
+            headers = {"Content-Type": f"multipart/form-data; boundary={boundary.decode()}"}
+            r = c.post(
+                f"/projects/{project_id}/videos",
+                content=stream,
+                headers=headers,
+                timeout=None
+            )
         _raise(r)
         return r.json()
 

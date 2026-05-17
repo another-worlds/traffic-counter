@@ -2,7 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { Streamlit, type RenderData } from 'streamlit-component-lib';
 import App from './App';
-import { buildInitialLinesFromBootstrap, buildViewportSpecFromBootstrap, type BridgePayload, type HostViewportBootstrap } from './viewportState';
+import type { BridgePayload, HostViewportBootstrap } from './viewportState';
 
 declare global {
   interface Window {
@@ -16,20 +16,16 @@ if (!rootElement) {
   throw new Error('Missing root element for hybrid viewport');
 }
 
-type HostBridgeMessage = {
-  source?: string;
-  payload?: HostViewportBootstrap;
-};
-
 type StreamlitRenderArgs = {
   bootstrap?: HostViewportBootstrap;
 };
 
 function OverlayRoot() {
-  const [bootstrap, setBootstrap] = React.useState<HostViewportBootstrap>(() => window.__TRAFFIC_COUNTER_HYBRID_VIEWPORT__ ?? {});
+  const [bootstrap, setBootstrap] = React.useState<HostViewportBootstrap>(
+    () => window.__TRAFFIC_COUNTER_HYBRID_VIEWPORT__ ?? {},
+  );
 
-  // Stable reference so the App's onSnapshot effect only fires when bridgePayload changes,
-  // not on every render cycle.
+  // Stable reference so App's onSnapshot effect only fires when payload changes.
   const handleSnapshot = React.useCallback(
     (payload: BridgePayload) => Streamlit.setComponentValue(payload),
     [],
@@ -40,7 +36,7 @@ function OverlayRoot() {
       const customEvent = event as CustomEvent<RenderData>;
       const args = (customEvent.detail?.args as StreamlitRenderArgs | undefined) ?? {};
       // Always notify Streamlit of the frame height so the iframe is never collapsed.
-      Streamlit.setFrameHeight(940);
+      Streamlit.setFrameHeight(960);
       if (!args.bootstrap) {
         return;
       }
@@ -57,10 +53,7 @@ function OverlayRoot() {
     return () => Streamlit.events.removeEventListener(Streamlit.RENDER_EVENT, handleStreamlitRender);
   }, []);
 
-  const spec = buildViewportSpecFromBootstrap(bootstrap);
-  const initialLines = buildInitialLinesFromBootstrap(bootstrap);
-
-  return <App spec={spec} initialLines={initialLines} onSnapshot={handleSnapshot} />;
+  return <App bootstrap={bootstrap} onSnapshot={handleSnapshot} />;
 }
 
 ReactDOM.createRoot(rootElement).render(

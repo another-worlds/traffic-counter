@@ -1,68 +1,220 @@
-import { useEffect, useMemo, useState } from 'react';
-import type { OverlayModel, ViewportSpec, LineGeometry, LayerKey } from './viewportState';
-import { buildBridgePayload, createDefaultOverlayModel, createDemoLine, reduceOverlayModel } from './viewportState';
+import React from 'react';
+import type {
+  CountsBundle,
+  HostViewportBootstrap,
+  LayerKey,
+  LineGeometry,
+  OverlayAction,
+  OverlayModel,
+  PendingAction,
+  Point,
+  Suggestion,
+  TrackStats,
+  ViewportSpec,
+  VideoSize,
+} from './viewportState';
+import {
+  buildBridgePayload,
+  buildInitialLinesFromBootstrap,
+  buildViewportSpecFromBootstrap,
+  createDefaultOverlayModel,
+  reduceOverlayModel,
+} from './viewportState';
+import Viewport from './Viewport';
+import SidePanel from './SidePanel';
 import './styles.css';
 
 type AppProps = {
-  spec: ViewportSpec;
-  initialLines?: LineGeometry[];
+  bootstrap?: HostViewportBootstrap;
   onSnapshot?: (payload: ReturnType<typeof buildBridgePayload>) => void;
 };
 
-const DEFAULT_SPEC: ViewportSpec = {
-  projectId: 'preview',
-  videoIds: [],
-  selectedLineIds: [],
-  frameCount: 100,
-  activeLayers: ['saved-lines', 'frame-scrubber', 'direction-overlay', 'counts'],
-};
+const DEFAULT_VIDEO_SIZE: VideoSize = { width: 1920, height: 1080 };
+const MOVE_THRESHOLD = 3; // source pixels — distinguish click-select from drag
 
-const VIEWPORT_WIDTH = 1920;
-const VIEWPORT_HEIGHT = 1080;
+export default function App({ bootstrap, onSnapshot }: AppProps) {
+  const spec: ViewportSpec = React.useMemo(() => buildViewportSpecFromBootstrap(bootstrap), [bootstrap]);
+  const initialLines = React.useMemo(() => buildInitialLinesFromBootstrap(bootstrap), [bootstrap]);
+  const videoSize: VideoSize = bootstrap?.videoSize ?? DEFAULT_VIDEO_SIZE;
+  const frameUrl = bootstrap?.frameUrl;
+  const trajectoriesUrl = bootstrap?.trajectoriesUrl;
+  const heatmapUrl = bootstrap?.heatmapUrl;
+  const trackStats: TrackStats | undefined = bootstrap?.trackStats;
+  const counts: CountsBundle | undefined = bootstrap?.counts;
+  const suggestions: Suggestion[] | undefined = bootstrap?.suggestions;
 
-export default function App({ spec = DEFAULT_SPEC, initialLines = [], onSnapshot }: AppProps) {
-  const initialModel = useMemo(() => createDefaultOverlayModel(spec, initialLines), [spec, initialLines]);
-  const [model, setModel] = useState<OverlayModel>(initialModel);
-  const bridgePayload = useMemo(() => buildBridgePayload(model), [model]);
-  const [bridgeStatus, setBridgeStatus] = useState<'pending' | 'sent'>('pending');
+  const initialModel = React.useMemo(
+    () => createDefaultOverlayModel(spec, initialLines),
+    [spec, initialLines],
+  );
 
-  useEffect(() => {
-    setModel(initialModel);
-    setBridgeStatus('pending');
-  }, [initialModel]);
+  const [model, setModel] = React.useState<OverlayModel>(initialModel);
+  const [drawingColor, setDrawingColor] = React.useState('#e24b4a');
+  const lastEmittedRef = React.useRef<string>('');
+  const pendingSelectRef = React.useRef<{ lineId: string; anchor: Point } | null>(null);
+  const lastProjectIdRef = React.useRef<string>(spec.projectId);
 
-  function dispatch(action: Parameters<typeof reduceOverlayModel>[1]) {
+  // Reconcile with new bootstrap from host: replace lines only (preserve UI state).
+  // Full reset only if project changed.
+  React.useEffect(() => {
+    setModel((prev) => {
+      // Don't touch the model mid-interaction.
+      if (prev.interaction.kind !== 'idle') return prev;
+      // New project → fresh start.
+      if (lastProjectIdRef.current !== spec.projectId) {
+        lastProjectIdRef.current = spec.projectId;
+        return initialModel;
+      }
+      // Same project → refresh lines but preserve selection/frame/layers.
+      return reduceOverlayModel(prev, { type: 'replace-lines', lines: initialLines });
+    });
+  }, [spec.projectId, initialLines, initialModel]);
+
+  const dispatch = React.useCallback((action: OverlayAction) => {
     setModel((current) => reduceOverlayModel(current, action));
-  }
+  }, []);
 
-  function addLine() {
-    dispatch({ type: 'add-line', line: createDemoLine(model.lines.length) });
-  }
-
-  function renameSelectedLine() {
-    if (!model.selectedLineId) {
-      return;
+  // Emit snapshot whenever the model changes — but only when interaction is idle (committed).
+  React.useEffect(() => {
+    if (model.interaction.kind !== 'idle') return;
+    const payload = buildBridgePayload(model);
+    const serialized = JSON.stringify(payload);
+    if (serialized === lastEmittedRef.current) return;
+    lastEmittedRef.current = serialized;
+    onSnapshot?.(payload);
+    if (model.pendingActions.length > 0) {
+      // Clear after emitting to avoid resending.
+      dispatch({ type: 'clear-pending-actions' });
     }
-    const nextName = window.prompt('Rename selected line', model.lines.find((line) => line.id === model.selectedLineId)?.name ?? 'line');
-    if (!nextName) {
-      return;
+  }, [model, onSnapshot, dispatch]);
+
+  // Keyboard handlers
+  React.useEffect(() => {
+    function handleKey(e: KeyboardEvent) {
+      // Don't intercept when typing in an input field.
+      const tag = (e.target as HTMLElement)?.tagName ?? '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      if (model.selectedLineId && (e.key === 'Delete' || e.key === 'Backspace')) {
+        e.preventDefault();
+        dispatch({ type: 'delete-line', lineId: model.selectedLineId });
+      } else if (e.key === 'Escape') {
+        if (model.interaction.kind === 'drawing') {
+          dispatch({ type: 'cancel-draft' });
+        } else {
+          dispatch({ type: 'select-line', lineId: null });
+        }
+      }
     }
-    dispatch({ type: 'update-line', lineId: model.selectedLineId, patch: { name: nextName.trim() } });
-  }
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [model.selectedLineId, model.interaction.kind, dispatch]);
 
-  function deleteSelectedLine() {
-    if (!model.selectedLineId) {
-      return;
-    }
-    dispatch({ type: 'delete-line', lineId: model.selectedLineId });
-  }
+  // ── Mouse handlers ─────────────────────────────────────────────────────────
 
-  const selectedLine = model.lines.find((line) => line.id === model.selectedLineId) ?? null;
+  const handleMouseDownEmpty = React.useCallback(
+    (point: Point) => {
+      if (model.interaction.kind !== 'idle') return;
+      // Click on empty viewport starts drawing a new line.
+      dispatch({ type: 'select-line', lineId: null });
+      dispatch({ type: 'start-draw', point, color: drawingColor });
+    },
+    [model.interaction.kind, dispatch, drawingColor],
+  );
 
-  useEffect(() => {
-    onSnapshot?.(bridgePayload);
-    setBridgeStatus('sent');
-  }, [bridgePayload, onSnapshot]);
+  const handleMouseDownLine = React.useCallback(
+    (lineId: string, point: Point) => {
+      if (model.interaction.kind !== 'idle') return;
+      // Defer starting move until first movement — so click-only = select-only.
+      pendingSelectRef.current = { lineId, anchor: point };
+      dispatch({ type: 'select-line', lineId });
+    },
+    [model.interaction.kind, dispatch],
+  );
+
+  const handleMouseDownHandle = React.useCallback(
+    (lineId: string, handleIndex: number) => {
+      if (model.interaction.kind !== 'idle') return;
+      pendingSelectRef.current = null;
+      dispatch({ type: 'start-resize-handle', lineId, handleIndex });
+    },
+    [model.interaction.kind, dispatch],
+  );
+
+  const handleMouseMove = React.useCallback(
+    (point: Point) => {
+      const pending = pendingSelectRef.current;
+      if (pending) {
+        const dx = point[0] - pending.anchor[0];
+        const dy = point[1] - pending.anchor[1];
+        if (Math.hypot(dx, dy) > MOVE_THRESHOLD) {
+          // Promote to a move
+          pendingSelectRef.current = null;
+          dispatch({ type: 'start-move', lineId: pending.lineId, anchor: pending.anchor });
+          dispatch({ type: 'update-move', point });
+        }
+        return;
+      }
+      if (model.interaction.kind === 'drawing') {
+        dispatch({ type: 'update-draft', point });
+      } else if (model.interaction.kind === 'moving') {
+        dispatch({ type: 'update-move', point });
+      } else if (model.interaction.kind === 'resizing') {
+        dispatch({ type: 'update-resize-handle', point });
+      }
+    },
+    [model.interaction.kind, dispatch],
+  );
+
+  const handleMouseUp = React.useCallback(
+    (_point: Point) => {
+      pendingSelectRef.current = null;
+      if (model.interaction.kind === 'drawing') {
+        dispatch({ type: 'commit-draft' });
+      } else if (model.interaction.kind === 'moving') {
+        dispatch({ type: 'commit-move' });
+      } else if (model.interaction.kind === 'resizing') {
+        dispatch({ type: 'commit-resize-handle' });
+      }
+    },
+    [model.interaction.kind, dispatch],
+  );
+
+  // ── Side-panel actions ────────────────────────────────────────────────────
+
+  const handleUpdateLine = React.useCallback(
+    (lineId: string, patch: Partial<LineGeometry>) => {
+      dispatch({ type: 'update-line', lineId, patch });
+    },
+    [dispatch],
+  );
+
+  const handleDeleteLine = React.useCallback(
+    (lineId: string) => {
+      dispatch({ type: 'delete-line', lineId });
+    },
+    [dispatch],
+  );
+
+  const handleSelectLine = React.useCallback(
+    (lineId: string | null) => {
+      dispatch({ type: 'select-line', lineId });
+    },
+    [dispatch],
+  );
+
+  const handleToggleLayer = React.useCallback(
+    (layer: LayerKey) => {
+      dispatch({ type: 'toggle-layer', layer });
+    },
+    [dispatch],
+  );
+
+  const queueAction = React.useCallback(
+    (action: PendingAction) => {
+      dispatch({ type: 'queue-action', action });
+    },
+    [dispatch],
+  );
 
   return (
     <div className="overlay-shell">
@@ -71,62 +223,30 @@ export default function App({ spec = DEFAULT_SPEC, initialLines = [], onSnapshot
           <p className="eyebrow">Hybrid viewport</p>
           <h1>Counting line editor</h1>
         </div>
-        <div className="frame-pill">
-          Frame {model.currentFrame + 1} / {Math.max(model.spec.frameCount, 1)}
+        <div className="header-info">
+          <div className="frame-pill">
+            Frame {model.currentFrame + 1} / {Math.max(model.spec.frameCount, 1)}
+          </div>
+          <div className="instruction-pill">
+            Click-drag empty area → new line · drag line → move · drag handle → resize · Delete → remove
+          </div>
         </div>
       </header>
 
       <main className="overlay-grid">
         <section className="viewport-panel">
-          <div className="viewport-stage">
-            <svg
-              className="viewport-svg"
-              viewBox={`0 0 ${VIEWPORT_WIDTH} ${VIEWPORT_HEIGHT}`}
-              role="img"
-              aria-label="Interactive counting overlay viewport"
-            >
-              <defs>
-                <pattern id="viewport-grid" width="96" height="96" patternUnits="userSpaceOnUse">
-                  <path d="M 96 0 L 0 0 0 96" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="2" />
-                </pattern>
-              </defs>
-
-              <rect width={VIEWPORT_WIDTH} height={VIEWPORT_HEIGHT} fill="url(#viewport-grid)" />
-
-              <text x="64" y="78" className="viewport-overlay-label">
-                Hybrid viewport ready
-              </text>
-
-              <text x="64" y="116" className="viewport-overlay-subtitle">
-                {selectedLine ? `Selected: ${selectedLine.name}` : 'Select a line to edit it' }
-              </text>
-
-              {model.lines.map((line) => {
-                const points = line.points.map(([x, y]) => `${x},${y}`).join(' ');
-                const isSelected = line.id === model.selectedLineId;
-                const lineClass = isSelected ? 'viewport-line selected' : 'viewport-line';
-
-                return (
-                  <g key={line.id} className={lineClass} onClick={() => dispatch({ type: 'select-line', lineId: line.id })}>
-                    {line.kind === 'polyline' ? (
-                      <polyline points={points} stroke={line.color} strokeWidth={isSelected ? 10 : 7} fill="none" strokeLinecap="round" strokeLinejoin="round" />
-                    ) : (
-                      <line x1={line.points[0]?.[0] ?? 0} y1={line.points[0]?.[1] ?? 0} x2={line.points.at(-1)?.[0] ?? 0} y2={line.points.at(-1)?.[1] ?? 0} stroke={line.color} strokeWidth={isSelected ? 10 : 7} strokeLinecap="round" />
-                    )}
-                    {line.points.map(([x, y], index) => (
-                      <circle key={`${line.id}-point-${index}`} cx={x} cy={y} r={isSelected ? 16 : 12} fill={line.color} stroke="white" strokeWidth="4" />
-                    ))}
-                    <text x={line.points[0]?.[0] ?? 0} y={(line.points[0]?.[1] ?? 0) - 22} className="viewport-line-label">
-                      {line.name}
-                    </text>
-                  </g>
-                );
-              })}
-
-              {model.visibleLayers.heatmap ? <rect width={VIEWPORT_WIDTH} height={VIEWPORT_HEIGHT} className="viewport-heatmap-overlay" /> : null}
-              {model.visibleLayers.suggestions ? <circle cx={VIEWPORT_WIDTH * 0.72} cy={VIEWPORT_HEIGHT * 0.24} r={92} className="viewport-suggestion-ring" /> : null}
-            </svg>
-          </div>
+          <Viewport
+            model={model}
+            videoSize={videoSize}
+            frameUrl={frameUrl}
+            trajectoriesUrl={trajectoriesUrl}
+            heatmapUrl={heatmapUrl}
+            onMouseDownEmpty={handleMouseDownEmpty}
+            onMouseDownLine={handleMouseDownLine}
+            onMouseDownHandle={handleMouseDownHandle}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+          />
 
           <input
             className="frame-slider"
@@ -136,78 +256,23 @@ export default function App({ spec = DEFAULT_SPEC, initialLines = [], onSnapshot
             value={model.currentFrame}
             onChange={(event) => dispatch({ type: 'set-frame', frame: Number(event.target.value) })}
           />
-
-          <div className="toolbar-row">
-            <button type="button" className="toolbar-button primary" onClick={addLine}>
-              Add demo line
-            </button>
-            <button type="button" className="toolbar-button" onClick={renameSelectedLine} disabled={!model.selectedLineId}>
-              Rename selected
-            </button>
-            <button type="button" className="toolbar-button danger" onClick={deleteSelectedLine} disabled={!model.selectedLineId}>
-              Delete selected
-            </button>
-          </div>
-
-          <div className="layer-strip">
-            {(Object.keys(model.visibleLayers) as LayerKey[]).map((layer) => (
-              <button
-                key={layer}
-                type="button"
-                className={model.visibleLayers[layer] ? 'layer-chip active' : 'layer-chip'}
-                onClick={() => dispatch({ type: 'toggle-layer', layer })}
-              >
-                {layer}
-              </button>
-            ))}
-          </div>
         </section>
 
-        <aside className="side-panel">
-          <div className="panel-card">
-            <h2>Viewport spec</h2>
-            <pre>{JSON.stringify(model.spec, null, 2)}</pre>
-          </div>
-          <div className="panel-card">
-            <h2>Bridge payload</h2>
-            <p className="muted">Bridge status: {bridgeStatus}</p>
-            <pre>{JSON.stringify(bridgePayload, null, 2)}</pre>
-          </div>
-          <div className="panel-card">
-            <h2>Editing state</h2>
-            <p>Selected line: {model.selectedLineId ?? 'none'}</p>
-            <p>Saved lines loaded: {model.lines.length}</p>
-          </div>
-          <div className="panel-card">
-            <h2>Lines</h2>
-            {model.lines.length === 0 ? (
-              <p className="muted">No lines loaded yet.</p>
-            ) : (
-              <div className="line-list">
-                {model.lines.map((line) => (
-                  <button
-                    key={line.id}
-                    type="button"
-                    className={line.id === model.selectedLineId ? 'line-row active' : 'line-row'}
-                    onClick={() => dispatch({ type: 'select-line', lineId: line.id })}
-                  >
-                    <span className="line-swatch" style={{ backgroundColor: line.color }} />
-                    <span className="line-label">{line.name}</span>
-                    <span className="line-kind">{line.kind}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-          <div className="panel-card">
-            <h2>Planned actions</h2>
-            <ul>
-              <li>Drag lines and endpoints</li>
-              <li>Toggle heatmap and direction overlays</li>
-              <li>Auto-suggest perpendicular lines from track clusters</li>
-            </ul>
-          </div>
-        </aside>
+        <SidePanel
+          model={model}
+          trackStats={trackStats}
+          counts={counts}
+          suggestions={suggestions}
+          drawingColor={drawingColor}
+          onDrawingColorChange={setDrawingColor}
+          onUpdateLine={handleUpdateLine}
+          onDeleteLine={handleDeleteLine}
+          onSelectLine={handleSelectLine}
+          onToggleLayer={handleToggleLayer}
+          onRequestSuggestions={(n) => queueAction({ type: 'request-suggestions', n })}
+          onAcceptSuggestion={(s) => queueAction({ type: 'accept-suggestion', suggestion: s })}
+          onDismissSuggestions={() => queueAction({ type: 'dismiss-suggestions' })}
+        />
       </main>
     </div>
   );

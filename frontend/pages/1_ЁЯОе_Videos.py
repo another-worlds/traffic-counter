@@ -15,16 +15,28 @@ st.caption(f"Workspace: **{ws['name']}**")
 
 # Upload
 with st.expander("Upload video", expanded=True):
-    file = st.file_uploader("Video file (mp4, mov, mkv)", type=["mp4", "mov", "mkv", "avi"])
-    if file is not None and st.button("Upload"):
-        with st.spinner("Uploading..."):
-            try:
-                v = api.upload_video(ws["id"], file.name, file.getvalue())
-                st.success(f"Uploaded {file.name}")
-                st.session_state["just_uploaded_id"] = v["id"]
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+    file = st.file_uploader("Video file (mp4, mov, mkv, up to 100GB)", type=["mp4", "mov", "mkv", "avi"])
+    if file is not None:
+        file_size_mb = file.size / (1024 * 1024)
+        st.caption(f"File size: {file_size_mb:.1f} MB")
+
+        if st.button("Upload"):
+            with st.spinner("Uploading..."):
+                try:
+                    # For files >1GB, stream from file.file to avoid memory exhaustion
+                    if file_size_mb > 1024:
+                        st.info("Large file detected — streaming upload (background process)")
+                        file.file.seek(0)
+                        data = file.file
+                    else:
+                        data = file.getvalue()
+
+                    v = api.upload_video(ws["id"], file.name, data)
+                    st.success(f"Uploaded {file.name}")
+                    st.session_state["just_uploaded_id"] = v["id"]
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
 
 # List
 videos = api.list_videos(ws["id"])

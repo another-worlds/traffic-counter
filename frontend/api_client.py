@@ -50,7 +50,12 @@ def list_videos(project_id: str) -> List[Dict]:
         _raise(r)
         return r.json()
 
-def upload_video(project_id: str, filename: str, data: bytes) -> Dict:
+def upload_video(project_id: str, filename: str, data) -> Dict:
+    """Upload a video file. data can be bytes or a file-like object (for large files).
+
+    For files <1GB, pass bytes from file.getvalue().
+    For files >1GB, pass file-like object from file.file or open(..., 'rb') to avoid memory exhaustion.
+    """
     with _client() as c:
         files = {"file": (filename, data, "video/mp4")}
         r = c.post(f"/projects/{project_id}/videos", files=files, timeout=None)

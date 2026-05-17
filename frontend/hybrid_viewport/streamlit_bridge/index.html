@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Traffic Counter Hybrid Bridge</title>
+    <style>
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: #0b0f17;
+        color: #f4f7fb;
+        font-family: Inter, 'Segoe UI', system-ui, sans-serif;
+      }
+      #root {
+        width: 100%;
+        height: 100%;
+      }
+      .bridge-shell {
+        box-sizing: border-box;
+        width: 100%;
+        height: 100%;
+        padding: 12px;
+        display: grid;
+        gap: 10px;
+        grid-template-rows: auto 1fr auto;
+      }
+      .bridge-panel {
+        border: 1px solid rgba(255,255,255,0.08);
+        border-radius: 16px;
+        background: rgba(10, 14, 24, 0.78);
+        overflow: hidden;
+      }
+      .bridge-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 14px;
+      }
+      .bridge-status {
+        font-size: 12px;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        color: #8fb7ff;
+      }
+      .bridge-iframe {
+        width: 100%;
+        min-height: 720px;
+        border: 0;
+        background: #0b0f17;
+      }
+      .bridge-footer {
+        padding: 12px 14px;
+        font-size: 12px;
+        color: rgba(244,247,251,.68);
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        flex-wrap: wrap;
+      }
+      code {
+        color: #a9c8ff;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      const bootstrap = __TRAFFIC_COUNTER_BOOTSTRAP__;
+
+      const root = document.getElementById('root');
+      root.innerHTML = `
+        <div class="bridge-shell">
+          <div class="bridge-panel bridge-header">
+            <div>
+              <div class="bridge-status">Streamlit bridge ready</div>
+              <div>Embedded React/Vite overlay</div>
+            </div>
+            <div>Project <code>${bootstrap?.spec?.projectId || 'preview'}</code></div>
+          </div>
+          <div class="bridge-panel" style="min-height: 0;">
+            <iframe id="overlayFrame" class="bridge-iframe" title="Hybrid overlay"></iframe>
+          </div>
+          <div class="bridge-panel bridge-footer">
+            <span id="bridgeState">Waiting for React snapshot…</span>
+            <span id="bridgeSummary"></span>
+          </div>
+        </div>
+      `;
+
+      const frame = document.getElementById('overlayFrame');
+      const bridgeState = document.getElementById('bridgeState');
+      const bridgeSummary = document.getElementById('bridgeSummary');
+
+      const guestHtml = `<!doctype html>
+      <html lang="en">
+        <head>
+          <meta charset="UTF-8" />
+          <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+          <title>Traffic Counter React Guest</title>
+          <style>
+            html, body, #root { margin: 0; width: 100%; height: 100%; background: #0b0f17; color: #f4f7fb; font-family: Inter, 'Segoe UI', system-ui, sans-serif; }
+            #root { overflow: hidden; }
+          </style>
+          <script type="module">
+            import React from 'https://esm.sh/react@19.2.0';
+            import ReactDOM from 'https://esm.sh/react-dom@19.2.0/client';
+
+            const bootstrap = window.__TRAFFIC_COUNTER_GUEST_BOOTSTRAP__ || {};
+            const VIEWPORT_WIDTH = 1920;
+            const VIEWPORT_HEIGHT = 1080;
+
+            function cloneLine(line) {
+              return { ...line, points: (line.points || []).map(([x, y]) => [x, y]) };
+            }
+
+            function buildDefaultModel(spec, lines) {
+              const visibleLayers = {
+                'saved-lines': true,
+                'frame-scrubber': true,
+                'direction-overlay': true,
+                counts: true,
+                heatmap: false,
+                suggestions: false,
+              };
+              for (const layer of Object.keys(visibleLayers)) {
+                visibleLayers[layer] = (spec.activeLayers || []).includes(layer);
+              }
+              return { spec, currentFrame: 0, selectedLineId: lines[0]?.id ?? null, lines, visibleLayers };
+            }
+
+            function buildBridgePayload(model) {
+              return {
+                kind: 'overlay-snapshot',
+                projectId: model.spec.projectId,
+                videoIds: [...(model.spec.videoIds || [])],
+                selectedLineId: model.selectedLineId,
+                currentFrame: model.currentFrame,
+                activeLayers: Object.keys(model.visibleLayers).filter((k) => model.visibleLayers[k]),
+                lines: model.lines.map(cloneLine),
+              };
+            }
+
+            function GuestApp() {
+              const spec = bootstrap.spec || { projectId: 'preview', videoIds: [], selectedLineIds: [], frameCount: 100, activeLayers: ['saved-lines', 'frame-scrubber', 'direction-overlay', 'counts'] };
+              const initialLines = (bootstrap.initialLines || []).map(cloneLine);
+              const [model, setModel] = React.useState(() => buildDefaultModel(spec, initialLines));
+              const bridgePayload = React.useMemo(() => buildBridgePayload(model), [model]);
+
+              React.useEffect(() => {
+                setModel(buildDefaultModel(spec, initialLines));
+              }, [JSON.stringify(spec), JSON.stringify(initialLines)]);
+
+              React.useEffect(() => {
+                window.parent.postMessage({ source: 'traffic-counter-hybrid-viewport', payload: bridgePayload }, '*');
+              }, [bridgePayload]);
+
+              const selectedLine = model.lines.find((line) => line.id === model.selectedLineId) || null;
+
+              return React.createElement('div', { style: { width: '100%', height: '100%', display: 'grid', gridTemplateColumns: '1.7fr 0.9fr', gap: '16px', boxSizing: 'border-box', padding: '16px' } },
+                React.createElement('section', { style: { border: '1px solid rgba(255,255,255,0.1)', borderRadius: '18px', background: 'rgba(10,14,24,0.78)', padding: '16px', minHeight: '0' } },
+                  React.createElement('div', { style: { fontSize: '12px', color: '#8fb7ff', textTransform: 'uppercase', letterSpacing: '.12em', marginBottom: '8px' } }, 'React guest connected'),
+                  React.createElement('div', { style: { fontSize: '18px', fontWeight: 700, marginBottom: '12px' } }, 'Interactive viewport'),
+                  React.createElement('svg', { viewBox: `0 0 ${VIEWPORT_WIDTH} ${VIEWPORT_HEIGHT}`, style: { width: '100%', height: 'min(56vh, 700px)', display: 'block', borderRadius: '14px', background: 'linear-gradient(135deg, rgba(255,255,255,0.05), transparent 42%), repeating-linear-gradient(45deg, rgba(255,255,255,0.03) 0, rgba(255,255,255,0.03) 12px, transparent 12px, transparent 24px)' } },
+                    React.createElement('rect', { width: VIEWPORT_WIDTH, height: VIEWPORT_HEIGHT, fill: 'transparent' }),
+                    React.createElement('text', { x: 64, y: 78, fill: '#f4f7fb', fontSize: 46, fontWeight: 800 }, 'Hybrid viewport ready'),
+                    React.createElement('text', { x: 64, y: 116, fill: 'rgba(244,247,251,.72)', fontSize: 22 }, selectedLine ? `Selected: ${selectedLine.name}` : 'Select a line to edit it'),
+                    model.lines.map((line) => {
+                      const isSelected = line.id === model.selectedLineId;
+                      const points = (line.points || []).map(([x, y]) => `${x},${y}`).join(' ');
+                      return React.createElement('g', { key: line.id, onClick: () => setModel((current) => ({ ...current, selectedLineId: line.id })) },
+                        line.kind === 'polyline'
+                          ? React.createElement('polyline', { points, stroke: line.color, strokeWidth: isSelected ? 10 : 7, fill: 'none', strokeLinecap: 'round', strokeLinejoin: 'round' })
+                          : React.createElement('line', { x1: line.points?.[0]?.[0] ?? 0, y1: line.points?.[0]?.[1] ?? 0, x2: line.points?.[line.points.length - 1]?.[0] ?? 0, y2: line.points?.[line.points.length - 1]?.[1] ?? 0, stroke: line.color, strokeWidth: isSelected ? 10 : 7, strokeLinecap: 'round' }),
+                        (line.points || []).map(([x, y], index) => React.createElement('circle', { key: `${line.id}-${index}`, cx: x, cy: y, r: isSelected ? 16 : 12, fill: line.color, stroke: 'white', strokeWidth: 4 })),
+                        React.createElement('text', { x: line.points?.[0]?.[0] ?? 0, y: (line.points?.[0]?.[1] ?? 0) - 22, fill: '#f4f7fb', fontSize: 20, fontWeight: 700 }, line.name)
+                      );
+                    })
+                  )
+                ),
+                React.createElement('aside', { style: { border: '1px solid rgba(255,255,255,0.1)', borderRadius: '18px', background: 'rgba(10,14,24,0.78)', padding: '16px', minHeight: '0', overflow: 'auto' } },
+                  React.createElement('div', { style: { fontSize: '16px', fontWeight: 700, marginBottom: '10px' } }, 'Bridge payload'),
+                  React.createElement('pre', { style: { whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: '#a9c8ff', margin: 0 } }, JSON.stringify(bridgePayload, null, 2))
+                )
+              );
+            }
+
+            const root = ReactDOM.createRoot(document.getElementById('root'));
+            root.render(React.createElement(GuestApp));
+          </script>
+        </head>
+        <body>
+          <div id="root"></div>
+        </body>
+      </html>`;
+
+      frame.setAttribute('srcdoc', guestHtml.replace(/__TRAFFIC_COUNTER_GUEST_BOOTSTRAP__/g, JSON.stringify(bootstrap)));
+
+      window.addEventListener('message', (event) => {
+        if (!event.data || event.data.source !== 'traffic-counter-hybrid-viewport') return;
+        bridgeState.textContent = 'Snapshot received from React';
+        const payload = event.data.payload || {};
+        bridgeSummary.textContent = `${payload.lines?.length || 0} line(s), frame ${((payload.currentFrame ?? 0) + 1)}`;
+      });
+    </script>
+  </body>
+</html>

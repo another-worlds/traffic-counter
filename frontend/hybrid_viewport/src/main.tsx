@@ -32,11 +32,15 @@ function OverlayRoot() {
   );
 
   React.useEffect(() => {
+    // ResizeObserver keeps the iframe height in sync with actual content.
+    let observer: ResizeObserver | null = null;
+    function updateHeight() {
+      Streamlit.setFrameHeight(document.documentElement.scrollHeight);
+    }
+
     function handleStreamlitRender(event: Event) {
       const customEvent = event as CustomEvent<RenderData>;
       const args = (customEvent.detail?.args as StreamlitRenderArgs | undefined) ?? {};
-      // Always notify Streamlit of the frame height so the iframe is never collapsed.
-      Streamlit.setFrameHeight(960);
       if (!args.bootstrap) {
         return;
       }
@@ -44,13 +48,18 @@ function OverlayRoot() {
       window.__TRAFFIC_COUNTER_HYBRID_VIEWPORT__ = args.bootstrap;
     }
 
-    // Register the render listener BEFORE signalling readiness so the first render
-    // event (which Streamlit fires synchronously after receiving setComponentReady)
-    // is never missed.
-    // Events are dispatched on Streamlit.events (not window) since component-lib v1.4+.
     Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, handleStreamlitRender);
+
+    // Start observing after mount so the DOM is fully laid out.
+    observer = new ResizeObserver(updateHeight);
+    observer.observe(document.body);
+    updateHeight();
+
     Streamlit.setComponentReady();
-    return () => Streamlit.events.removeEventListener(Streamlit.RENDER_EVENT, handleStreamlitRender);
+    return () => {
+      Streamlit.events.removeEventListener(Streamlit.RENDER_EVENT, handleStreamlitRender);
+      observer?.disconnect();
+    };
   }, []);
 
   return <App bootstrap={bootstrap} onSnapshot={handleSnapshot} />;

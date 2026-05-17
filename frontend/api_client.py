@@ -85,6 +85,13 @@ def delete_video(video_id: str):
         r = c.delete(f"/videos/{video_id}")
         _raise(r)
 
+def list_video_frames(video_id: str) -> List[Dict]:
+    """Return scene-based keyframes: [{index, time_s, frame_index_in_video, url}]."""
+    with _client() as c:
+        r = c.get(f"/videos/{video_id}/frames")
+        _raise(r)
+        return r.json()
+
 def get_frame_url(video_id: str) -> Optional[str]:
     with _client() as c:
         r = c.get(f"/videos/{video_id}/frame-url")
@@ -195,10 +202,14 @@ def export_xlsx(project_id: str, video_ids: List[str], line_ids: List[str]) -> b
 
 
 def file_url(relative: str) -> str:
-    """Convert API-relative file paths (e.g. /files/...) into absolute URLs."""
+    """Convert API-relative file paths (e.g. /files/...) into absolute URLs.
+
+    Uses PUBLIC_API_URL so the browser inside the React iframe can reach the asset
+    (API_URL may be an internal Docker hostname not reachable from the browser).
+    """
     if relative.startswith("http"):
         return relative
-    return f"{API_URL}{relative}"
+    return f"{PUBLIC_API_URL}{relative}"
 
 
 # --- worker / dashboard ---

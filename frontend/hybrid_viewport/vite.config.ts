@@ -2,6 +2,10 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { resolve } from 'path';
 
+// Viewport-only build — outputs to dist/
+// The uploader has its own config (vite.uploader.config.ts) so each bundle
+// gets its own self-contained dist tree (assets sibling to index.html),
+// which is required for Streamlit's component static-file server.
 export default defineConfig({
   plugins: [react()],
   base: './',
@@ -9,12 +13,7 @@ export default defineConfig({
     outDir: 'dist',
     emptyOutDir: true,
     rollupOptions: {
-      input: {
-        // Main viewport: dist/index.html
-        viewport: resolve(__dirname, 'index.html'),
-        // Uploader: dist/uploader/index.html — Streamlit bridge points to dist/uploader/
-        uploader: resolve(__dirname, 'uploader/index.html'),
-      },
+      input: resolve(__dirname, 'index.html'),
     },
   },
 });

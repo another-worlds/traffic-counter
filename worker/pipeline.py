@@ -27,11 +27,18 @@ from PIL import Image, ImageDraw
 from ultralytics import YOLO
 
 from storage import (
-    get_storage, key_video, key_tracks, key_frame, key_trajectories,
+    get_storage, key_video, key_tracks, key_frame, key_scene_frame, key_trajectories,
 )
 
 # Vehicle classes (COCO defaults that Ultralytics yolov8 uses).
 VEHICLE_CLASSES = [1, 2, 3, 5, 7]  # bicycle, car, motorcycle, bus, truck
+
+try:
+    from scenedetect import open_video as _sd_open_video, SceneManager as _SceneManager
+    from scenedetect.detectors import ContentDetector as _ContentDetector
+    _SCENEDETECT_AVAILABLE = True
+except ImportError:
+    _SCENEDETECT_AVAILABLE = False
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "yolov8m.pt")
 DEVICE = os.environ.get("DEVICE", "cuda:0")
@@ -69,6 +76,40 @@ def _grab_frame(video_path: str, frame_idx: int, out_path: str) -> bool:
         return False
     cv2.imwrite(out_path, frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     return True
+
+
+def _detect_scenes(video_path: str, fps: float, num_frames: int) -> list:
+    """Detect scene/angle changes and return one keyframe per scene.
+
+    Falls back to a single mid-video frame if PySceneDetect is unavailable or
+    finds no cuts (uniform footage).
+    """
+    fallback_idx = max(0, num_frames // 2)
+    fallback = [{"index": 0, "frame_index_in_video": fallback_idx,
+                 "time_s": round(fallback_idx / fps, 2) if fps > 0 else 0.0}]
+
+    if not _SCENEDETECT_AVAILABLE:
+        return fallback
+
+    try:
+        video = _sd_open_video(video_path)
+        sm = _SceneManager()
+        sm.add_detector(_ContentDetector(threshold=27.0))
+        sm.detect_scenes(video, show_progress=False)
+        scenes = sm.get_scene_list()
+        if not scenes:
+            return fallback
+        result = []
+        for i, (start, end) in enumerate(scenes):
+            mid_frame = (start.get_frames() + end.get_frames()) // 2
+            result.append({
+                "index": i,
+                "frame_index_in_video": int(mid_frame),
+                "time_s": round(mid_frame / fps, 2) if fps > 0 else 0.0,
+            })
+        return result
+    except Exception:
+        return fallback
 
 
 def _render_trajectories(df: pd.DataFrame, w: int, h: int, out_path: str) -> None:
@@ -180,22 +221,24 @@ def process_video(
                 "cx", "cy", "w", "h",
             ])
 
-        # Choose representative frame = the one with the most simultaneous tracks
-        if per_frame_counts:
-            rep_idx = max(per_frame_counts, key=per_frame_counts.get)
-        else:
-            rep_idx = meta["num_frames"] // 2
+        # Detect scene/angle changes; extract one representative frame per scene.
+        scenes = _detect_scenes(local_video, fps, meta["num_frames"] or 1)
+        for scene in scenes:
+            local_scene_frame = str(td / f"frame_{scene['index']}.jpg")
+            _grab_frame(local_video, scene["frame_index_in_video"], local_scene_frame)
+            storage.upload_file(
+                key_scene_frame(project_id, video_id, scene["index"]),
+                local_scene_frame,
+            )
 
-        _grab_frame(local_video, rep_idx, local_frame)
         _render_trajectories(df, w, h, local_traj)
-
         df.to_parquet(local_tracks, index=False)
 
         storage.upload_file(key_tracks(project_id, video_id), local_tracks)
-        storage.upload_file(key_frame(project_id, video_id), local_frame)
         storage.upload_file(key_trajectories(project_id, video_id), local_traj)
 
     return {
         **meta,
         "num_tracks": int(df["track_id"].nunique()) if not df.empty else 0,
+        "scene_frames": scenes,
     }

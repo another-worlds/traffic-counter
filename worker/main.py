@@ -86,6 +86,7 @@ def fetch_video(video_id: str):
 
 
 def mark_analyzed(video_id: str, meta: dict):
+    import json as _json
     with engine.begin() as conn:
         conn.execute(text("""
             UPDATE videos SET
@@ -97,6 +98,7 @@ def mark_analyzed(video_id: str, meta: dict):
                 height=:height,
                 num_frames=:num_frames,
                 num_tracks=:num_tracks,
+                scene_frames=:scene_frames,
                 analyzed_at=:analyzed_at
             WHERE id=:id
         """), {
@@ -107,6 +109,7 @@ def mark_analyzed(video_id: str, meta: dict):
             "height": meta.get("height"),
             "num_frames": meta.get("num_frames"),
             "num_tracks": meta.get("num_tracks"),
+            "scene_frames": _json.dumps(meta.get("scene_frames") or []),
             "analyzed_at": datetime.utcnow(),
         })
 

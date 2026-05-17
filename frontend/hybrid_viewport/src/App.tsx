@@ -123,12 +123,17 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
     <div className="overlay-shell">
       <header className="overlay-header">
         <div>
-          <p className="eyebrow">Hybrid viewport</p>
-          <h1>Counting line editor</h1>
+          <p className="eyebrow">Counting line editor</p>
+          <h1>Traffic Counter</h1>
         </div>
         <div className="header-info">
           <div className="frame-pill">
-            Frame {model.currentFrame + 1} / {Math.max(model.spec.frameCount, 1)}
+            {(() => {
+              const entry = bootstrap?.frames?.[model.currentFrame];
+              const total = Math.max(model.spec.frameCount, 1);
+              if (entry) return `Scene ${model.currentFrame + 1} / ${total} · ${entry.time_s.toFixed(1)}s`;
+              return `Frame ${model.currentFrame + 1} / ${total}`;
+            })()}
           </div>
           <div className="instruction-pill">
             Click-drag empty area → new line · drag line → move · drag handle → resize · Delete → remove

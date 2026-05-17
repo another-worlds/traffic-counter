@@ -46,6 +46,7 @@ def _safe_add_columns():
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS started_analyzing_at TIMESTAMP",
         "ALTER TABLE projects ADD COLUMN IF NOT EXISTS last_exported_at TIMESTAMP",
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS tus_upload_id VARCHAR(64)",
+        "ALTER TABLE videos ADD COLUMN IF NOT EXISTS scene_frames JSON DEFAULT '[]'",
         """CREATE TABLE IF NOT EXISTS tus_uploads (
             id VARCHAR PRIMARY KEY,
             project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

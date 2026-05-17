@@ -48,6 +48,10 @@ class Video(Base):
     started_analyzing_at = Column(DateTime)
     tus_upload_id = Column(String(64), nullable=True, index=True)
 
+    # Scene-based keyframes extracted during analysis.
+    # List of {"index": int, "time_s": float, "frame_index_in_video": int}
+    scene_frames = Column(JSON, default=list, nullable=False, server_default="[]")
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     analyzed_at = Column(DateTime)
 

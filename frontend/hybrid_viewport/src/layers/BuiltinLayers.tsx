@@ -4,19 +4,22 @@ const FrameLayer: Layer = {
   key: 'frame-scrubber',
   label: 'Frame',
   defaultVisible: true,
-  render({ bootstrap, videoSize }: LayerRenderContext) {
+  render({ model, bootstrap, videoSize }: LayerRenderContext) {
     const { width, height } = videoSize;
-    return bootstrap.frameUrl ? (
+    // Scene-based frames take priority; fall back to legacy single frameUrl.
+    const frameUrl =
+      bootstrap.frames?.[model.currentFrame]?.url ?? bootstrap.frameUrl ?? null;
+    return frameUrl ? (
       <image
         key="frame"
-        href={bootstrap.frameUrl}
+        href={frameUrl}
         x={0} y={0}
         width={width} height={height}
         preserveAspectRatio="none"
         style={{ pointerEvents: 'none' }}
       />
     ) : (
-      <rect key="frame-bg" width={width} height={height} fill="#0e1424" />
+      <rect key="frame-bg" width={width} height={height} fill="#0e1117" />
     );
   },
 };

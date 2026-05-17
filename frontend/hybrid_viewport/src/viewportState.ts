@@ -90,9 +90,18 @@ export type BridgePayload = {
   pendingActions: PendingAction[];
 };
 
+export type SceneFrame = {
+  index: number;
+  time_s: number;
+  url: string | null;
+};
+
 export type HostViewportBootstrap = {
   spec?: Partial<ViewportSpec>;
   initialLines?: ApiLine[] | LineGeometry[];
+  /** Scene-based keyframes from the backend; replaces the single frameUrl. */
+  frames?: SceneFrame[];
+  /** Legacy single-frame fallback (used when frames[] is absent). */
   frameUrl?: string;
   trajectoriesUrl?: string;
   heatmapUrl?: string;
@@ -417,7 +426,7 @@ export function buildViewportSpecFromBootstrap(bootstrap?: HostViewportBootstrap
     projectId: bootstrap?.spec?.projectId ?? 'preview',
     videoIds: bootstrap?.spec?.videoIds ?? [],
     selectedLineIds: bootstrap?.spec?.selectedLineIds ?? [],
-    frameCount: bootstrap?.spec?.frameCount ?? 100,
+    frameCount: bootstrap?.frames?.length ?? bootstrap?.spec?.frameCount ?? 1,
     activeLayers:
       bootstrap?.spec?.activeLayers ?? ['saved-lines', 'frame-scrubber', 'direction-overlay', 'counts', 'trajectories'],
   };

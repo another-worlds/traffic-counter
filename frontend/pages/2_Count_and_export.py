@@ -239,8 +239,15 @@ def render_page() -> None:
         active_layers=spec.active_layers,
     )
 
-    # Fetch asset URLs and stats for the preview video.
-    frame_rel = api.get_frame_url(preview_video["id"])
+    # Fetch scene-based keyframes + overlay asset URLs for the preview video.
+    try:
+        raw_frames = api.list_video_frames(preview_video["id"])
+        frames_for_bootstrap = [
+            {**f, "url": _absolute_url(f.get("url"))} for f in raw_frames
+        ]
+    except Exception:
+        frames_for_bootstrap = []
+
     traj_rel = api.get_trajectories_url(preview_video["id"])
     heatmap_rel: Optional[str] = None
     try:
@@ -265,16 +272,21 @@ def render_page() -> None:
     suggestions_key = f"hybrid_suggestions_{ws['id']}"
     suggestions = st.session_state.get(suggestions_key)
 
+    # frameCount driven by actual scene count; frameUrl is legacy fallback.
+    scene_count = max(len(frames_for_bootstrap), 1)
+    legacy_frame_url = frames_for_bootstrap[0]["url"] if frames_for_bootstrap else None
+
     bootstrap = {
         "spec": {
             "projectId": spec.project_id,
             "videoIds": spec.video_ids,
             "selectedLineIds": spec.selected_line_ids,
-            "frameCount": spec.frame_count,
+            "frameCount": scene_count,
             "activeLayers": list(spec.active_layers),
         },
         "initialLines": lines,
-        "frameUrl": _absolute_url(frame_rel),
+        "frames": frames_for_bootstrap,
+        "frameUrl": legacy_frame_url,
         "trajectoriesUrl": _absolute_url(traj_rel),
         "heatmapUrl": _absolute_url(heatmap_rel),
         "videoSize": {

@@ -1,6 +1,6 @@
 # Counting Line Overlay Semantic Contract
 
-Status: [IN_PROGRESS]
+Status: [DONE]
 
 ## Scope
 

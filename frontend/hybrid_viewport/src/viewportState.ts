@@ -83,8 +83,10 @@ export function createDefaultOverlayModel(spec: ViewportSpec, lines: LineGeometr
 
 export function createDemoLine(index: number): LineGeometry {
   const offset = 80 + index * 22;
+  // Use a timestamp suffix to prevent ID collisions when lines are added after deletions.
+  const id = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `demo-${Date.now()}-${index}`;
   return {
-    id: `line-${index + 1}`,
+    id,
     name: `line ${index + 1}`,
     color: index % 2 === 0 ? '#e24b4a' : '#4ecdc4',
     kind: 'line',

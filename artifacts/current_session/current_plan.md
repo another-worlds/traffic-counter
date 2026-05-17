@@ -58,3 +58,8 @@ Status snapshot: [IN_PROGRESS] on 2026-05-17
   - Notes: `frontend/pages/2_Count_and_export_hybrid.py` now reconciles overlay snapshots against API lines, dispatches create/update/delete operations, and refreshes counts from synchronized line ids.
 - [DONE] Fix component module MIME failure by enforcing embedded-safe asset paths.
   - Notes: Vite config now uses relative base and component dist entry references `./assets/...`, preventing Streamlit nested route from serving HTML for JS module URLs.
+
+## Phase 4 - Runtime Fixes
+
+- [DONE] Fix Vite-inside-Streamlit hybrid handshake and export on count-and-export hybrid page.
+  - Notes: Fixed main.tsx to register the Streamlit render event listener before calling setComponentReady (eliminates first-render miss), always call setFrameHeight(940) on every render event (prevents collapsed iframe when bootstrap is absent on initial load), and stabilized the onSnapshot prop with useCallback (prevents redundant setComponentValue calls on every render). Fixed createDemoLine in viewportState.ts to use crypto.randomUUID for IDs, preventing collisions after line deletions. Removed planning-skeleton banners, debug st.json/st.write dumps, and unconditional st.success from 2_Count_and_export_hybrid.py. Added XLSX export button with session-state caching and st.download_button. Fixed _points_match to use 0.5 px tolerance instead of exact float equality. Added hybrid_viewport/__init__.py for explicit Python package declaration. Updated counting_line_overlay contract status to [DONE].

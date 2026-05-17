@@ -2,7 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { Streamlit, type RenderData } from 'streamlit-component-lib';
 import App from './App';
-import { buildInitialLinesFromBootstrap, buildViewportSpecFromBootstrap, type HostViewportBootstrap } from './viewportState';
+import { buildInitialLinesFromBootstrap, buildViewportSpecFromBootstrap, type BridgePayload, type HostViewportBootstrap } from './viewportState';
 
 declare global {
   interface Window {
@@ -31,7 +31,7 @@ function OverlayRoot() {
   // Stable reference so the App's onSnapshot effect only fires when bridgePayload changes,
   // not on every render cycle.
   const handleSnapshot = React.useCallback(
-    (payload: ReturnType<typeof import('./viewportState').buildBridgePayload>) => Streamlit.setComponentValue(payload),
+    (payload: BridgePayload) => Streamlit.setComponentValue(payload),
     [],
   );
 
@@ -51,9 +51,10 @@ function OverlayRoot() {
     // Register the render listener BEFORE signalling readiness so the first render
     // event (which Streamlit fires synchronously after receiving setComponentReady)
     // is never missed.
-    window.addEventListener(Streamlit.RENDER_EVENT, handleStreamlitRender);
+    // Events are dispatched on Streamlit.events (not window) since component-lib v1.4+.
+    Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, handleStreamlitRender);
     Streamlit.setComponentReady();
-    return () => window.removeEventListener(Streamlit.RENDER_EVENT, handleStreamlitRender);
+    return () => Streamlit.events.removeEventListener(Streamlit.RENDER_EVENT, handleStreamlitRender);
   }, []);
 
   const spec = buildViewportSpecFromBootstrap(bootstrap);

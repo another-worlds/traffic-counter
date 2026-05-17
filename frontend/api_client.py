@@ -12,7 +12,9 @@ class APIError(Exception):
 
 
 def _client() -> httpx.Client:
-    return httpx.Client(base_url=API_URL, timeout=120.0)
+    # Increased timeout for large file uploads (can take 10+ minutes for 100GB over slow networks)
+    # Timeout is per request, not per connection, so 3600s (1 hour) is reasonable for very large files
+    return httpx.Client(base_url=API_URL, timeout=3600.0)
 
 
 def _raise(r: httpx.Response):
@@ -50,7 +52,14 @@ def list_videos(project_id: str) -> List[Dict]:
         _raise(r)
         return r.json()
 
-def upload_video(project_id: str, filename: str, data: bytes) -> Dict:
+def upload_video(project_id: str, filename: str, data) -> Dict:
+    """Upload a video file. data can be bytes or a file-like object.
+
+    httpx automatically:
+    - Streams file-like objects without buffering
+    - Sets Content-Length from file size (enables FastAPI multipart streaming)
+    - Works for both bytes (<1GB) and file objects (>1GB)
+    """
     with _client() as c:
         files = {"file": (filename, data, "video/mp4")}
         r = c.post(f"/projects/{project_id}/videos", files=files, timeout=None)

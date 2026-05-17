@@ -1,3 +1,10 @@
+FROM node:22-slim AS vite-builder
+WORKDIR /build
+COPY hybrid_viewport/package.json hybrid_viewport/package-lock.json ./
+RUN npm ci
+COPY hybrid_viewport/ ./
+RUN npm run build
+
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -10,6 +17,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+COPY --from=vite-builder /build/dist ./hybrid_viewport/dist
 
 ENV PYTHONUNBUFFERED=1 \
     STREAMLIT_SERVER_PORT=8501 \

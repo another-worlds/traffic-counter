@@ -63,6 +63,21 @@ videos atomically (`SELECT ... FOR UPDATE SKIP LOCKED`). For local dev without
 a GPU, set `DEVICE=cpu` (already the default in `docker-compose.yml`); analysis
 runs in CPU mode (slow but works).
 
+### Large file uploads (>20GB)
+
+To support uploads larger than 20GB, create `frontend/.streamlit/config.toml`:
+
+```toml
+[client]
+maxUploadSize = 100000
+
+[server]
+maxUploadSize = 100000
+```
+
+The API and frontend automatically stream files >1GB to avoid memory exhaustion.
+See [docs/LARGE_FILE_UPLOADS.md](docs/LARGE_FILE_UPLOADS.md) for details and troubleshooting.
+
 ## Deploy to GCP
 
 Prerequisites: gcloud authenticated, billing enabled, project picked.

@@ -1,5 +1,6 @@
 import streamlit as st
 import time
+import httpx
 import api_client as api
 from sidebar import render_sidebar
 
@@ -18,25 +19,39 @@ with st.expander("Upload video", expanded=True):
     file = st.file_uploader("Video file (mp4, mov, mkv, up to 100GB)", type=["mp4", "mov", "mkv", "avi"])
     if file is not None:
         file_size_mb = file.size / (1024 * 1024)
-        st.caption(f"File size: {file_size_mb:.1f} MB")
+        file_size_gb = file_size_mb / 1024
+        st.caption(f"File size: {file_size_gb:.1f} GB" if file_size_mb > 1024 else f"File size: {file_size_mb:.1f} MB")
 
         if st.button("Upload"):
-            with st.spinner("Uploading..."):
-                try:
-                    # For files >1GB, stream from file.file to avoid memory exhaustion
-                    if file_size_mb > 1024:
-                        st.info("Large file detected — streaming upload (background process)")
-                        file.file.seek(0)
-                        data = file.file
-                    else:
+            try:
+                # For files >1GB, stream from file.file to avoid memory exhaustion
+                if file_size_mb > 1024:
+                    st.warning(
+                        f"Large file ({file_size_gb:.1f} GB) — streaming upload. "
+                        "This may take several minutes depending on network speed. "
+                        "**Do not close this page** until complete."
+                    )
+                    file.file.seek(0)
+                    data = file.file
+                    with st.spinner(f"Uploading {file.name} ({file_size_gb:.1f} GB)... This may take a few minutes."):
+                        v = api.upload_video(ws["id"], file.name, data)
+                else:
+                    with st.spinner("Uploading..."):
                         data = file.getvalue()
+                        v = api.upload_video(ws["id"], file.name, data)
 
-                    v = api.upload_video(ws["id"], file.name, data)
-                    st.success(f"Uploaded {file.name}")
-                    st.session_state["just_uploaded_id"] = v["id"]
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
+                st.success(f"✅ Successfully uploaded {file.name}")
+                st.session_state["just_uploaded_id"] = v["id"]
+                st.rerun()
+            except httpx.TimeoutException:
+                st.error(
+                    "⏱️ Upload timed out. The file may be too large for your network connection. "
+                    "Try uploading from a faster connection or split the file."
+                )
+            except httpx.ConnectError:
+                st.error("❌ Connection failed. Is the API server running? Check the API logs.")
+            except Exception as e:
+                st.error(f"❌ Upload failed: {str(e)}")
 
 # List
 videos = api.list_videos(ws["id"])

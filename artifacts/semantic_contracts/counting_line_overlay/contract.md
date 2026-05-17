@@ -30,13 +30,20 @@ The counting-line overlay is the advanced hybrid viewport that replaces the stat
 
 ## Streamlit-To-React Integration Contract
 
-The Streamlit host page is the orchestration shell. The React/Vite overlay is the interactive viewport. Their communication is explicit and bidirectional, and it goes through a Streamlit HTML embed bridge that inlines a browser-reachable React guest document:
+The Streamlit host page is the orchestration shell. The React/Vite overlay is the interactive viewport. Their communication is explicit and bidirectional, and it goes through a Streamlit custom component bridge:
 
-- Host -> React: bootstrap payload injected before mount or delivered after mount via `traffic-counter-host-shell` message.
-- React -> Host: overlay snapshot emitted on every meaningful viewport change via `traffic-counter-hybrid-viewport` postMessage and a local custom event.
+- Host -> React: bootstrap payload is passed as component arguments from Python.
+- React -> Host: overlay snapshot is returned through `Streamlit.setComponentValue(...)` as JSON.
 
-The bridge must not use the Streamlit custom-component API handshake. A runtime error such as `Unrecognized component API version: 'undefined'` is a contract violation and means the integration is still using the wrong transport.
-The React guest document must be reachable in the browser. A localhost-based external guest URL is development-only and is not a valid production contract.
+The bridge must implement the Streamlit component handshake correctly (`Streamlit.setComponentReady()` + render event flow, or the equivalent React wrapper from `streamlit-component-lib`). A runtime error such as `Unrecognized component API version: 'undefined'` is a contract violation and means the handshake is still broken.
+In development, a localhost frontend URL is acceptable; in production, the component must load a built static frontend bundle.
+
+### Visualization Build Contract
+
+- The component build entry (`dist/index.html`) must reference JS/CSS assets with relative URLs (`./assets/...`) for embedded Streamlit routes.
+- Vite must be configured with `base: './'` for production component bundles.
+- A module load failure with MIME mismatch (`text/html` served for `index-*.js`) is treated as a hard contract failure because viewport rendering cannot start.
+- Browser warnings about unsupported iframe features are non-blocking unless accompanied by handshake or render failure.
 
 ### Host Bootstrap Shape
 
@@ -84,14 +91,16 @@ type BridgePayload = {
 ### Contract Rules
 
 - The host bootstrap is authoritative for project, selected videos, line ids, frame count, and initial line geometry.
-- The React overlay must resync its local state whenever a new bootstrap payload arrives.
+- The React overlay must resync its local state whenever Streamlit reruns with new component args.
 - The React overlay must never write to the database or API directly; it only emits snapshots and action intent through the host bridge.
 - The Streamlit page is responsible for turning the overlay snapshot into API calls for persistence, recounting, and export.
 - Bootstrap and snapshot payloads must be serializable JSON values with no functions, Dates, or cyclic references.
-- The bridge wrapper must run as a Streamlit HTML embed and relay messages to the React guest iframe.
-- The bridge wrapper must never emit custom-component `apiVersion` messages in this mode.
-- A raw iframe-only page is not sufficient for production integration; the HTML embed must at minimum relay bootstrap payloads and overlay snapshots.
-- If the React guest document is not reachable, the bridge must surface a degraded state and not claim the overlay is connected.
+- The bridge wrapper must run as a Streamlit custom component declared from Python.
+- The frontend must only emit values through `Streamlit.setComponentValue(...)` and must not rely on raw `postMessage` as the canonical return path.
+- HTML embed transport is allowed only as a temporary diagnostics fallback and is not the production contract path.
+- If the component frontend cannot load, the host must surface a degraded state and never claim overlay connection.
+- Host-side reconciliation must be idempotent and snapshot-deduplicated to avoid duplicate create/update/delete operations across reruns.
+- Host-side count requests must execute after persistence reconciliation so line ids are authoritative.
 
 ## Invariants
 
@@ -129,10 +138,12 @@ type BridgePayload = {
 
 ## Integration Verification Checklist
 
-- Streamlit emits the bootstrap payload before or immediately after the React root mounts.
-- React consumes bootstrap payloads from `window.__TRAFFIC_COUNTER_HYBRID_VIEWPORT__` and from `traffic-counter-host-shell` messages.
-- React emits overlay snapshots through `window.parent.postMessage` using the `traffic-counter-hybrid-viewport` source tag.
+- Streamlit passes bootstrap payload through declared component args on each rerun.
+- React receives args via the Streamlit component render event or React wrapper props.
+- React emits overlay snapshots through `Streamlit.setComponentValue(...)`.
 - The payload shapes remain stable across line selection, frame scrubbing, line edits, and layer toggles.
 - The Streamlit page no longer reports `Unrecognized component API version: 'undefined'`.
-- The bridge messages are exchanged only through the HTML embed and `postMessage`.
-- The React guest is served from a browser-reachable document, not an assumed localhost-only endpoint.
+- The bridge handshake emits ready/render semantics once per mount and remains stable on reruns.
+- The component uses a Vite dev URL in development and static built assets in production.
+- Production `dist/index.html` references component assets through relative paths (`./assets/...`).
+- Browser console contains no module-script MIME mismatch for component assets.

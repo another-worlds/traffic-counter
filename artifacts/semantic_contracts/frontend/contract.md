@@ -19,6 +19,7 @@ The frontend is the operator interface for workspace selection, video upload, li
 - The UI must stay stateless with respect to persistent domain data.
 - All persistent mutations go through `frontend/api_client.py`.
 - Workspace selection is stored only in Streamlit session state.
+- Advanced counting-line overlay integration is canonical through Streamlit custom-component contracts; HTML embed is diagnostics-only fallback.
 
 ## Dependencies
 

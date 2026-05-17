@@ -9,7 +9,7 @@ This repository is a Python-first traffic-analysis system with three runtime sur
 - `worker/` uses Ultralytics YOLOv8, ByteTrack, OpenCV, pandas, NumPy, and PyArrow to generate `tracks.parquet`, `frame.jpg`, and `trajectories.png`.
 - Storage is abstracted behind a local filesystem or GCS implementation.
 
-For the counting-line advanced UI, the frontend splits into a Streamlit shell and a React/Vite custom component that renders the interactive overlay viewport. Streamlit's custom-components framework is the supported bridge for embedding advanced mini-applications inside Streamlit, Vite provides the fast dev server and production bundle, and React provides component/state/event handling for the overlay editor.
+For the counting-line advanced UI, the frontend splits into a Streamlit shell and a React/Vite custom component that renders the interactive overlay viewport. Streamlit's custom-components framework is the canonical bridge for embedding advanced mini-applications inside Streamlit, Vite provides the fast dev server and production bundle, and React provides component/state/event handling for the overlay editor.
 
 ## Evidence From The Codebase
 
@@ -20,6 +20,13 @@ For the counting-line advanced UI, the frontend splits into a Streamlit shell an
 - Streamlit custom-components docs describe components as a way to embed advanced UI and mini-applications inside Streamlit.
 - Vite docs describe the build tool as a fast dev server plus optimized production bundler for modern web projects.
 - React docs describe component composition, state, props, events, and shared data flow, which are the exact primitives needed for the overlay editor.
+
+## Best-Practice Citations (2026-05-17)
+
+- Streamlit Components v1 intro confirms the bi-directional component model, `components.declare_component()`, and `Streamlit.setComponentValue()` for Python <-> frontend exchange: https://docs.streamlit.io/develop/concepts/custom-components/components-v1/intro
+- Streamlit Components limitations clarifies iframe isolation and reinforces that complex interaction surfaces should live inside the component boundary: https://docs.streamlit.io/develop/concepts/custom-components/components-v1/limitations
+- Vite guide confirms dev server + optimized production bundle split and recommends explicit build for production deployments: https://vite.dev/guide/
+- React learn docs capture the state/event model needed for interactive overlay editing flows: https://react.dev/learn
 
 ## Rationale
 

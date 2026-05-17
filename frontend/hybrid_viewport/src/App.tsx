@@ -6,6 +6,7 @@ import './styles.css';
 type AppProps = {
   spec: ViewportSpec;
   initialLines?: LineGeometry[];
+  onSnapshot?: (payload: ReturnType<typeof buildBridgePayload>) => void;
 };
 
 const DEFAULT_SPEC: ViewportSpec = {
@@ -19,7 +20,7 @@ const DEFAULT_SPEC: ViewportSpec = {
 const VIEWPORT_WIDTH = 1920;
 const VIEWPORT_HEIGHT = 1080;
 
-export default function App({ spec = DEFAULT_SPEC, initialLines = [] }: AppProps) {
+export default function App({ spec = DEFAULT_SPEC, initialLines = [], onSnapshot }: AppProps) {
   const initialModel = useMemo(() => createDefaultOverlayModel(spec, initialLines), [spec, initialLines]);
   const [model, setModel] = useState<OverlayModel>(initialModel);
   const bridgePayload = useMemo(() => buildBridgePayload(model), [model]);
@@ -59,19 +60,9 @@ export default function App({ spec = DEFAULT_SPEC, initialLines = [] }: AppProps
   const selectedLine = model.lines.find((line) => line.id === model.selectedLineId) ?? null;
 
   useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-
-    const message = {
-      source: 'traffic-counter-hybrid-viewport',
-      payload: bridgePayload,
-    };
-
-    window.parent.postMessage(message, '*');
-    window.dispatchEvent(new CustomEvent('traffic-counter:overlay-snapshot', { detail: message }));
+    onSnapshot?.(bridgePayload);
     setBridgeStatus('sent');
-  }, [bridgePayload]);
+  }, [bridgePayload, onSnapshot]);
 
   return (
     <div className="overlay-shell">

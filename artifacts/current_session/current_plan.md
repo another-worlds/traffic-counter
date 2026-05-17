@@ -8,6 +8,10 @@ Status snapshot: [IN_PROGRESS] on 2026-05-17
   - Notes: Anchored to `README.md`, `api/app/main.py`, `api/app/routers/*.py`, `api/app/services/*.py`, `worker/main.py`, `worker/pipeline.py`, `frontend/streamlit_app.py`, `frontend/sidebar.py`, and `frontend/api_client.py`.
 - [DONE] Rebuild the counting-line advanced UI overlay as a distinct hybrid module.
   - Notes: The target UX is a React/Vite viewport embedded into Streamlit, replacing the static image-and-canvas editor in the current Count & Export page.
+- [DONE] Re-anchor hybrid overlay architecture to Streamlit custom component as the canonical integration path.
+  - Notes: HTML embed and srcdoc remain temporary fallback/diagnostics paths; the production architecture target is React overlay inside a Streamlit custom component with explicit bi-directional value contract.
+- [DONE] Add visualization deployment constraints for Streamlit component asset loading.
+  - Notes: Phase 1 now explicitly requires Vite relative asset base for embedded routes and treats module-script MIME mismatch as a hard failure mode.
 
 ## Phase 2 - Semantic Contracts
 
@@ -15,6 +19,10 @@ Status snapshot: [IN_PROGRESS] on 2026-05-17
   - Notes: Contracts mirror the current implementation and describe the real call graph, payload shapes, and storage keys.
 - [DONE] Add the counting-line overlay semantic contract, dataflow diagrams, and page skeleton.
   - Notes: This describes the hybrid viewport, live line editing, heatmap overlay, auto-suggest flow, and export handoff.
+- [DONE] Revise semantic contracts to align the hybrid overlay with Streamlit custom-component canonical integration.
+  - Notes: Counting-line overlay and modules overview contracts now define args/value handshake as primary path and reduce HTML embed to diagnostics fallback only.
+- [DONE] Revise semantic contracts with visualization runtime optimization and failure constraints.
+  - Notes: Phase 2 now codifies relative asset build contract, snapshot dedupe/idempotent reconciliation, and post-reconciliation count execution ordering.
 
 ## Phase 3 - Implementation
 
@@ -44,3 +52,9 @@ Status snapshot: [IN_PROGRESS] on 2026-05-17
   - Notes: `frontend/hybrid_viewport/streamlit_bridge/__init__.py` now uses `components.html(...)` to host the React iframe and relay bootstrap data without the custom-component API error.
 - [DONE] Revise the hybrid overlay architecture to require a browser-reachable React guest document instead of a localhost-only default.
   - Notes: The docs now treat the React guest as an inline browser-reachable document, mark localhost as dev-only, and require a degraded state when the guest cannot load.
+- [DONE] Implement canonical Streamlit custom-component bridge handshake and value-return path.
+  - Notes: The Python bridge now uses `declare_component`, React consumes Streamlit render args, and overlay snapshots return via `Streamlit.setComponentValue(...)` to the host page.
+- [DONE] Implement host-side snapshot reconciliation to line persistence and live counts.
+  - Notes: `frontend/pages/2_Count_and_export_hybrid.py` now reconciles overlay snapshots against API lines, dispatches create/update/delete operations, and refreshes counts from synchronized line ids.
+- [DONE] Fix component module MIME failure by enforcing embedded-safe asset paths.
+  - Notes: Vite config now uses relative base and component dist entry references `./assets/...`, preventing Streamlit nested route from serving HTML for JS module URLs.

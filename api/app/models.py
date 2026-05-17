@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, Integer, Float, ForeignKey, DateTime, JSON
+from sqlalchemy import Column, String, Text, Integer, Float, BigInteger, ForeignKey, DateTime, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from .db import Base
@@ -17,6 +17,7 @@ class Project(Base):
     name = Column(String(255), nullable=False)
     description = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_exported_at = Column(DateTime)
 
     videos = relationship("Video", back_populates="project", cascade="all, delete-orphan")
     lines = relationship("CountingLine", back_populates="project", cascade="all, delete-orphan")
@@ -34,12 +35,17 @@ class Video(Base):
     status = Column(String(32), default="uploaded", nullable=False)
     error_message = Column(Text)
 
+    size_bytes = Column(BigInteger)
     fps = Column(Float)
     duration_s = Column(Float)
     width = Column(Integer)
     height = Column(Integer)
     num_frames = Column(Integer)
     num_tracks = Column(Integer)
+
+    # Analysis progress: 0.0–1.0 while analyzing, reset to None when done/error
+    progress_pct = Column(Float, default=0.0)
+    started_analyzing_at = Column(DateTime)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     analyzed_at = Column(DateTime)

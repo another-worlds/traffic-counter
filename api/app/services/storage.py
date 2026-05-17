@@ -133,5 +133,8 @@ def key_frame(project_id: str, video_id: str) -> str:
 def key_trajectories(project_id: str, video_id: str) -> str:
     return f"projects/{project_id}/videos/{video_id}/trajectories.png"
 
+def key_heatmap(project_id: str, video_id: str) -> str:
+    return f"projects/{project_id}/videos/{video_id}/heatmap.png"
+
 def key_export(project_id: str, export_id: str) -> str:
     return f"projects/{project_id}/exports/{export_id}.xlsx"

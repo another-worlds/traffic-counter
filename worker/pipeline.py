@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from typing import Dict, List
+from typing import Callable, Dict, List, Optional
 
 import cv2
 import numpy as np
@@ -103,6 +103,7 @@ def process_video(
     project_id: str,
     video_id: str,
     filename: str,
+    on_progress: Optional[Callable[[float], None]] = None,
 ) -> Dict:
     storage = get_storage()
     src_key = key_video(project_id, video_id, filename)
@@ -123,6 +124,9 @@ def process_video(
 
         rows: List[dict] = []
         per_frame_counts: Dict[int, int] = {}
+        total_frames = meta["num_frames"] or 1
+        frames_processed = 0
+        last_reported = 0
 
         # Ultralytics' track() handles ByteTrack and ID assignment for us.
         # stream=True yields a Results object per frame without storing them all.
@@ -140,6 +144,14 @@ def process_video(
 
         for r in results_iter:
             frame_idx = int(getattr(r, "frame_id", 0) or 0)
+            frames_processed += 1
+
+            # Report progress every 50 frames (keeps DB writes negligible)
+            if on_progress and frames_processed - last_reported >= 50:
+                pct = min(frames_processed / total_frames, 0.99)
+                on_progress(pct)
+                last_reported = frames_processed
+
             if r.boxes is None or r.boxes.id is None:
                 continue
             xywh = r.boxes.xywh.cpu().numpy()

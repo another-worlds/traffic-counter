@@ -1,87 +1,117 @@
+import time
+from datetime import datetime
+
 import streamlit as st
 import api_client as api
+from sidebar import render_sidebar, _workspace_status, _fmt_duration, _fmt_size
 
 st.set_page_config(page_title="Traffic Counter", page_icon="🚗", layout="wide")
 
-st.title("Traffic Counter")
-st.caption("Project-organized vehicle tracking and counting.")
+render_sidebar()
 
-# Sidebar: project picker / creator
-with st.sidebar:
-    st.header("Projects")
-    try:
-        projects = api.list_projects()
-    except Exception as e:
-        st.error(f"API unreachable: {e}")
-        st.stop()
+st.title("🚗 Traffic Counter")
 
-    project_map = {p["name"]: p for p in projects}
-    selected_name = st.selectbox(
-        "Active project",
-        options=["— select —"] + list(project_map.keys()),
-        key="selected_project_name",
-    )
-    if selected_name and selected_name != "— select —":
-        st.session_state["project"] = project_map[selected_name]
-    else:
-        st.session_state.pop("project", None)
+# =============================================================================
+# Section A — Worker Activity
+# =============================================================================
+st.subheader("⚙️ Worker activity")
 
-    st.divider()
-    with st.expander("Create new project"):
-        with st.form("create_project_form", clear_on_submit=True):
-            name = st.text_input("Name")
-            desc = st.text_area("Description (optional)")
-            if st.form_submit_button("Create") and name.strip():
-                try:
-                    api.create_project(name.strip(), desc.strip())
-                    st.success(f"Created {name}")
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
+try:
+    active_jobs = api.worker_status()
+except Exception as e:
+    st.warning(f"Could not reach worker status: {e}")
+    active_jobs = []
 
-# Main pane
-proj = st.session_state.get("project")
-if not proj:
-    st.info("Pick or create a project in the sidebar to begin.")
-    if projects:
-        st.subheader("All projects")
-        for p in projects:
-            with st.container(border=True):
-                st.write(f"**{p['name']}**")
-                if p.get("description"):
-                    st.caption(p["description"])
-                st.caption(f"Created {p['created_at']}")
-    st.stop()
+if not active_jobs:
+    st.success("Worker is idle — no videos currently queued or analyzing.")
+else:
+    now = datetime.utcnow()
+    total_jobs = len(active_jobs)
+    overall_pct = sum(j.get("progress_pct", 0) for j in active_jobs) / total_jobs
 
-st.subheader(f"Project: {proj['name']}")
-if proj.get("description"):
-    st.caption(proj["description"])
+    for job in active_jobs:
+        pct = job.get("progress_pct") or 0.0
+        status = job["status"]
+        filename = job["filename"]
+        ws_name = job["project_name"]
 
-st.markdown("""
-**Workflow**
+        started_raw = job.get("started_analyzing_at")
+        eta_str = ""
+        if started_raw and pct > 0.05:
+            try:
+                started = datetime.fromisoformat(started_raw.replace("Z", ""))
+                elapsed_s = (now - started).total_seconds()
+                remaining_s = elapsed_s / pct * (1.0 - pct)
+                mins = int(remaining_s // 60)
+                secs = int(remaining_s % 60)
+                eta_str = f" · ~{mins}m {secs:02d}s left" if mins else f" · ~{secs}s left"
+            except Exception:
+                pass
 
-1. **Videos** — upload videos taken from the same camera position. Trigger analysis on each.
-2. **Count & export** — once videos are analyzed, draw counting lines on the trajectory overlay,
-   see live counts per line, and export to Excel.
+        label = f"**{filename}** — {ws_name}"
+        if status == "queued":
+            st.write(f"🟨 {label} — *queued*")
+        else:
+            with st.container():
+                st.write(f"🟧 {label}{eta_str}")
+                st.progress(pct, text=f"{pct*100:.0f}%")
 
-Use the pages in the left navigation.
-""")
+    st.caption(f"{total_jobs} job(s) in progress · overall {overall_pct*100:.0f}% complete")
 
-col1, col2, col3 = st.columns(3)
-videos = api.list_videos(proj["id"])
-lines = api.list_lines(proj["id"])
-col1.metric("Videos in project", len(videos))
-col2.metric("Analyzed", sum(1 for v in videos if v["status"] == "analyzed"))
-col3.metric("Counting lines", len(lines))
+    # Auto-refresh while jobs are running
+    time.sleep(3)
+    st.rerun()
 
 st.divider()
-if st.button("Delete project", type="secondary"):
-    confirm_key = f"confirm_del_{proj['id']}"
-    if st.session_state.get(confirm_key):
-        api.delete_project(proj["id"])
-        st.session_state.pop("project", None)
-        st.session_state.pop(confirm_key, None)
-        st.rerun()
-    else:
-        st.session_state[confirm_key] = True
-        st.warning("Click again to confirm — this deletes all videos and lines in the project.")
+
+# =============================================================================
+# Section B — Workspace Selection
+# =============================================================================
+st.subheader("🗂️ Workspaces")
+
+try:
+    workspaces = api.list_projects()
+except Exception as e:
+    st.error(f"Cannot load workspaces: {e}")
+    st.stop()
+
+if not workspaces:
+    st.info("No workspaces yet — create one in the sidebar.")
+    st.stop()
+
+# Summaries fetched per workspace (small N, single query each)
+cols = st.columns(3)
+for i, ws in enumerate(workspaces):
+    try:
+        summary = api.workspace_summary(ws["id"])
+    except Exception:
+        summary = {}
+
+    status_key, status_label = _workspace_status(summary)
+
+    with cols[i % 3]:
+        with st.container(border=True):
+            st.write(f"**{ws['name']}**")
+            st.caption(status_label)
+
+            c1, c2 = st.columns(2)
+            c1.metric("Videos", summary.get("total_videos", 0))
+            c2.metric("Analyzed", summary.get("analyzed_videos", 0))
+
+            dur = _fmt_duration(summary.get("total_duration_s"))
+            sz = _fmt_size(summary.get("total_size_bytes"))
+            info_parts = [p for p in [dur, sz] if p != "—"]
+            if info_parts:
+                st.caption(" · ".join(info_parts))
+
+            if summary.get("queued_or_analyzing", 0) > 0:
+                active = summary["queued_or_analyzing"]
+                st.progress(
+                    summary.get("analyzed_videos", 0) / max(summary.get("total_videos", 1), 1),
+                    text=f"{active} analyzing",
+                )
+
+            if st.button("Open", key=f"open_ws_{ws['id']}", use_container_width=True):
+                st.session_state["workspace"] = ws
+                st.rerun()
+

@@ -5,6 +5,8 @@ import httpx
 from typing import List, Dict, Optional
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
+# URL reachable from the user's browser (differs from API_URL in Docker deployments).
+PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", API_URL)
 
 
 class APIError(Exception):

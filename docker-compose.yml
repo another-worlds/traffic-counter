@@ -57,6 +57,8 @@ services:
       context: ./frontend
     environment:
       API_URL: http://api:8000
+      # PUBLIC_API_URL must be reachable from the user's browser (not Docker internal)
+      PUBLIC_API_URL: http://localhost:8000
       STREAMLIT_SERVER_MAX_UPLOAD_SIZE: "102400"
     ports: ["8501:8501"]
     volumes:

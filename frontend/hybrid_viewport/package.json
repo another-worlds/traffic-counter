@@ -11,7 +11,8 @@
   "dependencies": {
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "streamlit-component-lib": "^2.0.0"
+    "streamlit-component-lib": "^2.0.0",
+    "tus-js-client": "^4.3.0"
   },
   "devDependencies": {
     "@types/react": "^19.2.2",

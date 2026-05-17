@@ -27,6 +27,9 @@ class Storage:
     def signed_url(self, key: str, expires_minutes: int = 60) -> str: ...
     def open_read(self, key: str) -> BinaryIO: ...
     def delete_prefix(self, prefix: str) -> None: ...
+    def tus_part_path(self, upload_id: str) -> Path: ...
+    def finalize_tus_upload(self, upload_id: str, key: str) -> None: ...
+    def delete_tus_part(self, upload_id: str) -> None: ...
 
 
 class LocalStorage(Storage):
@@ -38,6 +41,22 @@ class LocalStorage(Storage):
         p = self.root / key
         p.parent.mkdir(parents=True, exist_ok=True)
         return p
+
+    def tus_part_path(self, upload_id: str) -> Path:
+        p = self.root / "tmp" / "tus" / f"{upload_id}.part"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def finalize_tus_upload(self, upload_id: str, key: str) -> None:
+        """Move completed .part file to final storage key (same filesystem → atomic)."""
+        src = self.tus_part_path(upload_id)
+        dst = self._path(key)
+        shutil.move(str(src), dst)
+
+    def delete_tus_part(self, upload_id: str) -> None:
+        p = self.tus_part_path(upload_id)
+        if p.exists():
+            p.unlink()
 
     def upload_stream(self, key, fp):
         with open(self._path(key), "wb") as out:

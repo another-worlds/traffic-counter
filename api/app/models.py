@@ -46,11 +46,24 @@ class Video(Base):
     # Analysis progress: 0.0–1.0 while analyzing, reset to None when done/error
     progress_pct = Column(Float, default=0.0)
     started_analyzing_at = Column(DateTime)
+    tus_upload_id = Column(String(64), nullable=True, index=True)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     analyzed_at = Column(DateTime)
 
     project = relationship("Project", back_populates="videos")
+
+
+class TusUpload(Base):
+    """Temporary record tracking an in-progress tus resumable upload."""
+    __tablename__ = "tus_uploads"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    project_id = Column(UUID(as_uuid=False), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    video_id = Column(UUID(as_uuid=False), ForeignKey("videos.id", ondelete="SET NULL"), nullable=True)
+    filename = Column(String(512), nullable=False)
+    upload_length = Column(BigInteger, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class CountingLine(Base):

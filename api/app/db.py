@@ -45,6 +45,15 @@ def _safe_add_columns():
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS progress_pct FLOAT DEFAULT 0.0",
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS started_analyzing_at TIMESTAMP",
         "ALTER TABLE projects ADD COLUMN IF NOT EXISTS last_exported_at TIMESTAMP",
+        "ALTER TABLE videos ADD COLUMN IF NOT EXISTS tus_upload_id VARCHAR(64)",
+        """CREATE TABLE IF NOT EXISTS tus_uploads (
+            id VARCHAR PRIMARY KEY,
+            project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            video_id VARCHAR REFERENCES videos(id) ON DELETE SET NULL,
+            filename VARCHAR(512) NOT NULL,
+            upload_length BIGINT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
+        )""",
     ]
     with engine.begin() as conn:
         for stmt in stmts:

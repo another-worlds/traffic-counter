@@ -185,6 +185,36 @@ def _maybe_fetch_asset_data_url(rel_url: Optional[str]) -> Optional[str]:
     return _fetch_asset_data_url(rel_url) if rel_url else None
 
 
+@st.cache_data(show_spinner=False, ttl=5, max_entries=64)
+def _cached_list_videos(project_id: str) -> List[Dict[str, Any]]:
+    return api.list_videos(project_id)
+
+
+@st.cache_data(show_spinner=False, ttl=3, max_entries=64)
+def _cached_list_lines(project_id: str) -> List[Dict[str, Any]]:
+    return api.list_lines(project_id)
+
+
+@st.cache_data(show_spinner=False, ttl=30, max_entries=128)
+def _cached_preview_assets(video_id: str) -> Dict[str, Any]:
+    frames = api.list_video_frames(video_id)
+    traj_rel = api.get_trajectories_url(video_id)
+    try:
+        heatmap_rel = api.get_heatmap_url(video_id)
+    except Exception:
+        heatmap_rel = None
+    try:
+        stats = api.track_stats(video_id)
+    except Exception:
+        stats = None
+    return {
+        "frames": frames,
+        "trajectories_rel": traj_rel,
+        "heatmap_rel": heatmap_rel,
+        "track_stats": stats,
+    }
+
+
 def _handle_pending_actions(actions: List[Dict[str, Any]], ws_id: str, spec: ViewportSpec) -> bool:
     """Handle React-emitted side-actions. Returns True if a rerun is needed."""
     if not actions:
@@ -317,12 +347,15 @@ def _process_snapshot(
     if str(overlay_snapshot.get("projectId") or "") != ws_id:
         return
 
-    snapshot_hash = json.dumps(overlay_snapshot, sort_keys=True, separators=(",", ":"))
-    hash_key = f"hybrid_last_snapshot_hash_{ws_id}"
-    if st.session_state.get(hash_key) == snapshot_hash:
-        # Already processed in a prior rerun; skip side-effects.
+    snapshot_lines = overlay_snapshot.get("lines") or []
+    pending_actions = overlay_snapshot.get("pendingActions") or []
+    semantic_payload = {"lines": snapshot_lines, "pendingActions": pending_actions}
+    semantic_hash = json.dumps(semantic_payload, sort_keys=True, separators=(",", ":"))
+    hash_key = f"hybrid_last_semantic_snapshot_hash_{ws_id}"
+    if st.session_state.get(hash_key) == semantic_hash:
+        # Only pointer/viewport UI state changed; skip API sync work.
         return
-    st.session_state[hash_key] = snapshot_hash
+    st.session_state[hash_key] = semantic_hash
 
     snap_spec = ViewportSpec(
         project_id=ws_id,
@@ -331,14 +364,12 @@ def _process_snapshot(
         frame_count=1,
         active_layers=(),
     )
-    _handle_pending_actions(overlay_snapshot.get("pendingActions") or [], ws_id, snap_spec)
+    _handle_pending_actions(pending_actions, ws_id, snap_spec)
 
     id_map_key = f"hybrid_line_id_map_{ws_id}"
     line_id_map = st.session_state.setdefault(id_map_key, {})
-    snapshot_lines = _normalize_snapshot_lines(
-        overlay_snapshot.get("lines") or [], line_id_map
-    )
-    persisted_lines = api.list_lines(ws_id)
+    snapshot_lines = _normalize_snapshot_lines(snapshot_lines, line_id_map)
+    persisted_lines = _cached_list_lines(ws_id)
     persisted_by_id = {str(line["id"]): line for line in persisted_lines}
     snapshot_by_id = {str(line.get("id")): line for line in snapshot_lines if line.get("id")}
 
@@ -378,7 +409,8 @@ def _process_snapshot(
             st.error(f"Create failed: {exc}")
 
     if mutated:
-        refreshed_lines = api.list_lines(ws_id)
+        _cached_list_lines.clear()
+        refreshed_lines = _cached_list_lines(ws_id)
         refreshed_line_ids = [str(line["id"]) for line in refreshed_lines]
         st.session_state[counts_key] = request_live_counts(
             ws_id, selected_video_ids, refreshed_line_ids,
@@ -397,7 +429,7 @@ def render_page() -> None:
 
     st.caption(f"Workspace: **{ws['name']}**")
 
-    videos = [v for v in api.list_videos(ws["id"]) if v.get("status") == "analyzed"]
+    videos = [v for v in _cached_list_videos(ws["id"]) if v.get("status") == "analyzed"]
 
     if not videos:
         st.info("No analyzed videos in this workspace. Analyze videos on the Videos page first.")
@@ -423,7 +455,7 @@ def render_page() -> None:
         _process_snapshot(pending_snapshot, ws_id, selected_video_ids, counts_key)
 
     # Now fetch the lines, which include any just-persisted line.
-    lines = api.list_lines(ws_id)
+    lines = _cached_list_lines(ws_id)
     spec = build_viewport_spec(ws, videos, lines)
     spec = ViewportSpec(
         project_id=spec.project_id,
@@ -437,25 +469,16 @@ def render_page() -> None:
     # Bytes are inlined as data: URIs so the browser never has to reach the API
     # directly — see _fetch_asset_data_url for the why.
     try:
-        raw_frames = api.list_video_frames(preview_video["id"])
-        frames_for_bootstrap = [
-            {**f, "url": _maybe_fetch_asset_data_url(f.get("url"))} for f in raw_frames
-        ]
+        preview_assets = _cached_preview_assets(preview_video["id"])
     except Exception:
-        frames_for_bootstrap = []
-
-    traj_rel = api.get_trajectories_url(preview_video["id"])
-    heatmap_rel: Optional[str] = None
-    try:
-        heatmap_rel = api.get_heatmap_url(preview_video["id"])
-    except Exception:
-        heatmap_rel = None
-
-    track_stats: Optional[Dict[str, Any]] = None
-    try:
-        track_stats = api.track_stats(preview_video["id"])
-    except Exception:
-        track_stats = None
+        preview_assets = {"frames": [], "trajectories_rel": None, "heatmap_rel": None, "track_stats": None}
+    raw_frames = preview_assets["frames"]
+    frames_for_bootstrap = [
+        {**f, "url": _maybe_fetch_asset_data_url(f.get("url"))} for f in raw_frames
+    ]
+    traj_rel = preview_assets["trajectories_rel"]
+    heatmap_rel = preview_assets["heatmap_rel"]
+    track_stats = preview_assets["track_stats"]
 
     # Live counts: prefer cached, fall back to fresh compute.
     if counts_key not in st.session_state and lines:

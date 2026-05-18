@@ -73,6 +73,10 @@ export type OverlayModel = {
   visibleLayers: Record<LayerKey, boolean>;
   interaction: InteractionState;
   pendingActions: PendingAction[];
+  /** Active tool id — 'line' is the only builtin tool for now. Future: 'roi', 'polygon'. */
+  activeTool: string;
+  /** Drawing color carried through model so LineTool can read it without extra prop-drilling. */
+  drawingColor: string;
 };
 
 export type BridgePayload = {
@@ -86,9 +90,18 @@ export type BridgePayload = {
   pendingActions: PendingAction[];
 };
 
+export type SceneFrame = {
+  index: number;
+  time_s: number;
+  url: string | null;
+};
+
 export type HostViewportBootstrap = {
   spec?: Partial<ViewportSpec>;
   initialLines?: ApiLine[] | LineGeometry[];
+  /** Scene-based keyframes from the backend; replaces the single frameUrl. */
+  frames?: SceneFrame[];
+  /** Legacy single-frame fallback (used when frames[] is absent). */
   frameUrl?: string;
   trajectoriesUrl?: string;
   heatmapUrl?: string;
@@ -125,7 +138,9 @@ export type OverlayAction =
   | { type: 'update-resize-handle'; point: Point }
   | { type: 'commit-resize-handle' }
   | { type: 'queue-action'; action: PendingAction }
-  | { type: 'clear-pending-actions' };
+  | { type: 'clear-pending-actions' }
+  | { type: 'set-active-tool'; toolId: string }
+  | { type: 'set-drawing-color'; color: string };
 
 function cloneLine(line: LineGeometry): LineGeometry {
   return {
@@ -177,6 +192,8 @@ export function createDefaultOverlayModel(spec: ViewportSpec, lines: LineGeometr
     visibleLayers,
     interaction: { kind: 'idle' },
     pendingActions: [],
+    activeTool: 'line',
+    drawingColor: '#e24b4a',
   };
 }
 
@@ -369,6 +386,12 @@ export function reduceOverlayModel(model: OverlayModel, action: OverlayAction): 
     case 'clear-pending-actions':
       return { ...model, pendingActions: [] };
 
+    case 'set-active-tool':
+      return { ...model, activeTool: action.toolId };
+
+    case 'set-drawing-color':
+      return { ...model, drawingColor: action.color };
+
     default:
       return model;
   }
@@ -403,7 +426,7 @@ export function buildViewportSpecFromBootstrap(bootstrap?: HostViewportBootstrap
     projectId: bootstrap?.spec?.projectId ?? 'preview',
     videoIds: bootstrap?.spec?.videoIds ?? [],
     selectedLineIds: bootstrap?.spec?.selectedLineIds ?? [],
-    frameCount: bootstrap?.spec?.frameCount ?? 100,
+    frameCount: bootstrap?.frames?.length ?? bootstrap?.spec?.frameCount ?? 1,
     activeLayers:
       bootstrap?.spec?.activeLayers ?? ['saved-lines', 'frame-scrubber', 'direction-overlay', 'counts', 'trajectories'],
   };

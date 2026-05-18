@@ -5,6 +5,8 @@ import httpx
 from typing import List, Dict, Optional
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
+# URL reachable from the user's browser (differs from API_URL in Docker deployments).
+PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", API_URL)
 
 
 class APIError(Exception):
@@ -82,6 +84,13 @@ def delete_video(video_id: str):
     with _client() as c:
         r = c.delete(f"/videos/{video_id}")
         _raise(r)
+
+def list_video_frames(video_id: str) -> List[Dict]:
+    """Return scene-based keyframes: [{index, time_s, frame_index_in_video, url}]."""
+    with _client() as c:
+        r = c.get(f"/videos/{video_id}/frames")
+        _raise(r)
+        return r.json()
 
 def get_frame_url(video_id: str) -> Optional[str]:
     with _client() as c:
@@ -193,10 +202,14 @@ def export_xlsx(project_id: str, video_ids: List[str], line_ids: List[str]) -> b
 
 
 def file_url(relative: str) -> str:
-    """Convert API-relative file paths (e.g. /files/...) into absolute URLs."""
+    """Convert API-relative file paths (e.g. /files/...) into absolute URLs.
+
+    Uses PUBLIC_API_URL so the browser inside the React iframe can reach the asset
+    (API_URL may be an internal Docker hostname not reachable from the browser).
+    """
     if relative.startswith("http"):
         return relative
-    return f"{API_URL}{relative}"
+    return f"{PUBLIC_API_URL}{relative}"
 
 
 # --- worker / dashboard ---
@@ -212,5 +225,83 @@ def workspace_summary(project_id: str) -> Dict:
     """Single-query aggregate stats for a workspace."""
     with _client() as c:
         r = c.get(f"/projects/{project_id}/summary")
+        _raise(r)
+        return r.json()
+
+
+# --- local folder / watcher ---
+
+def list_local_folder_videos(status: Optional[str] = None) -> List[Dict]:
+    """Return all videos imported from the watched local folder."""
+    with _client() as c:
+        params = {"status": status} if status else {}
+        r = c.get("/local-folder/videos", params=params)
+        _raise(r)
+        return r.json()
+
+
+def analyze_pending_local_folder() -> Dict:
+    """Queue all local-folder videos that are still in 'uploaded' state."""
+    with _client() as c:
+        r = c.post("/local-folder/analyze-pending")
+        _raise(r)
+        return r.json()
+
+
+def get_local_folder_dashboard() -> Dict:
+    """Single-call dashboard stats for the watched-folder page."""
+    with _client() as c:
+        r = c.get("/local-folder/dashboard")
+        _raise(r)
+        return r.json()
+
+
+def retry_local_folder_errors() -> Dict:
+    """Re-queue all local-folder videos that are in error state."""
+    with _client() as c:
+        r = c.post("/local-folder/retry-errors")
+        _raise(r)
+        return r.json()
+
+
+def pause_worker() -> Dict:
+    """Pause the processing queue (current video finishes first)."""
+    with _client() as c:
+        r = c.post("/worker/pause")
+        _raise(r)
+        return r.json()
+
+
+def resume_worker() -> Dict:
+    """Resume the processing queue."""
+    with _client() as c:
+        r = c.post("/worker/resume")
+        _raise(r)
+        return r.json()
+
+
+def worker_pause_state() -> Dict:
+    """Return {paused: bool}."""
+    with _client() as c:
+        r = c.get("/worker/pause-state")
+        _raise(r)
+        return r.json()
+
+
+def worker_error_summary() -> Dict:
+    """Per-source error counts: {total, by_source: {upload, local-folder}}."""
+    with _client() as c:
+        r = c.get("/worker/error-summary")
+        _raise(r)
+        return r.json()
+
+
+def retry_all_errors(source: Optional[str] = None, project_id: Optional[str] = None) -> Dict:
+    """Re-queue all error videos. Optionally filter by source or workspace."""
+    params: Dict = {}
+    if source: params["source"] = source
+    if project_id: params["project_id"] = project_id
+    with _client() as c:
+        r = c.post("/worker/retry-errors", params=params)
         _raise(r)
         return r.json()

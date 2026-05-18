@@ -48,16 +48,35 @@ services:
       - storage:/data
       - ./worker:/app
       - model_cache:/root/.cache
+      - /mnt/yandex-videos:/mnt/yandex-videos:ro
     depends_on:
       db:
         condition: service_healthy
+    stop_grace_period: 600s
+
+  watcher:
+    build:
+      context: ./watcher
+    environment:
+      API_URL: http://api:8000
+      WATCH_PATH: /mnt/yandex-videos
+      AUTO_ANALYZE: "false"   # set to "true" to auto-queue new videos
+      SCAN_INTERVAL: "60"     # full rescan every 60 s
+      STABILITY_WAIT: "5"     # seconds to wait before registering a new file
+    volumes:
+      - /mnt/yandex-videos:/mnt/yandex-videos:ro
+    depends_on:
+      - api
+    restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
     environment:
       API_URL: http://api:8000
-      STREAMLIT_SERVER_MAX_UPLOAD_SIZE: "10240"
+      # PUBLIC_API_URL must be reachable from the user's browser (not Docker internal)
+      PUBLIC_API_URL: http://localhost:8000
+      STREAMLIT_SERVER_MAX_UPLOAD_SIZE: "102400"
     ports: ["8501:8501"]
     volumes:
       - ./frontend:/app

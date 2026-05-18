@@ -1,12 +1,14 @@
 import React from 'react';
-import type { LineGeometry, OverlayModel, Point, VideoSize } from './viewportState';
+import type { CountsBundle, HostViewportBootstrap, LineGeometry, OverlayModel, Point, VideoSize } from './viewportState';
+import { BUILTIN_IMAGE_LAYERS } from './layers';
+import type { LayerRenderContext } from './layers';
+import { getCursor } from './tools';
 
 type ViewportProps = {
   model: OverlayModel;
+  bootstrap: HostViewportBootstrap;
   videoSize: VideoSize;
-  frameUrl?: string;
-  trajectoriesUrl?: string;
-  heatmapUrl?: string;
+  counts?: CountsBundle;
   onMouseDownEmpty: (point: Point) => void;
   onMouseDownLine: (lineId: string, point: Point) => void;
   onMouseDownHandle: (lineId: string, handleIndex: number) => void;
@@ -30,10 +32,9 @@ function screenToSvg(svg: SVGSVGElement, clientX: number, clientY: number): Poin
 
 export default function Viewport({
   model,
+  bootstrap,
   videoSize,
-  frameUrl,
-  trajectoriesUrl,
-  heatmapUrl,
+  counts,
   onMouseDownEmpty,
   onMouseDownLine,
   onMouseDownHandle,
@@ -42,19 +43,13 @@ export default function Viewport({
 }: ViewportProps) {
   const svgRef = React.useRef<SVGSVGElement | null>(null);
   const { width, height } = videoSize;
-  const showTraj = model.visibleLayers['trajectories'] && trajectoriesUrl;
-  const showHeatmap = model.visibleLayers['heatmap'] && heatmapUrl;
   const showLines = model.visibleLayers['saved-lines'];
+  const cursor = getCursor(model);
 
-  // Cursor styling per interaction state
-  let cursor: React.CSSProperties['cursor'] = 'crosshair';
-  if (model.interaction.kind === 'moving') cursor = 'grabbing';
-  else if (model.interaction.kind === 'resizing') cursor = 'nwse-resize';
-  else if (model.interaction.kind === 'drawing') cursor = 'crosshair';
+  const layerCtx: LayerRenderContext = { model, bootstrap, videoSize };
 
   function handleMouseDown(e: React.MouseEvent<SVGSVGElement>) {
     if (!svgRef.current) return;
-    // Stop only when clicking on empty background — let line/handle handlers fire first.
     const point = screenToSvg(svgRef.current, e.clientX, e.clientY);
     onMouseDownEmpty(point);
   }
@@ -100,46 +95,7 @@ export default function Viewport({
           }
         }}
       >
-        {/* Base frame */}
-        {frameUrl ? (
-          <image
-            href={frameUrl}
-            x={0}
-            y={0}
-            width={width}
-            height={height}
-            preserveAspectRatio="none"
-            style={{ pointerEvents: 'none' }}
-          />
-        ) : (
-          <rect width={width} height={height} fill="#0e1424" />
-        )}
-
-        {/* Trajectories overlay */}
-        {showTraj ? (
-          <image
-            href={trajectoriesUrl}
-            x={0}
-            y={0}
-            width={width}
-            height={height}
-            preserveAspectRatio="none"
-            style={{ pointerEvents: 'none', opacity: 0.85 }}
-          />
-        ) : null}
-
-        {/* Heatmap overlay */}
-        {showHeatmap ? (
-          <image
-            href={heatmapUrl}
-            x={0}
-            y={0}
-            width={width}
-            height={height}
-            preserveAspectRatio="none"
-            style={{ pointerEvents: 'none', mixBlendMode: 'screen' as React.CSSProperties['mixBlendMode'] }}
-          />
-        ) : null}
+        {BUILTIN_IMAGE_LAYERS.map((layer) => layer.render(layerCtx))}
 
         {/* Counting lines */}
         {showLines &&
@@ -182,28 +138,34 @@ export default function Viewport({
                   style={{ pointerEvents: 'none' }}
                 />
                 {/* Label */}
-                <g style={{ pointerEvents: 'none' }}>
-                  <text
-                    x={midX + 1}
-                    y={midY - 13}
-                    fill="rgba(0,0,0,0.85)"
-                    fontSize={18}
-                    fontWeight={600}
-                    textAnchor="middle"
-                  >
-                    {line.name}
-                  </text>
-                  <text
-                    x={midX}
-                    y={midY - 14}
-                    fill={line.color}
-                    fontSize={18}
-                    fontWeight={600}
-                    textAnchor="middle"
-                  >
-                    {line.name}
-                  </text>
-                </g>
+                {(() => {
+                  const lineTotal = counts?.per_line?.[line.id]?.total;
+                  const labelText = lineTotal != null ? `${line.name} · ${lineTotal}` : line.name;
+                  return (
+                    <g style={{ pointerEvents: 'none' }}>
+                      <text
+                        x={midX + 1}
+                        y={midY - 13}
+                        fill="rgba(0,0,0,0.85)"
+                        fontSize={18}
+                        fontWeight={600}
+                        textAnchor="middle"
+                      >
+                        {labelText}
+                      </text>
+                      <text
+                        x={midX}
+                        y={midY - 14}
+                        fill={line.color}
+                        fontSize={18}
+                        fontWeight={600}
+                        textAnchor="middle"
+                      >
+                        {labelText}
+                      </text>
+                    </g>
+                  );
+                })()}
               </g>
             );
           })}

@@ -2,15 +2,11 @@ import React from 'react';
 import type {
   CountsBundle,
   HostViewportBootstrap,
-  LayerKey,
-  LineGeometry,
   OverlayAction,
   OverlayModel,
-  PendingAction,
   Point,
   Suggestion,
   TrackStats,
-  ViewportSpec,
   VideoSize,
 } from './viewportState';
 import {
@@ -22,6 +18,8 @@ import {
 } from './viewportState';
 import Viewport from './Viewport';
 import SidePanel from './SidePanel';
+import { getTool } from './tools';
+import type { ToolContext } from './tools';
 import './styles.css';
 
 type AppProps = {
@@ -30,10 +28,9 @@ type AppProps = {
 };
 
 const DEFAULT_VIDEO_SIZE: VideoSize = { width: 1920, height: 1080 };
-const MOVE_THRESHOLD = 3; // source pixels — distinguish click-select from drag
 
 export default function App({ bootstrap, onSnapshot }: AppProps) {
-  const spec: ViewportSpec = React.useMemo(() => buildViewportSpecFromBootstrap(bootstrap), [bootstrap]);
+  const spec = React.useMemo(() => buildViewportSpecFromBootstrap(bootstrap), [bootstrap]);
   const initialLines = React.useMemo(() => buildInitialLinesFromBootstrap(bootstrap), [bootstrap]);
   const videoSize: VideoSize = bootstrap?.videoSize ?? DEFAULT_VIDEO_SIZE;
   const frameUrl = bootstrap?.frameUrl;
@@ -49,23 +46,17 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
   );
 
   const [model, setModel] = React.useState<OverlayModel>(initialModel);
-  const [drawingColor, setDrawingColor] = React.useState('#e24b4a');
   const lastEmittedRef = React.useRef<string>('');
-  const pendingSelectRef = React.useRef<{ lineId: string; anchor: Point } | null>(null);
   const lastProjectIdRef = React.useRef<string>(spec.projectId);
 
-  // Reconcile with new bootstrap from host: replace lines only (preserve UI state).
-  // Full reset only if project changed.
+  // Reconcile bootstrap updates from host: lines only, preserve UI state.
   React.useEffect(() => {
     setModel((prev) => {
-      // Don't touch the model mid-interaction.
       if (prev.interaction.kind !== 'idle') return prev;
-      // New project → fresh start.
       if (lastProjectIdRef.current !== spec.projectId) {
         lastProjectIdRef.current = spec.projectId;
         return initialModel;
       }
-      // Same project → refresh lines but preserve selection/frame/layers.
       return reduceOverlayModel(prev, { type: 'replace-lines', lines: initialLines });
     });
   }, [spec.projectId, initialLines, initialModel]);
@@ -74,7 +65,7 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
     setModel((current) => reduceOverlayModel(current, action));
   }, []);
 
-  // Emit snapshot whenever the model changes — but only when interaction is idle (committed).
+  // Emit snapshot on idle transitions only.
   React.useEffect(() => {
     if (model.interaction.kind !== 'idle') return;
     const payload = buildBridgePayload(model);
@@ -83,149 +74,70 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
     lastEmittedRef.current = serialized;
     onSnapshot?.(payload);
     if (model.pendingActions.length > 0) {
-      // Clear after emitting to avoid resending.
       dispatch({ type: 'clear-pending-actions' });
+      // Pre-mark the cleared version as emitted so the effect doesn't fire a second snapshot.
+      const clearedPayload = buildBridgePayload({ ...model, pendingActions: [] });
+      lastEmittedRef.current = JSON.stringify(clearedPayload);
     }
   }, [model, onSnapshot, dispatch]);
 
-  // Keyboard handlers
+  // Route keyboard events through the active tool.
   React.useEffect(() => {
     function handleKey(e: KeyboardEvent) {
-      // Don't intercept when typing in an input field.
-      const tag = (e.target as HTMLElement)?.tagName ?? '';
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-      if (model.selectedLineId && (e.key === 'Delete' || e.key === 'Backspace')) {
-        e.preventDefault();
-        dispatch({ type: 'delete-line', lineId: model.selectedLineId });
-      } else if (e.key === 'Escape') {
-        if (model.interaction.kind === 'drawing') {
-          dispatch({ type: 'cancel-draft' });
-        } else {
-          dispatch({ type: 'select-line', lineId: null });
-        }
-      }
+      const tool = getTool(model.activeTool);
+      if (!tool?.onKeyDown) return;
+      const ctx: ToolContext = { model, dispatch, videoSize };
+      tool.onKeyDown(e, ctx);
     }
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [model.selectedLineId, model.interaction.kind, dispatch]);
+  }, [model, dispatch, videoSize]);
 
-  // ── Mouse handlers ─────────────────────────────────────────────────────────
+  // Build tool context once per render so callbacks below stay stable.
+  const toolCtxRef = React.useRef<ToolContext>({ model, dispatch, videoSize });
+  toolCtxRef.current = { model, dispatch, videoSize };
 
-  const handleMouseDownEmpty = React.useCallback(
-    (point: Point) => {
-      if (model.interaction.kind !== 'idle') return;
-      // Click on empty viewport starts drawing a new line.
-      dispatch({ type: 'select-line', lineId: null });
-      dispatch({ type: 'start-draw', point, color: drawingColor });
-    },
-    [model.interaction.kind, dispatch, drawingColor],
-  );
+  const handleMouseDownEmpty = React.useCallback((point: Point) => {
+    const tool = getTool(toolCtxRef.current.model.activeTool);
+    tool?.onMouseDownEmpty?.(point, toolCtxRef.current);
+  }, []);
 
-  const handleMouseDownLine = React.useCallback(
-    (lineId: string, point: Point) => {
-      if (model.interaction.kind !== 'idle') return;
-      // Defer starting move until first movement — so click-only = select-only.
-      pendingSelectRef.current = { lineId, anchor: point };
-      dispatch({ type: 'select-line', lineId });
-    },
-    [model.interaction.kind, dispatch],
-  );
+  const handleMouseDownLine = React.useCallback((lineId: string, point: Point) => {
+    const tool = getTool(toolCtxRef.current.model.activeTool);
+    tool?.onMouseDownLine?.(lineId, point, toolCtxRef.current);
+  }, []);
 
-  const handleMouseDownHandle = React.useCallback(
-    (lineId: string, handleIndex: number) => {
-      if (model.interaction.kind !== 'idle') return;
-      pendingSelectRef.current = null;
-      dispatch({ type: 'start-resize-handle', lineId, handleIndex });
-    },
-    [model.interaction.kind, dispatch],
-  );
+  const handleMouseDownHandle = React.useCallback((lineId: string, handleIndex: number) => {
+    const tool = getTool(toolCtxRef.current.model.activeTool);
+    tool?.onMouseDownHandle?.(lineId, handleIndex, toolCtxRef.current);
+  }, []);
 
-  const handleMouseMove = React.useCallback(
-    (point: Point) => {
-      const pending = pendingSelectRef.current;
-      if (pending) {
-        const dx = point[0] - pending.anchor[0];
-        const dy = point[1] - pending.anchor[1];
-        if (Math.hypot(dx, dy) > MOVE_THRESHOLD) {
-          // Promote to a move
-          pendingSelectRef.current = null;
-          dispatch({ type: 'start-move', lineId: pending.lineId, anchor: pending.anchor });
-          dispatch({ type: 'update-move', point });
-        }
-        return;
-      }
-      if (model.interaction.kind === 'drawing') {
-        dispatch({ type: 'update-draft', point });
-      } else if (model.interaction.kind === 'moving') {
-        dispatch({ type: 'update-move', point });
-      } else if (model.interaction.kind === 'resizing') {
-        dispatch({ type: 'update-resize-handle', point });
-      }
-    },
-    [model.interaction.kind, dispatch],
-  );
+  const handleMouseMove = React.useCallback((point: Point) => {
+    const tool = getTool(toolCtxRef.current.model.activeTool);
+    tool?.onMouseMove?.(point, toolCtxRef.current);
+  }, []);
 
-  const handleMouseUp = React.useCallback(
-    (_point: Point) => {
-      pendingSelectRef.current = null;
-      if (model.interaction.kind === 'drawing') {
-        dispatch({ type: 'commit-draft' });
-      } else if (model.interaction.kind === 'moving') {
-        dispatch({ type: 'commit-move' });
-      } else if (model.interaction.kind === 'resizing') {
-        dispatch({ type: 'commit-resize-handle' });
-      }
-    },
-    [model.interaction.kind, dispatch],
-  );
-
-  // ── Side-panel actions ────────────────────────────────────────────────────
-
-  const handleUpdateLine = React.useCallback(
-    (lineId: string, patch: Partial<LineGeometry>) => {
-      dispatch({ type: 'update-line', lineId, patch });
-    },
-    [dispatch],
-  );
-
-  const handleDeleteLine = React.useCallback(
-    (lineId: string) => {
-      dispatch({ type: 'delete-line', lineId });
-    },
-    [dispatch],
-  );
-
-  const handleSelectLine = React.useCallback(
-    (lineId: string | null) => {
-      dispatch({ type: 'select-line', lineId });
-    },
-    [dispatch],
-  );
-
-  const handleToggleLayer = React.useCallback(
-    (layer: LayerKey) => {
-      dispatch({ type: 'toggle-layer', layer });
-    },
-    [dispatch],
-  );
-
-  const queueAction = React.useCallback(
-    (action: PendingAction) => {
-      dispatch({ type: 'queue-action', action });
-    },
-    [dispatch],
-  );
+  const handleMouseUp = React.useCallback((point: Point) => {
+    const tool = getTool(toolCtxRef.current.model.activeTool);
+    tool?.onMouseUp?.(point, toolCtxRef.current);
+  }, []);
 
   return (
     <div className="overlay-shell">
       <header className="overlay-header">
         <div>
-          <p className="eyebrow">Hybrid viewport</p>
-          <h1>Counting line editor</h1>
+          <p className="eyebrow">Counting line editor</p>
+          <h1>Traffic Counter</h1>
         </div>
         <div className="header-info">
           <div className="frame-pill">
-            Frame {model.currentFrame + 1} / {Math.max(model.spec.frameCount, 1)}
+            {(() => {
+              const total = Math.max(model.spec.frameCount, 1);
+              if (total === 1) return 'Single camera angle';
+              const entry = bootstrap?.frames?.[model.currentFrame];
+              if (entry) return `Scene ${model.currentFrame + 1} / ${total} · ${entry.time_s.toFixed(1)}s`;
+              return `Frame ${model.currentFrame + 1} / ${total}`;
+            })()}
           </div>
           <div className="instruction-pill">
             Click-drag empty area → new line · drag line → move · drag handle → resize · Delete → remove
@@ -237,10 +149,9 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
         <section className="viewport-panel">
           <Viewport
             model={model}
+            bootstrap={bootstrap ?? {}}
             videoSize={videoSize}
-            frameUrl={frameUrl}
-            trajectoriesUrl={trajectoriesUrl}
-            heatmapUrl={heatmapUrl}
+            counts={counts}
             onMouseDownEmpty={handleMouseDownEmpty}
             onMouseDownLine={handleMouseDownLine}
             onMouseDownHandle={handleMouseDownHandle}
@@ -248,30 +159,50 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
             onMouseUp={handleMouseUp}
           />
 
-          <input
-            className="frame-slider"
-            type="range"
-            min={0}
-            max={Math.max(model.spec.frameCount - 1, 0)}
-            value={model.currentFrame}
-            onChange={(event) => dispatch({ type: 'set-frame', frame: Number(event.target.value) })}
-          />
+          {model.spec.frameCount > 1 ? (
+            <input
+              className="frame-slider"
+              type="range"
+              min={0}
+              max={model.spec.frameCount - 1}
+              value={model.currentFrame}
+              onChange={(e) => dispatch({ type: 'set-frame', frame: Number(e.target.value) })}
+            />
+          ) : (
+            <p className="muted" style={{ margin: '10px 0 0' }}>
+              Single camera angle — no scene cuts detected.
+            </p>
+          )}
         </section>
 
         <SidePanel
           model={model}
+          bootstrap={bootstrap ?? {}}
           trackStats={trackStats}
           counts={counts}
           suggestions={suggestions}
-          drawingColor={drawingColor}
-          onDrawingColorChange={setDrawingColor}
-          onUpdateLine={handleUpdateLine}
-          onDeleteLine={handleDeleteLine}
-          onSelectLine={handleSelectLine}
-          onToggleLayer={handleToggleLayer}
-          onRequestSuggestions={(n) => queueAction({ type: 'request-suggestions', n })}
-          onAcceptSuggestion={(s) => queueAction({ type: 'accept-suggestion', suggestion: s })}
-          onDismissSuggestions={() => queueAction({ type: 'dismiss-suggestions' })}
+          drawingColor={model.drawingColor}
+          activeTool={model.activeTool}
+          onDrawingColorChange={(color) => dispatch({ type: 'set-drawing-color', color })}
+          onUpdateLine={(lineId, patch) => dispatch({ type: 'update-line', lineId, patch })}
+          onDeleteLine={(lineId) => dispatch({ type: 'delete-line', lineId })}
+          onSelectLine={(lineId) => dispatch({ type: 'select-line', lineId })}
+          onToggleLayer={(layer) => dispatch({ type: 'toggle-layer', layer })}
+          onRequestSuggestions={(n) =>
+            dispatch({ type: 'queue-action', action: { type: 'request-suggestions', n } })}
+          onAcceptSuggestion={(s) => {
+            const id = typeof crypto !== 'undefined' && crypto.randomUUID
+              ? crypto.randomUUID()
+              : `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            dispatch({ type: 'add-line', line: {
+              id, name: s.name, color: s.color, kind: 'line',
+              points: [s.points.a, s.points.b],
+            }});
+            dispatch({ type: 'queue-action', action: { type: 'accept-suggestion', suggestion: s } });
+          }}
+          onDismissSuggestions={() =>
+            dispatch({ type: 'queue-action', action: { type: 'dismiss-suggestions' } })}
+          dispatch={dispatch}
         />
       </main>
     </div>

@@ -213,6 +213,179 @@ def _handle_pending_actions(actions: List[Dict[str, Any]], ws_id: str, spec: Vie
     return changed
 
 
+def _render_video_selector(ws_id: str, videos: List[Dict[str, Any]]) -> List[str]:
+    """Render the multi-video selector and return the list of selected video IDs.
+
+    Identity is keyed by video ID (not by label string), so re-analysis can
+    change the track count without dropping the selection. The selection
+    lives in a single session_state key and is reconciled against the
+    current video list on every rerun.
+    """
+    sel_key = f"count_export_selected_videos_{ws_id}"
+    video_by_id: Dict[str, Dict[str, Any]] = {str(v["id"]): v for v in videos}
+
+    if sel_key not in st.session_state:
+        st.session_state[sel_key] = [str(videos[0]["id"])] if videos else []
+    else:
+        current_ids = set(video_by_id.keys())
+        st.session_state[sel_key] = [
+            vid for vid in st.session_state[sel_key] if vid in current_ids
+        ]
+        if not st.session_state[sel_key] and videos:
+            st.session_state[sel_key] = [str(videos[0]["id"])]
+
+    selected_ids: List[str] = list(st.session_state[sel_key])
+
+    def _label(vid: str) -> str:
+        v = video_by_id[vid]
+        return f'{v["filename"]} · {v.get("num_tracks", 0)} tracks'
+
+    with st.expander("📼 Videos in this count", expanded=True):
+        can_remove = len(selected_ids) > 1
+        for vid in selected_ids:
+            row = st.columns([0.06, 0.84, 0.10])
+            with row[0]:
+                if st.button(
+                    "✕",
+                    key=f"_remove_video_{ws_id}_{vid}",
+                    help=(
+                        "Remove from selection" if can_remove
+                        else "At least one video must remain selected"
+                    ),
+                    disabled=not can_remove,
+                ):
+                    st.session_state[sel_key] = [
+                        v for v in st.session_state[sel_key] if v != vid
+                    ]
+                    st.rerun()
+            with row[1]:
+                st.write(_label(vid))
+            with row[2]:
+                if vid == selected_ids[0]:
+                    st.caption("preview source")
+
+        unselected = [vid for vid in video_by_id if vid not in selected_ids]
+        picker_key = f"_add_video_picker_{ws_id}"
+        if unselected:
+            options = [""] + unselected
+            # Drop a stale picker value (the previously-picked video is now
+            # selected and has dropped out of options). This MUST happen
+            # before the selectbox is instantiated this run.
+            if (
+                st.session_state.get(picker_key)
+                and st.session_state[picker_key] not in options
+            ):
+                st.session_state[picker_key] = ""
+
+            def _on_pick() -> None:
+                picked = st.session_state.get(picker_key) or ""
+                if picked and picked not in st.session_state[sel_key]:
+                    st.session_state[sel_key] = st.session_state[sel_key] + [picked]
+
+            st.selectbox(
+                "Add another video",
+                options=options,
+                format_func=lambda v: "➕ Add another video…" if v == "" else _label(v),
+                key=picker_key,
+                on_change=_on_pick,
+                label_visibility="collapsed",
+            )
+
+        if selected_ids:
+            preview_name = video_by_id[selected_ids[0]]["filename"]
+            st.caption(
+                f"Counting over **{len(selected_ids)}** video(s). "
+                f"Preview frame and overlays from **{preview_name}**."
+            )
+
+    return list(st.session_state[sel_key])
+
+
+def _process_snapshot(
+    overlay_snapshot: Dict[str, Any],
+    ws_id: str,
+    selected_video_ids: List[str],
+    counts_key: str,
+) -> None:
+    """Process a React snapshot: handle side-actions and persist line edits.
+
+    Runs BEFORE the bootstrap is rebuilt so that the lines list fetched
+    afterwards already reflects any newly-created lines. Without this
+    ordering the React-side `replace-lines` reconciliation drops the
+    locally-drawn line before its POST has been issued.
+    """
+    if str(overlay_snapshot.get("projectId") or "") != ws_id:
+        return
+
+    snapshot_hash = json.dumps(overlay_snapshot, sort_keys=True, separators=(",", ":"))
+    hash_key = f"hybrid_last_snapshot_hash_{ws_id}"
+    if st.session_state.get(hash_key) == snapshot_hash:
+        # Already processed in a prior rerun; skip side-effects.
+        return
+    st.session_state[hash_key] = snapshot_hash
+
+    snap_spec = ViewportSpec(
+        project_id=ws_id,
+        video_ids=selected_video_ids,
+        selected_line_ids=[],
+        frame_count=1,
+        active_layers=(),
+    )
+    _handle_pending_actions(overlay_snapshot.get("pendingActions") or [], ws_id, snap_spec)
+
+    id_map_key = f"hybrid_line_id_map_{ws_id}"
+    line_id_map = st.session_state.setdefault(id_map_key, {})
+    snapshot_lines = _normalize_snapshot_lines(
+        overlay_snapshot.get("lines") or [], line_id_map
+    )
+    persisted_lines = api.list_lines(ws_id)
+    persisted_by_id = {str(line["id"]): line for line in persisted_lines}
+    snapshot_by_id = {str(line.get("id")): line for line in snapshot_lines if line.get("id")}
+
+    mutated = False
+
+    for persisted_id in list(persisted_by_id):
+        if persisted_id not in snapshot_by_id:
+            try:
+                persist_line_edit(persisted_id, {"action": "delete"})
+                mutated = True
+            except Exception as exc:
+                st.error(f"Delete failed: {exc}")
+
+    for snap_line in snapshot_lines:
+        snap_id = str(snap_line.get("id") or "")
+        if snap_id and snap_id in persisted_by_id:
+            patch = _line_patch(persisted_by_id[snap_id], snap_line)
+            if patch:
+                try:
+                    persist_line_edit(snap_id, {"action": "update", "patch": patch})
+                    mutated = True
+                except Exception as exc:
+                    st.error(f"Update failed: {exc}")
+            continue
+
+        try:
+            created = persist_line_edit(
+                "",
+                {"action": "create", "project_id": ws_id, "line": snap_line},
+            )
+            mutated = True
+            local_id = str(snap_line.get("id") or "")
+            server_id = str(created.get("id") or "")
+            if local_id and server_id:
+                line_id_map[local_id] = server_id
+        except Exception as exc:
+            st.error(f"Create failed: {exc}")
+
+    if mutated:
+        refreshed_lines = api.list_lines(ws_id)
+        refreshed_line_ids = [str(line["id"]) for line in refreshed_lines]
+        st.session_state[counts_key] = request_live_counts(
+            ws_id, selected_video_ids, refreshed_line_ids,
+        )
+        st.session_state.pop(f"hybrid_xlsx_{ws_id}", None)
+
+
 def render_page() -> None:
     """Render the hybrid count-and-export page."""
     st.set_page_config(page_title="Count & Export (Hybrid)", page_icon="📏", layout="wide")
@@ -225,28 +398,33 @@ def render_page() -> None:
     st.caption(f"Workspace: **{ws['name']}**")
 
     videos = [v for v in api.list_videos(ws["id"]) if v.get("status") == "analyzed"]
-    lines = api.list_lines(ws["id"])
-    spec = build_viewport_spec(ws, videos, lines)
 
     if not videos:
         st.info("No analyzed videos in this workspace. Analyze videos on the Videos page first.")
         st.stop()
 
-    # Multi-video picker (counts span all selected; preview uses the first)
-    video_labels = {f'{v["filename"]} ({v.get("num_tracks", 0)} tracks)': v for v in videos}
-    default_picks = [list(video_labels.keys())[0]]
-    picks = st.multiselect(
-        "Videos to count over",
-        options=list(video_labels.keys()),
-        default=st.session_state.get("hybrid_selected_video_labels", default_picks),
-        help="Counts span all selected videos; the viewport uses the first as preview.",
-        key="hybrid_video_multiselect",
-    )
-    selected_videos = [video_labels[k] for k in picks] if picks else [videos[0]]
-    st.session_state["hybrid_selected_video_labels"] = picks or default_picks
+    ws_id = str(ws["id"])
+    counts_key = f"hybrid_live_counts_{ws_id}"
 
+    # Render the video selector first — _process_snapshot needs the current
+    # selection so pending suggest-lines actions hit the right video set.
+    selected_video_ids = _render_video_selector(ws_id, videos)
+    selected_videos = [v for v in videos if str(v["id"]) in selected_video_ids] or [videos[0]]
     preview_video = selected_videos[0]
     selected_video_ids = [str(v["id"]) for v in selected_videos]
+
+    # Process the previous rerun's React snapshot BEFORE fetching the lines
+    # list. Otherwise the bootstrap is built with stale lines (no new line
+    # yet), and React's `replace-lines` reconciliation throws away the
+    # locally-drawn line as soon as the iframe re-renders.
+    hybrid_key = f"hybrid_viewport_{ws_id}"
+    pending_snapshot = st.session_state.get(hybrid_key)
+    if pending_snapshot:
+        _process_snapshot(pending_snapshot, ws_id, selected_video_ids, counts_key)
+
+    # Now fetch the lines, which include any just-persisted line.
+    lines = api.list_lines(ws_id)
+    spec = build_viewport_spec(ws, videos, lines)
     spec = ViewportSpec(
         project_id=spec.project_id,
         video_ids=selected_video_ids,
@@ -280,14 +458,13 @@ def render_page() -> None:
         track_stats = None
 
     # Live counts: prefer cached, fall back to fresh compute.
-    counts_key = f"hybrid_live_counts_{ws['id']}"
     if counts_key not in st.session_state and lines:
         st.session_state[counts_key] = request_live_counts(
             spec.project_id, selected_video_ids, [str(l["id"]) for l in lines],
         )
     live_counts_raw = st.session_state.get(counts_key)
 
-    suggestions_key = f"hybrid_suggestions_{ws['id']}"
+    suggestions_key = f"hybrid_suggestions_{ws_id}"
     suggestions = st.session_state.get(suggestions_key)
 
     # frameCount driven by actual scene count; frameUrl is legacy fallback.
@@ -316,82 +493,9 @@ def render_page() -> None:
         "suggestions": suggestions,
     }
 
-    overlay_snapshot = render_hybrid_viewport(bootstrap=bootstrap, key=f"hybrid_viewport_{ws['id']}")
-
-    if overlay_snapshot and str(overlay_snapshot.get("projectId") or "") != spec.project_id:
-        overlay_snapshot = None
-
-    needs_rerun = False
-
-    if overlay_snapshot:
-        # Handle React-emitted side-actions FIRST so that suggestions land before
-        # the next snapshot/persistence pass.
-        pending_actions = overlay_snapshot.get("pendingActions") or []
-        if _handle_pending_actions(pending_actions, str(ws["id"]), spec):
-            needs_rerun = True
-
-        snapshot_hash = json.dumps(overlay_snapshot, sort_keys=True, separators=(",", ":"))
-        hash_key = f"hybrid_last_snapshot_hash_{ws['id']}"
-        id_map_key = f"hybrid_line_id_map_{ws['id']}"
-        line_id_map = st.session_state.setdefault(id_map_key, {})
-
-        if st.session_state.get(hash_key) != snapshot_hash:
-            st.session_state[hash_key] = snapshot_hash
-
-            snapshot_lines = _normalize_snapshot_lines(overlay_snapshot.get("lines") or [], line_id_map)
-            persisted_lines = api.list_lines(ws["id"])
-            persisted_by_id = {str(line["id"]): line for line in persisted_lines}
-            snapshot_by_id = {str(line.get("id")): line for line in snapshot_lines if line.get("id")}
-
-            mutated = False
-
-            # Deletions: any persisted line missing from snapshot.
-            for persisted_id in list(persisted_by_id):
-                if persisted_id not in snapshot_by_id:
-                    try:
-                        persist_line_edit(persisted_id, {"action": "delete"})
-                        mutated = True
-                    except Exception as exc:
-                        st.error(f"Delete failed: {exc}")
-
-            # Updates and creates.
-            for snap_line in snapshot_lines:
-                snap_id = str(snap_line.get("id") or "")
-                if snap_id and snap_id in persisted_by_id:
-                    patch = _line_patch(persisted_by_id[snap_id], snap_line)
-                    if patch:
-                        try:
-                            persist_line_edit(snap_id, {"action": "update", "patch": patch})
-                            mutated = True
-                        except Exception as exc:
-                            st.error(f"Update failed: {exc}")
-                    continue
-
-                try:
-                    created = persist_line_edit(
-                        "",
-                        {"action": "create", "project_id": ws["id"], "line": snap_line},
-                    )
-                    mutated = True
-                    local_id = str(snap_line.get("id") or "")
-                    server_id = str(created.get("id") or "")
-                    if local_id and server_id:
-                        line_id_map[local_id] = server_id
-                except Exception as exc:
-                    st.error(f"Create failed: {exc}")
-
-            if mutated:
-                refreshed_lines = api.list_lines(ws["id"])
-                refreshed_line_ids = [str(line["id"]) for line in refreshed_lines]
-                st.session_state[counts_key] = request_live_counts(
-                    spec.project_id, selected_video_ids, refreshed_line_ids,
-                )
-                # Invalidate any cached export when lines change.
-                st.session_state.pop(f"hybrid_xlsx_{ws['id']}", None)
-                needs_rerun = True
-
-    if needs_rerun:
-        st.rerun()
+    # Render the iframe. The returned value is stashed in st.session_state[hybrid_key]
+    # and will be picked up by _process_snapshot at the top of the NEXT rerun.
+    render_hybrid_viewport(bootstrap=bootstrap, key=hybrid_key)
 
     # Export section (Streamlit-side since file download must come from the host).
     st.divider()

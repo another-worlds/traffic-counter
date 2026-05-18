@@ -49,6 +49,15 @@ def _safe_add_columns():
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS scene_frames JSON DEFAULT '[]'",
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS source VARCHAR(32) DEFAULT 'upload'",
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS local_source_path VARCHAR(1024)",
+        "ALTER TABLE videos ADD COLUMN IF NOT EXISTS progress_updated_at TIMESTAMP",
+        "ALTER TABLE videos ADD COLUMN IF NOT EXISTS retries INTEGER NOT NULL DEFAULT 0",
+        """CREATE TABLE IF NOT EXISTS system_state (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            processing_paused BOOLEAN NOT NULL DEFAULT false,
+            updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+            CONSTRAINT system_state_singleton CHECK (id = 1)
+        )""",
+        "INSERT INTO system_state (id) VALUES (1) ON CONFLICT DO NOTHING",
         """CREATE TABLE IF NOT EXISTS tus_uploads (
             id VARCHAR PRIMARY KEY,
             project_id VARCHAR NOT NULL REFERENCES projects(id) ON DELETE CASCADE,

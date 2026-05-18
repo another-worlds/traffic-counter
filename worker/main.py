@@ -11,6 +11,7 @@ configured environment.
 """
 from __future__ import annotations
 import os
+import signal
 import sys
 import time
 import logging
@@ -36,12 +37,77 @@ DATABASE_URL = os.environ.get(
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
 Session = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
+STALE_TIMEOUT_S      = int(os.environ.get("STALE_TIMEOUT_S", "300"))   # 5 min
+MAX_RETRIES          = int(os.environ.get("MAX_RETRIES", "2"))
+POLL_IDLE_S          = 3
+POLL_PAUSED_S        = 10
+PAUSE_CACHE_TTL_S    = 2   # re-read pause flag at most every 2s
+
+_shutdown_requested  = False
+_pause_cache: dict   = {"paused": False, "checked_at": 0.0}
+
+
+# ── signal handling ───────────────────────────────────────────────────────────
+
+def _request_shutdown(signum, frame):
+    global _shutdown_requested
+    log.info("shutdown signal received — will stop after current video")
+    _shutdown_requested = True
+
+signal.signal(signal.SIGTERM, _request_shutdown)
+signal.signal(signal.SIGINT,  _request_shutdown)
+
+
+# ── pause-state check (cached) ────────────────────────────────────────────────
+
+def is_paused() -> bool:
+    now = time.monotonic()
+    if now - _pause_cache["checked_at"] < PAUSE_CACHE_TTL_S:
+        return _pause_cache["paused"]
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text("SELECT processing_paused FROM system_state WHERE id=1")
+            ).first()
+            paused = bool(row.processing_paused) if row else False
+    except Exception:
+        paused = False
+    _pause_cache.update({"paused": paused, "checked_at": now})
+    return paused
+
+
+# ── stale-row sweeper ─────────────────────────────────────────────────────────
+
+def sweep_stale_analyzing() -> None:
+    """Reset 'analyzing' rows that haven't reported progress in STALE_TIMEOUT_S seconds."""
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(text("""
+                UPDATE videos
+                   SET status          = CASE WHEN retries >= :max THEN 'error' ELSE 'queued' END,
+                       error_message   = CASE WHEN retries >= :max
+                                              THEN 'auto-recovery: exceeded max retries'
+                                              ELSE NULL END,
+                       retries         = retries + 1,
+                       progress_pct    = NULL,
+                       progress_updated_at = NULL,
+                       started_analyzing_at = NULL
+                 WHERE status = 'analyzing'
+                   AND COALESCE(progress_updated_at, started_analyzing_at)
+                     < NOW() - make_interval(secs => :sec)
+                RETURNING id, status, retries
+            """), {"max": MAX_RETRIES, "sec": STALE_TIMEOUT_S}).all()
+            for row in rows:
+                log.warning("auto-recovery: video %s → %s (retry %d)",
+                            row.id, row.status, row.retries)
+    except Exception:
+        log.exception("sweep_stale_analyzing failed")
+
+
+# ── job-claim mechanics ───────────────────────────────────────────────────────
 
 def claim_one_queued():
-    """
-    Atomically claim one queued video. Uses SELECT ... FOR UPDATE SKIP LOCKED
-    to keep concurrent pollers from racing on the same row.
-    """
+    """Atomically claim one queued video (SELECT ... FOR UPDATE SKIP LOCKED)."""
     with engine.begin() as conn:
         row = conn.execute(text("""
             SELECT id, project_id, filename, local_source_path
@@ -53,13 +119,15 @@ def claim_one_queued():
         """)).first()
         if not row:
             return None
+        now = datetime.utcnow()
         conn.execute(
             text("""UPDATE videos
                     SET status='analyzing',
                         started_analyzing_at=:ts,
-                        progress_pct=0
+                        progress_pct=0,
+                        progress_updated_at=:ts
                     WHERE id=:id"""),
-            {"id": row.id, "ts": datetime.utcnow()},
+            {"id": row.id, "ts": now},
         )
         return {
             "id": row.id,
@@ -77,15 +145,16 @@ def fetch_video(video_id: str):
         ).first()
         if not row:
             return None
-        # Mark as analyzing
+        now = datetime.utcnow()
         conn.execute(
             text("""UPDATE videos
                     SET status='analyzing',
                         error_message=NULL,
                         started_analyzing_at=:ts,
-                        progress_pct=0
+                        progress_pct=0,
+                        progress_updated_at=:ts
                     WHERE id=:id"""),
-            {"id": video_id, "ts": datetime.utcnow()},
+            {"id": video_id, "ts": now},
         )
         return {
             "id": row.id,
@@ -95,6 +164,8 @@ def fetch_video(video_id: str):
         }
 
 
+# ── status transitions ────────────────────────────────────────────────────────
+
 def mark_analyzed(video_id: str, meta: dict):
     import json as _json
     with engine.begin() as conn:
@@ -102,6 +173,8 @@ def mark_analyzed(video_id: str, meta: dict):
             UPDATE videos SET
                 status='analyzed',
                 error_message=NULL,
+                progress_pct=NULL,
+                progress_updated_at=NULL,
                 fps=:fps,
                 duration_s=:duration_s,
                 width=:width,
@@ -128,18 +201,27 @@ def mark_error(video_id: str, err: Exception):
     msg = f"{type(err).__name__}: {err}\n\n{traceback.format_exc()[-2000:]}"
     with engine.begin() as conn:
         conn.execute(text("""
-            UPDATE videos SET status='error', error_message=:msg, progress_pct=NULL WHERE id=:id
+            UPDATE videos
+            SET status='error',
+                error_message=:msg,
+                progress_pct=NULL,
+                progress_updated_at=NULL
+            WHERE id=:id
         """), {"id": video_id, "msg": msg})
 
 
 def update_progress(video_id: str, pct: float):
-    """Lightweight progress update (called every ~50 frames during analysis)."""
+    """Lightweight progress update called every ~50 frames during analysis."""
     with engine.begin() as conn:
         conn.execute(
-            text("UPDATE videos SET progress_pct=:pct WHERE id=:id"),
+            text("""UPDATE videos
+                    SET progress_pct=:pct, progress_updated_at=NOW()
+                    WHERE id=:id"""),
             {"pct": round(pct, 4), "id": video_id},
         )
 
+
+# ── video processing ──────────────────────────────────────────────────────────
 
 def handle(video: dict):
     log.info("processing video %s (%s)", video["id"], video["filename"])
@@ -161,9 +243,17 @@ def handle(video: dict):
         mark_error(video["id"], e)
 
 
+# ── worker modes ──────────────────────────────────────────────────────────────
+
 def poll_loop():
     log.info("worker started in poll mode")
-    while True:
+    sweep_stale_analyzing()   # recover any rows stuck from a previous crash
+    while not _shutdown_requested:
+        sweep_stale_analyzing()
+        if is_paused():
+            log.debug("processing paused — sleeping %ds", POLL_PAUSED_S)
+            time.sleep(POLL_PAUSED_S)
+            continue
         try:
             v = claim_one_queued()
         except Exception:
@@ -171,9 +261,10 @@ def poll_loop():
             time.sleep(5)
             continue
         if not v:
-            time.sleep(3)
+            time.sleep(POLL_IDLE_S)
             continue
         handle(v)
+    log.info("worker stopped cleanly")
 
 
 def single():

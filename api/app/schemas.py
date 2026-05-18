@@ -35,6 +35,8 @@ class VideoOut(BaseModel):
     error_message: Optional[str]
     source: str = 'upload'
     local_source_path: Optional[str] = None
+    progress_updated_at: Optional[datetime] = None
+    retries: int = 0
     created_at: datetime
     analyzed_at: Optional[datetime]
     started_analyzing_at: Optional[datetime] = None
@@ -128,3 +130,45 @@ class SuggestLineOut(BaseModel):
     points: Dict[str, List[float]]
     color: str
     score: int  # number of tracks this line would cross
+
+
+class PauseStateOut(BaseModel):
+    paused: bool
+
+
+class DashboardAnalyzing(BaseModel):
+    id: str
+    filename: str
+    progress_pct: float
+    started_at: Optional[datetime]
+    eta_s: Optional[float]
+
+
+class DashboardError(BaseModel):
+    id: str
+    filename: str
+    error_message: Optional[str]
+    retries: int
+
+
+class DashboardCounts(BaseModel):
+    total: int
+    uploaded: int
+    queued: int
+    analyzing: int
+    analyzed: int
+    error: int
+
+
+class LocalFolderDashboard(BaseModel):
+    paused: bool
+    counts: DashboardCounts
+    currently_analyzing: List[DashboardAnalyzing]
+    throughput_per_hour: float
+    avg_analysis_seconds: Optional[float]
+    queue_eta_seconds: Optional[float]
+    recent_errors: List[DashboardError]
+
+
+class RetryErrorsResponse(BaseModel):
+    queued: int

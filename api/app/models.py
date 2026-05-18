@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, Integer, Float, BigInteger, ForeignKey, DateTime, JSON
+from sqlalchemy import Column, String, Text, Integer, Float, BigInteger, Boolean, ForeignKey, DateTime, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from .db import Base
@@ -57,6 +57,11 @@ class Video(Base):
     # Absolute host path for local-folder videos; worker reads directly from here.
     local_source_path = Column(String(1024), nullable=True)
 
+    # Updated every ~50 frames; used by the stale-row sweeper as a heartbeat.
+    progress_updated_at = Column(DateTime, nullable=True)
+    # How many times auto-recovery has reset this row back to 'queued'.
+    retries = Column(Integer, default=0, nullable=False)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     analyzed_at = Column(DateTime)
 
@@ -73,6 +78,15 @@ class TusUpload(Base):
     filename = Column(String(512), nullable=False)
     upload_length = Column(BigInteger, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SystemState(Base):
+    """Single-row table for global worker control flags."""
+    __tablename__ = "system_state"
+
+    id = Column(Integer, primary_key=True, default=1)
+    processing_paused = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class CountingLine(Base):

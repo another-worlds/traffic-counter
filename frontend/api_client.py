@@ -246,3 +246,35 @@ def analyze_pending_local_folder() -> Dict:
         r = c.post("/local-folder/analyze-pending")
         _raise(r)
         return r.json()
+
+
+def get_local_folder_dashboard() -> Dict:
+    """Single-call dashboard stats for the watched-folder page."""
+    with _client() as c:
+        r = c.get("/local-folder/dashboard")
+        _raise(r)
+        return r.json()
+
+
+def retry_local_folder_errors() -> Dict:
+    """Re-queue all local-folder videos that are in error state."""
+    with _client() as c:
+        r = c.post("/local-folder/retry-errors")
+        _raise(r)
+        return r.json()
+
+
+def pause_worker() -> Dict:
+    """Pause the processing queue (current video finishes first)."""
+    with _client() as c:
+        r = c.post("/worker/pause")
+        _raise(r)
+        return r.json()
+
+
+def resume_worker() -> Dict:
+    """Resume the processing queue."""
+    with _client() as c:
+        r = c.post("/worker/resume")
+        _raise(r)
+        return r.json()

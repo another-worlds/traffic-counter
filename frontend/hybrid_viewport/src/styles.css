@@ -84,6 +84,7 @@ h2 { font-size: 15px; margin: 0 0 10px; }
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.9fr);
   gap: 16px;
+  align-items: start;
 }
 
 .viewport-panel,

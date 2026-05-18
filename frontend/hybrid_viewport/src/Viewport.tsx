@@ -154,6 +154,7 @@ export default function Viewport({
             const dash = isDraft ? '12 6' : undefined;
             const midX = (a[0] + b[0]) / 2;
             const midY = (a[1] + b[1]) / 2;
+            const label = `${line.name} (${line.count ?? 0})`;
 
             return (
               <g key={line.id} className={isSelected ? 'viewport-line selected' : 'viewport-line'}>
@@ -183,6 +184,7 @@ export default function Viewport({
                 />
                 {/* Label */}
                 <g style={{ pointerEvents: 'none' }}>
+                  <rect x={midX - 72} y={midY - 32} width={144} height={24} rx={8} fill="rgba(0,0,0,0.5)" />
                   <text
                     x={midX + 1}
                     y={midY - 13}
@@ -191,7 +193,7 @@ export default function Viewport({
                     fontWeight={600}
                     textAnchor="middle"
                   >
-                    {line.name}
+                    {label}
                   </text>
                   <text
                     x={midX}
@@ -201,7 +203,7 @@ export default function Viewport({
                     fontWeight={600}
                     textAnchor="middle"
                   >
-                    {line.name}
+                    {label}
                   </text>
                 </g>
               </g>

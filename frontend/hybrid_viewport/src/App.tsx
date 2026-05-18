@@ -216,6 +216,11 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
     [dispatch],
   );
 
+  const linesWithCounts = React.useMemo(
+    () => model.lines.map((line) => ({ ...line, count: counts?.per_line?.[line.id]?.total ?? 0 })),
+    [model.lines, counts],
+  );
+
   return (
     <div className="overlay-shell">
       <header className="overlay-header">
@@ -236,7 +241,7 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
       <main className="overlay-grid">
         <section className="viewport-panel">
           <Viewport
-            model={model}
+            model={{ ...model, lines: linesWithCounts }}
             videoSize={videoSize}
             frameUrl={frameUrl}
             trajectoriesUrl={trajectoriesUrl}
@@ -248,6 +253,7 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
             onMouseUp={handleMouseUp}
           />
 
+          {model.spec.frameCount <= 1 ? <p className="muted">Frame scrubber unavailable for single-frame preview.</p> : null}
           <input
             className="frame-slider"
             type="range"

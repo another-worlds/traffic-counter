@@ -160,12 +160,19 @@ def _handle_pending_actions(actions: List[Dict[str, Any]], ws_id: str, spec: Vie
     """Handle React-emitted side-actions. Returns True if a rerun is needed."""
     if not actions:
         return False
+    actions_hash = json.dumps(actions, sort_keys=True, separators=(",", ":"))
+    dedupe_key = f"hybrid_last_pending_actions_{ws_id}"
+    if st.session_state.get(dedupe_key) == actions_hash:
+        return False
+    st.session_state[dedupe_key] = actions_hash
     suggestions_key = f"hybrid_suggestions_{ws_id}"
     changed = False
     for act in actions:
         kind = act.get("type")
         if kind == "request-suggestions":
-            n = max(1, min(10, int(act.get("n") or 3)))
+            n = max(0, min(10, int(act.get("n") or 0)))
+            if n <= 0:
+                continue
             try:
                 st.session_state[suggestions_key] = api.suggest_lines(
                     spec.project_id, spec.video_ids, n=n,

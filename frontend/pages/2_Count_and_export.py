@@ -10,9 +10,11 @@ and counting; Streamlit reconciles snapshots and runs API calls.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 import streamlit as st
 
 import api_client as api
@@ -156,6 +158,33 @@ def _absolute_url(rel: Optional[str]) -> Optional[str]:
     return api.file_url(rel)
 
 
+@st.cache_data(show_spinner=False, max_entries=64)
+def _fetch_asset_data_url(rel_url: str) -> Optional[str]:
+    """Fetch an API asset over the internal Docker network and return it as a
+    ``data:`` URI so the iframe never needs browser-to-API connectivity.
+
+    PUBLIC_API_URL (used by ``api.file_url``) is only reachable from the user's
+    browser in localhost-style deployments. For SSH-tunnel, reverse-proxy, or
+    Cloud Run setups it silently fails, which is why the React viewport was
+    showing the "No preview frame" fallback for every video. Embedding the
+    bytes ships them through the Streamlit component bridge instead.
+    """
+    try:
+        with httpx.Client(base_url=api.API_URL, timeout=15.0) as c:
+            r = c.get(rel_url)
+    except Exception:
+        return None
+    if r.status_code != 200:
+        return None
+    content_type = r.headers.get("content-type", "image/jpeg")
+    b64 = base64.b64encode(r.content).decode("ascii")
+    return f"data:{content_type};base64,{b64}"
+
+
+def _maybe_fetch_asset_data_url(rel_url: Optional[str]) -> Optional[str]:
+    return _fetch_asset_data_url(rel_url) if rel_url else None
+
+
 def _handle_pending_actions(actions: List[Dict[str, Any]], ws_id: str, spec: ViewportSpec) -> bool:
     """Handle React-emitted side-actions. Returns True if a rerun is needed."""
     if not actions:
@@ -227,10 +256,12 @@ def render_page() -> None:
     )
 
     # Fetch scene-based keyframes + overlay asset URLs for the preview video.
+    # Bytes are inlined as data: URIs so the browser never has to reach the API
+    # directly — see _fetch_asset_data_url for the why.
     try:
         raw_frames = api.list_video_frames(preview_video["id"])
         frames_for_bootstrap = [
-            {**f, "url": _absolute_url(f.get("url"))} for f in raw_frames
+            {**f, "url": _maybe_fetch_asset_data_url(f.get("url"))} for f in raw_frames
         ]
     except Exception:
         frames_for_bootstrap = []
@@ -274,8 +305,8 @@ def render_page() -> None:
         "initialLines": lines,
         "frames": frames_for_bootstrap,
         "frameUrl": legacy_frame_url,
-        "trajectoriesUrl": _absolute_url(traj_rel),
-        "heatmapUrl": _absolute_url(heatmap_rel),
+        "trajectoriesUrl": _maybe_fetch_asset_data_url(traj_rel),
+        "heatmapUrl": _maybe_fetch_asset_data_url(heatmap_rel),
         "videoSize": {
             "width": int(preview_video.get("width") or 1920),
             "height": int(preview_video.get("height") or 1080),

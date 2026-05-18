@@ -58,6 +58,14 @@ def _folder_of(video: dict) -> str:
     return "(unknown)"
 
 
+def _health_badge(percentage: float) -> tuple[str, str]:
+    if percentage >= 0.85:
+        return "🟢", "#16a34a"
+    if percentage >= 0.5:
+        return "🟠", "#ea580c"
+    return "🔴", "#dc2626"
+
+
 try:
     videos = api.list_local_folder_videos()
     queue = api.worker_status()
@@ -72,7 +80,6 @@ if not videos:
     )
     st.stop()
 
-# Dashboard stats
 status_counts = defaultdict(int)
 for v in videos:
     status_counts[v["status"]] += 1
@@ -106,6 +113,33 @@ mc8.metric("Processing time spent", f"{total_processing_time_s/3600:.1f}h")
 
 st.progress(analyzed / max(1, total), text=f"Overall completion: {analyzed}/{total} videos")
 
+# Folder clustering (used both by dashboard and list)
+folders = defaultdict(list)
+for v in videos:
+    folders[_folder_of(v)].append(v)
+
+folder_rows = []
+for folder, items in folders.items():
+    count = len(items)
+    analyzed_n = sum(1 for v in items if v["status"] == "analyzed")
+    queued_n = sum(1 for v in items if v["status"] in ("queued", "analyzing"))
+    err_n = sum(1 for v in items if v["status"] == "error")
+    total_hours = sum(_duration_s(v) for v in items) / 3600.0
+    processed_hours = sum(_duration_s(v) for v in items if v["status"] == "analyzed") / 3600.0
+    completion = analyzed_n / max(1, count)
+    folder_rows.append({
+        "folder": folder,
+        "count": count,
+        "analyzed": analyzed_n,
+        "queued": queued_n,
+        "errors": err_n,
+        "total_hours": total_hours,
+        "processed_hours": processed_hours,
+        "completion": completion,
+    })
+
+folder_rows.sort(key=lambda r: (r["completion"], -r["count"]))
+
 # Queue controls
 st.divider()
 left, right = st.columns([3, 2])
@@ -133,30 +167,7 @@ with right:
         if item["status"] == "analyzing":
             st.progress(pct)
 
-# Folder-clustered visualization
-folders = defaultdict(list)
-for v in videos:
-    folders[_folder_of(v)].append(v)
-
-folder_rows = []
-for folder, items in folders.items():
-    count = len(items)
-    analyzed_n = sum(1 for v in items if v["status"] == "analyzed")
-    queued_n = sum(1 for v in items if v["status"] in ("queued", "analyzing"))
-    err_n = sum(1 for v in items if v["status"] == "error")
-    duration_min = sum(_duration_s(v) for v in items) / 60.0
-    folder_rows.append({
-        "folder": folder,
-        "count": count,
-        "analyzed": analyzed_n,
-        "queued": queued_n,
-        "errors": err_n,
-        "minutes": duration_min,
-        "completion": analyzed_n / max(1, count),
-    })
-
-folder_rows.sort(key=lambda r: (r["completion"], -r["count"]))
-
+# Folder selection area
 st.divider()
 st.subheader("Folder-centric Tracking")
 left, right = st.columns([1, 2])
@@ -165,13 +176,26 @@ with left:
     options = [f"{r['folder']} ({r['analyzed']}/{r['count']})" for r in folder_rows]
     selected = st.radio("Folders", options=options, label_visibility="collapsed")
     sel_folder = selected.rsplit(" (", 1)[0]
-    st.markdown("#### Folder statistics")
-    row = next(r for r in folder_rows if r["folder"] == sel_folder)
-    st.write(f"**{row['folder']}**")
-    st.caption(f"Total videos: {row['count']}")
-    st.caption(f"Analyzed: {row['analyzed']} · In queue: {row['queued']} · Errors: {row['errors']}")
-    st.caption(f"Total duration: {row['minutes']:.1f} minutes")
-    st.progress(row["completion"], text=f"Completion {row['completion']*100:.0f}%")
+
+selected_row = next(r for r in folder_rows if r["folder"] == sel_folder)
+status_icon, accent = _health_badge(selected_row["completion"])
+
+# Current folder dashboard directly under main dashboard section and above detailed list
+st.markdown("### Current Folder Dashboard")
+st.markdown(
+    f"<div style='padding:0.55rem 0.8rem;border-left:6px solid {accent};background:#f8fafc;border-radius:8px;'>"
+    f"<strong>{status_icon} {selected_row['folder']}</strong>"
+    f"<br/><span style='color:#475569;'>Videos: {selected_row['count']} · "
+    f"Analyzed: {selected_row['analyzed']} · Queue: {selected_row['queued']} · Errors: {selected_row['errors']}</span>"
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+fc1, fc2, fc3 = st.columns(3)
+fc1.metric("Total hours in folder", f"{selected_row['total_hours']:.2f}h")
+fc2.metric("Processed hours", f"{selected_row['processed_hours']:.2f}h")
+fc3.metric("Folder completion", f"{selected_row['completion']*100:.1f}%")
+st.progress(selected_row["completion"], text=f"{status_icon} Folder completion {selected_row['completion']*100:.1f}%")
 
 with right:
     st.markdown("#### Videos in selected folder")

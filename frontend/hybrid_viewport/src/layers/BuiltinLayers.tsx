@@ -1,25 +1,77 @@
+import React from 'react';
 import type { Layer, LayerRenderContext } from './types';
+
+function FrameFallback({ width, height }: { width: number; height: number }) {
+  const titleSize = Math.round(Math.min(width, height) * 0.04);
+  const subtitleSize = Math.round(Math.min(width, height) * 0.028);
+  return (
+    <g key="frame-bg" style={{ pointerEvents: 'none' }}>
+      <rect width={width} height={height} fill="#0e1117" />
+      <text
+        x={width / 2}
+        y={height / 2 - titleSize * 0.6}
+        textAnchor="middle"
+        dominantBaseline="middle"
+        fill="#fafafa"
+        fontSize={titleSize}
+        fontFamily="system-ui, sans-serif"
+      >
+        No preview frame
+      </text>
+      <text
+        x={width / 2}
+        y={height / 2 + titleSize}
+        textAnchor="middle"
+        dominantBaseline="middle"
+        fill="#8b959e"
+        fontSize={subtitleSize}
+        fontFamily="system-ui, sans-serif"
+      >
+        Re-analyze the video to regenerate it
+      </text>
+    </g>
+  );
+}
+
+function FrameImage({ frameUrl, width, height }: { frameUrl: string | null; width: number; height: number }) {
+  const [loadFailed, setLoadFailed] = React.useState(false);
+  // Reset the failure flag whenever the URL changes so scrubbing to
+  // another scene re-attempts the load instead of staying on the fallback.
+  React.useEffect(() => {
+    setLoadFailed(false);
+  }, [frameUrl]);
+
+  if (!frameUrl || loadFailed) {
+    return <FrameFallback width={width} height={height} />;
+  }
+  return (
+    <image
+      key={`frame:${frameUrl}`}
+      href={frameUrl}
+      x={0} y={0}
+      width={width} height={height}
+      preserveAspectRatio="none"
+      style={{ pointerEvents: 'none' }}
+      onError={() => setLoadFailed(true)}
+    />
+  );
+}
 
 const FrameLayer: Layer = {
   key: 'frame-scrubber',
   label: 'Frame',
   defaultVisible: true,
   render({ model, bootstrap, videoSize }: LayerRenderContext) {
-    const { width, height } = videoSize;
     // Scene-based frames take priority; fall back to legacy single frameUrl.
     const frameUrl =
       bootstrap.frames?.[model.currentFrame]?.url ?? bootstrap.frameUrl ?? null;
-    return frameUrl ? (
-      <image
+    return (
+      <FrameImage
         key="frame"
-        href={frameUrl}
-        x={0} y={0}
-        width={width} height={height}
-        preserveAspectRatio="none"
-        style={{ pointerEvents: 'none' }}
+        frameUrl={frameUrl}
+        width={videoSize.width}
+        height={videoSize.height}
       />
-    ) : (
-      <rect key="frame-bg" width={width} height={height} fill="#0e1117" />
     );
   },
 };

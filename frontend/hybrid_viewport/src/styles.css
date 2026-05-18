@@ -84,6 +84,9 @@ h2 { font-size: 15px; margin: 0 0 10px; }
   display: grid;
   grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.9fr);
   gap: 16px;
+  /* Don't let the viewport-panel stretch to the side-panel's height; otherwise
+     the unused space below the SVG renders as a phantom "second viewport". */
+  align-items: start;
 }
 
 .viewport-panel,

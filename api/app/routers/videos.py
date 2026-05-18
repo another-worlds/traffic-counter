@@ -116,6 +116,19 @@ def list_video_frames(video_id: str, db: Session = Depends(get_db)):
             k = key_scene_frame(v.project_id, v.id, sf["index"])
             url = storage.signed_url(k) if storage.exists(k) else None
             result.append({**sf, "url": url})
+        # If every scene file is missing but the legacy frame.jpg is still on
+        # disk (e.g. partial storage loss), surface that instead of returning
+        # only null URLs — otherwise the viewport shows a black placeholder.
+        if any(r["url"] for r in result):
+            return result
+        legacy_key = key_frame(v.project_id, v.id)
+        if storage.exists(legacy_key):
+            return [{
+                "index": 0,
+                "time_s": 0.0,
+                "frame_index_in_video": 0,
+                "url": storage.signed_url(legacy_key),
+            }]
         return result
     # Backward compat: serve the legacy single frame as scene 0.
     k = key_frame(v.project_id, v.id)

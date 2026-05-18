@@ -118,6 +118,9 @@ job, scale to zero between jobs."
 - `FRAME_STRIDE` env on the worker — process every Nth frame for big speedups
   on long clips. Track interpolation is implicit (tracker carries IDs forward).
 - `HALF=true` — FP16 on L4 is free (~2× over FP32).
+- `IMGSZ` — inference resolution; increase for accuracy, decrease for throughput.
+- `WORKERS` — video decode/data loader workers; raise until CPU no longer starves GPU.
+- `STREAM_BUFFER=true` — prebuffer frames to smooth GPU utilization on bursty inputs.
 - Switch the model to `yolov8n.pt`/`yolov8s.pt` for throughput, or export it to
   TensorRT (`yolo export format=engine half=True`) for another ~2× — bake the
   resulting `.engine` into the worker image.

@@ -7,7 +7,7 @@ from ..db import get_db
 from ..models import Project, Video
 from ..schemas import VideoOut, AnalyzeResponse
 from ..services.storage import (
-    get_storage, key_video, key_frame, key_trajectories, key_heatmap,
+    get_storage, key_video, key_frame, key_scene_frame, key_trajectories, key_heatmap,
 )
 from ..services.jobs import get_job_runner
 
@@ -96,6 +96,31 @@ def get_frame_url(video_id: str, db: Session = Depends(get_db)):
     if not storage.exists(k):
         raise HTTPException(404, "frame not ready yet — analyze the video first")
     return {"url": storage.signed_url(k, expires_minutes=60)}
+
+
+@router.get("/videos/{video_id}/frames")
+def list_video_frames(video_id: str, db: Session = Depends(get_db)):
+    """Return the list of scene-based keyframe URLs for the given video.
+
+    For videos analyzed before scene detection was added, falls back to the
+    single legacy frame.jpg so the viewport still works without re-analysis.
+    """
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "video not found")
+    storage = get_storage()
+    scenes = v.scene_frames if v.scene_frames else []
+    if scenes:
+        result = []
+        for sf in scenes:
+            k = key_scene_frame(v.project_id, v.id, sf["index"])
+            url = storage.signed_url(k) if storage.exists(k) else None
+            result.append({**sf, "url": url})
+        return result
+    # Backward compat: serve the legacy single frame as scene 0.
+    k = key_frame(v.project_id, v.id)
+    url = storage.signed_url(k) if storage.exists(k) else None
+    return [{"index": 0, "time_s": 0.0, "frame_index_in_video": 0, "url": url}]
 
 
 @router.get("/videos/{video_id}/trajectories-url")

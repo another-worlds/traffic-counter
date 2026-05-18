@@ -1,911 +1,392 @@
-"""Count & Export page — interactive line editor.
+"""Hybrid Count & Export page.
 
-Features:
-  ✏️  Add line   – click "Add line" then drag on canvas to draw a new counting
-                  line. Named and saved in one step.
-  ✋  Drag       – existing lines are always live Fabric.js objects; drag any
-                  line or its endpoint handles directly on the canvas, then click
-                  "Apply edits" to persist the new positions.
-  🗑  Delete     – select a line in the canvas and press the trash icon, OR use
-                  the per-line button in the right panel, OR "Clear all" to wipe
-                  everything. All deletions sync to the DB on Apply edits.
-  📊  Live counts – recomputed in background after every change.
-  ✨  Suggest    – automatic line placement based on trajectory-density analysis.
-  📐  Presets    – midlines/diagonals in one click.
-  📥/📤 Import/Export – JSON-based line config.
-  📊  Export XLSX – full counts workbook download.
+Semantic Contract Ref: counting_line_overlay/contract v0.1
+
+The Streamlit shell hosts an embedded React/Vite viewport that owns the live
+line editor, frame display, overlay toggles, counts table, auto-suggest,
+and direction rose. The API remains the source of truth for persistence
+and counting; Streamlit reconciles snapshots and runs API calls.
 """
 from __future__ import annotations
 
-import hashlib
-import io
+from dataclasses import dataclass
 import json
-import math
-import time
-import colorsys
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import httpx
-import numpy as np
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
-from streamlit_drawable_canvas import st_canvas
 
 import api_client as api
 from sidebar import render_sidebar
-
-# ── Page config ──────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Count & Export", page_icon="📏", layout="wide")
-st.title("📏 Count & Export")
-
-ws = render_sidebar()
-if not ws:
-    st.warning("Pick a workspace in the sidebar to begin.")
-    st.stop()
-
-st.caption(f"Workspace: **{ws['name']}**")
-
-# ── Session-state initialisation ─────────────────────────────────────────────
-if "canvas_version" not in st.session_state:
-    st.session_state["canvas_version"] = 0
-if "drawing_color" not in st.session_state:
-    st.session_state["drawing_color"] = "#e24b4a"
-if "drawing_new_line" not in st.session_state:
-    st.session_state["drawing_new_line"] = False
-if "counts" not in st.session_state:
-    st.session_state["counts"] = None
-if "needs_recount" not in st.session_state:
-    st.session_state["needs_recount"] = True
-if "suggest_results" not in st.session_state:
-    st.session_state["suggest_results"] = None
-if "suggest_open" not in st.session_state:
-    st.session_state["suggest_open"] = False
-if "track_stats_cache" not in st.session_state:
-    st.session_state["track_stats_cache"] = {}
-if "active_classes" not in st.session_state:
-    st.session_state["active_classes"] = ["car", "truck", "bus", "motorcycle", "bicycle"]
-if "show_busy_zone" not in st.session_state:
-    st.session_state["show_busy_zone"] = False
-
-# ── Video selection ───────────────────────────────────────────────────────────
-videos = [v for v in api.list_videos(ws["id"]) if v["status"] == "analyzed"]
-if not videos:
-    st.info("No analyzed videos in this workspace yet — analyze one first.")
-    st.stop()
-
-video_labels = {f'{v["filename"]} ({v["num_tracks"]} tracks)': v for v in videos}
-default_picks = [list(video_labels.keys())[0]]
-picks = st.multiselect(
-    "Videos to count over",
-    options=list(video_labels.keys()),
-    default=st.session_state.get("selected_video_labels", default_picks),
-    help="Counting is computed over the union of all selected videos.",
-    key="video_multiselect",
-)
-selected = [video_labels[k] for k in picks]
-st.session_state["selected_video_labels"] = picks
-if not selected:
-    st.stop()
-
-preview_video = selected[0]
-video_ids = [v["id"] for v in selected]
-
-# ── Load background image ─────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def fetch_image(url: str) -> Image.Image:
-    r = httpx.get(url, timeout=30.0)
-    r.raise_for_status()
-    return Image.open(io.BytesIO(r.content)).convert("RGBA")
+from hybrid_viewport.streamlit_bridge import render_hybrid_viewport
 
 
-# ── Track-overlay class palette (must match worker/pipeline.py) ───────────────
-_TRACK_COLORS = {
-    "car":        (55, 138, 221),
-    "truck":      (226, 75, 74),
-    "bus":        (215, 90, 48),
-    "motorcycle": (239, 159, 39),
-    "bicycle":    (28, 158, 117),
-}
-_ALL_CLASSES = list(_TRACK_COLORS.keys())
-_COLOR_TOL = 45  # per-channel pixel tolerance for class colour matching
+@dataclass(frozen=True)
+class ViewportSpec:
+    """Describe the hybrid overlay viewport and its API-ready inputs."""
+
+    project_id: str
+    video_ids: List[str]
+    selected_line_ids: List[str]
+    frame_count: int
+    active_layers: Tuple[str, ...]
 
 
-def _filter_overlay(overlay_img: Image.Image, keep_classes: tuple) -> Image.Image:
-    """Return the trajectory overlay with only *keep_classes* tracks visible."""
-    if not keep_classes or set(keep_classes) >= set(_ALL_CLASSES):
-        return overlay_img
-    arr = np.array(overlay_img.convert("RGBA"), dtype=np.int16)
-    mask = np.zeros(arr.shape[:2], dtype=bool)
-    for cls in keep_classes:
-        r0, g0, b0 = _TRACK_COLORS[cls]
-        mask |= (
-            (np.abs(arr[:, :, 0] - r0) < _COLOR_TOL)
-            & (np.abs(arr[:, :, 1] - g0) < _COLOR_TOL)
-            & (np.abs(arr[:, :, 2] - b0) < _COLOR_TOL)
-            & (arr[:, :, 3] > 10)
-        )
-    result = arr.copy()
-    result[~mask, 3] = 0
-    return Image.fromarray(result.astype(np.uint8), mode="RGBA")
+def build_viewport_spec(ws: Dict[str, Any], videos: List[Dict[str, Any]], lines: List[Dict[str, Any]]) -> ViewportSpec:
+    """Build the state package consumed by the embedded React/Vite overlay."""
+    active_layers = ["saved-lines", "frame-scrubber", "trajectories"]
+    if lines:
+        active_layers.append("direction-overlay")
+    if any(v.get("status") == "analyzed" for v in videos):
+        active_layers.append("counts")
+
+    return ViewportSpec(
+        project_id=str(ws["id"]),
+        video_ids=[str(v["id"]) for v in videos],
+        selected_line_ids=[str(ln["id"]) for ln in lines],
+        frame_count=100,
+        active_layers=tuple(dict.fromkeys(active_layers)),
+    )
 
 
-def _draw_busy_zone(img: Image.Image, busy_zone: dict) -> Image.Image:
-    """Draw a glowing ellipse over the densest trajectory area."""
-    out = img.copy().convert("RGBA")
-    draw = ImageDraw.Draw(out, "RGBA")
-    w, h = out.size
-    cx = int(busy_zone["cx_pct"] * w)
-    cy = int(busy_zone["cy_pct"] * h)
-    r  = int(busy_zone["r_pct"] * max(w, h))
-    for ring_r, alpha in [(r + 16, 20), (r + 8, 45), (r + 2, 80)]:
-        draw.ellipse(
-            [(cx - ring_r, cy - ring_r), (cx + ring_r, cy + ring_r)],
-            outline=(255, 220, 0, alpha),
-            width=3,
-        )
-    draw.ellipse([(cx - r, cy - r), (cx + r, cy + r)], fill=(255, 220, 0, 20))
-    return out
+def persist_line_edit(line_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist a single line change through the API."""
+    action = payload.get("action")
 
-
-with st.spinner("Loading frame…"):
-    frame_url = api.get_frame_url(preview_video["id"])
-    traj_url = api.get_trajectories_url(preview_video["id"])
-    if not frame_url or not traj_url:
-        st.error("Frame or trajectories overlay missing — re-analyze the video.")
-        st.stop()
-    bg = fetch_image(api.file_url(frame_url))
-    overlay = fetch_image(api.file_url(traj_url))
-
-_active_classes = tuple(sorted(st.session_state.get("active_classes", _ALL_CLASSES)))
-_filtered_ov = _filter_overlay(overlay, _active_classes)
-composite = Image.alpha_composite(bg, _filtered_ov.resize(bg.size))
-src_w, src_h = composite.size
-canvas_w = min(900, src_w)
-scale = canvas_w / src_w
-canvas_h = int(src_h * scale)
-
-# ── Saved lines ───────────────────────────────────────────────────────────────
-saved_lines = api.list_lines(ws["id"])
-
-
-# ── Auto-count helper ─────────────────────────────────────────────────────────
-def _run_counts_silently():
-    """Recompute counts for all saved lines. Updates session_state['counts']."""
-    if not saved_lines:
-        st.session_state["counts"] = None
-        return
-    line_ids = [ln["id"] for ln in saved_lines]
-    try:
-        result = api.compute_counts(ws["id"], video_ids, line_ids)
-        st.session_state["counts"] = {r["line_id"]: r for r in result["per_line"]}
-        st.session_state["counts"]["__total_tracks"] = result["total_unique_tracks"]
-    except Exception:
-        pass  # keep stale counts rather than crash the page
-    st.session_state["needs_recount"] = False
-
-
-if st.session_state["needs_recount"] and saved_lines:
-    _run_counts_silently()
-
-counts_by_id: Dict = st.session_state.get("counts") or {}
-
-# ── Pre-fetch track stats (cached; used for busy-zone overlay + stats panel) ───
-_stats_cache = st.session_state.setdefault("track_stats_cache", {})
-if preview_video["id"] not in _stats_cache:
-    try:
-        _s = api.track_stats(preview_video["id"])
-        if _s:
-            _stats_cache[preview_video["id"]] = _s
-    except Exception:
-        pass
-_preview_stats: Optional[Dict] = _stats_cache.get(preview_video["id"])
-
-
-# ── Background composer: bake saved lines + labels into a PIL image ───────────
-def _bake_lines_on_image(
-    img: Image.Image,
-    lines: List[Dict],
-    scale: float,
-) -> Image.Image:
-    """Return a copy of *img* with each saved line drawn on it."""
-    out = img.copy().convert("RGBA")
-    draw = ImageDraw.Draw(out)
-    for ln in lines:
-        a = ln["points"]["a"]
-        b = ln["points"]["b"]
-        ax, ay = int(a[0] * scale), int(a[1] * scale)
-        bx, by = int(b[0] * scale), int(b[1] * scale)
-        color = ln.get("color", "#e24b4a")
-        draw.line([(ax, ay), (bx, by)], fill=color, width=3)
-        # End-point handles
-        for px, py in [(ax, ay), (bx, by)]:
-            r = 6
-            draw.ellipse([(px - r, py - r), (px + r, py + r)], fill=color, outline="white", width=2)
-        # Label (name + count)
-        cx_label = (ax + bx) // 2 + 6
-        cy_label = (ay + by) // 2 - 12
-        c_info = counts_by_id.get(ln["id"])
-        count_str = f" [{c_info['total']}]" if c_info else ""
-        label = f"{ln['name']}{count_str}"
-        # Shadow
-        draw.text((cx_label + 1, cy_label + 1), label, fill=(0, 0, 0, 180))
-        draw.text((cx_label, cy_label), label, fill=color)
-    return out
-
-
-canvas_bg = composite.resize((canvas_w, canvas_h))
-
-
-# ── Fabric.js object helpers ──────────────────────────────────────────────────
-def _line_endpoints_from_fabric(obj: dict) -> Tuple[Tuple[float, float], Tuple[float, float]]:
-    """Extract (A, B) canvas-pixel coords from a fabric.js Line JSON object.
-
-    Fabric.js stores endpoints as local offsets from the object origin (left, top),
-    which may be the bounding-box corner OR the centre depending on originX/Y.
-    The transform is always: global = origin + local * scale.
-    Do NOT reconstruct from bounding-box corners — that only works for axis-aligned lines.
-    """
-    left = float(obj.get("left", 0))
-    top = float(obj.get("top", 0))
-    x1 = float(obj.get("x1", 0))
-    y1 = float(obj.get("y1", 0))
-    x2 = float(obj.get("x2", 0))
-    y2 = float(obj.get("y2", 0))
-    sx = float(obj.get("scaleX", 1.0))
-    sy = float(obj.get("scaleY", 1.0))
-    return (left + x1 * sx, top + y1 * sy), (left + x2 * sx, top + y2 * sy)
-
-
-def _saved_lines_to_fabric(lines: List[Dict], scale: float) -> dict:
-    """Build an ``initial_drawing`` JSON blob for st_canvas from saved lines.
-
-    Each line is accompanied by a non-interactive Fabric.js Text object showing
-    its name and current count, so labels are always visible as live vector
-    objects without baking anything into the background image.
-    """
-    objects = []
-    for ln in lines:
-        a = ln["points"]["a"]
-        b = ln["points"]["b"]
-        ax, ay = a[0] * scale, a[1] * scale
-        bx, by = b[0] * scale, b[1] * scale
-        color = ln.get("color", "#e24b4a")
-        objects.append({
-            "type": "line",
-            "version": "5.3.0",
-            "originX": "left",
-            "originY": "top",
-            "left": min(ax, bx),
-            "top": min(ay, by),
-            "width": abs(bx - ax) or 0.01,
-            "height": abs(by - ay) or 0.01,
-            "x1": 0 if ax <= bx else abs(bx - ax),
-            "y1": 0 if ay <= by else abs(by - ay),
-            "x2": abs(bx - ax) if ax <= bx else 0,
-            "y2": abs(by - ay) if ay <= by else 0,
-            "stroke": color,
-            "strokeWidth": 3,
-            "selectable": True,
-            "evented": True,
-            # Custom field — preserved by the canvas JSON roundtrip
-            "_line_id": ln["id"],
-        })
-        # Text label — name + count, centred on the line.
-        # Non-interactive so it doesn't interfere with line dragging.
-        cinfo = counts_by_id.get(ln["id"])
-        label = ln["name"] + (f"  [{cinfo['total']}]" if cinfo else "")
-        cx_lbl = (ax + bx) / 2
-        cy_lbl = (ay + by) / 2 - 16
-        objects.append({
-            "type": "text",
-            "version": "5.3.0",
-            "originX": "left",
-            "originY": "top",
-            "left": cx_lbl,
-            "top": cy_lbl,
-            "text": label,
-            "fontSize": 13,
-            "fontFamily": "Arial, sans-serif",
-            "fill": color,
-            "shadow": {"color": "rgba(0,0,0,0.85)", "blur": 3, "offsetX": 1, "offsetY": 1},
-            "selectable": False,
-            "evented": False,
-            "hasControls": False,
-            "hasBorders": False,
-            "_line_label": ln["id"],
-        })
-    return {"version": "5.3.0", "objects": objects}
-
-
-# ── Layout: two columns ───────────────────────────────────────────────────────
-col_canvas, col_panel = st.columns([3, 2])
-
-# ─────────────────────────── LEFT: canvas ────────────────────────────────────
-with col_canvas:
-
-    # ── Toolbar row ───────────────────────────────────────────────────────────
-    tb1, tb2, tb3 = st.columns([1.4, 1.2, 1])
-
-    with tb1:
-        show_heatmap = st.toggle(
-            "🌡️ Heatmap",
-            value=st.session_state.get("show_heatmap", False),
-            key="heatmap_toggle",
-            help="Overlay a track-density heatmap. Generated on first use and cached.",
-        )
-        st.session_state["show_heatmap"] = show_heatmap
-
-    with tb2:
-        if st.session_state["drawing_new_line"]:
-            if st.button("✖ Cancel drawing", use_container_width=True):
-                st.session_state["drawing_new_line"] = False
-                st.session_state["canvas_version"] += 1
-                st.rerun()
-        else:
-            if st.button("✏️ Add line", use_container_width=True, type="primary"):
-                st.session_state["drawing_new_line"] = True
-                st.session_state["canvas_version"] += 1  # remount in draw mode
-                st.rerun()
-
-    with tb3:
-        with st.popover("🗑 Clear all", use_container_width=True):
-            if saved_lines:
-                st.warning(f"Delete all **{len(saved_lines)}** saved line(s)?")
-                if st.button("Yes, delete all", type="primary", key="confirm_clear_all"):
-                    for ln in saved_lines:
-                        try:
-                            api.delete_line(ln["id"])
-                        except Exception:
-                            pass
-                    st.session_state["canvas_version"] += 1
-                    st.session_state["needs_recount"] = True
-                    st.toast("All lines deleted.", icon="🗑️")
-                    st.rerun()
-            else:
-                st.caption("No saved lines.")
-
-    if show_heatmap:
-        hm_url = api.get_heatmap_url(preview_video["id"])
-        if hm_url:
-            with st.spinner("Loading heatmap…"):
-                hm_img = fetch_image(api.file_url(hm_url))
-            hm_resized = hm_img.resize((canvas_w, canvas_h)).convert("RGBA")
-            canvas_bg = Image.alpha_composite(canvas_bg.convert("RGBA"), hm_resized)
-        else:
-            st.caption("Heatmap not ready yet.")
-
-    # Busy-zone highlight
-    if (
-        st.session_state.get("show_busy_zone")
-        and _preview_stats
-        and _preview_stats.get("busy_zone")
-    ):
-        canvas_bg = _draw_busy_zone(canvas_bg, _preview_stats["busy_zone"])
-
-    # ── Unified canvas ────────────────────────────────────────────────────────
-    # One Fabric.js canvas that switches between draw mode (add a new line) and
-    # transform mode (drag/select existing lines).  Version bumps on mode
-    # switches so Fabric.js re-mounts cleanly.  In transform mode, position
-    # changes are detected and persisted automatically — no save button needed.
-    _drawing = st.session_state["drawing_new_line"]
-    _canvas_key = f"canvas_{preview_video['id']}_v{st.session_state['canvas_version']}"
-
-    if _drawing:
-        st.caption(
-            "🖊 **Draw mode** — click and drag to place a new counting line. "
-            "Release when done; it will be saved automatically."
-        )
-        canvas_result = st_canvas(
-            fill_color="rgba(0,0,0,0)",
-            stroke_width=3,
-            stroke_color=st.session_state["drawing_color"],
-            # Bake existing lines into background so they're visible as reference
-            background_image=_bake_lines_on_image(canvas_bg, saved_lines, scale),
-            update_streamlit=True,
-            height=canvas_h,
-            width=canvas_w,
-            drawing_mode="line",
-            key=_canvas_key,
+    if action == "create":
+        project_id = str(payload["project_id"])
+        line = payload["line"]
+        points = line.get("points") or []
+        if len(points) < 2:
+            raise ValueError("create payload must include at least two points")
+        a = points[0]
+        b = points[-1]
+        return api.create_line(
+            project_id,
+            line.get("name") or "line",
+            float(a[0]), float(a[1]),
+            float(b[0]), float(b[1]),
+            line.get("color") or "#e24b4a",
         )
 
-        # Auto-save: as soon as a line of meaningful length is detected,
-        # name it automatically and switch back to transform mode.
-        if canvas_result.json_data:
-            for _obj in canvas_result.json_data.get("objects", []):
-                if _obj.get("type") != "line":
-                    continue
-                (_ax, _ay), (_bx, _by) = _line_endpoints_from_fabric(_obj)
-                if math.hypot(_bx - _ax, _by - _ay) < 30:
-                    continue  # too short — mid-drag or accidental tap
-                _auto_name = f"line {len(saved_lines) + 1}"
-                api.create_line(
-                    ws["id"], _auto_name,
-                    _ax / scale, _ay / scale,
-                    _bx / scale, _by / scale,
-                    color=st.session_state["drawing_color"],
-                )
-                st.session_state["drawing_new_line"] = False
-                st.session_state["canvas_version"] += 1
-                st.session_state["needs_recount"] = True
-                st.toast(
-                    f"**{_auto_name}** added — rename it in the panel →",
-                    icon="✅",
-                )
-                st.rerun()
-                break  # one line per rerun
-
-    else:
-        st.caption(
-            "Drag any line or its endpoint handles to reposition it — "
-            "changes are saved automatically."
-        )
-        canvas_result = st_canvas(
-            fill_color="rgba(0,0,0,0)",
-            stroke_width=3,
-            stroke_color="#ffffff",
-            background_image=canvas_bg,
-            initial_drawing=_saved_lines_to_fabric(saved_lines, scale),
-            update_streamlit=True,
-            height=canvas_h,
-            width=canvas_w,
-            drawing_mode="transform",
-            key=_canvas_key,
+    if action == "update":
+        patch = dict(payload.get("patch") or {})
+        points = patch.pop("points", None)
+        api_points = None
+        if points is not None:
+            if len(points) < 2:
+                raise ValueError("update points must include at least two points")
+            api_points = {
+                "a": [float(points[0][0]), float(points[0][1])],
+                "b": [float(points[-1][0]), float(points[-1][1])],
+            }
+        return api.update_line(
+            line_id,
+            name=patch.get("name"),
+            color=patch.get("color"),
+            points=api_points,
         )
 
-        # ── Auto-save moves ───────────────────────────────────────────────────
-        # Compare incoming canvas JSON to the last state we already persisted.
-        # Only call the API when something actually changed (content-hash gate),
-        # and rate-limit to at most once per 300 ms so rapid drag events don't
-        # flood the backend.
-        _hash_key = f"_ch_{preview_video['id']}"
-        _time_key = f"_ct_{preview_video['id']}"
-        if canvas_result.json_data:
-            _raw = json.dumps(canvas_result.json_data, sort_keys=True)
-            _cur_hash = hashlib.md5(_raw.encode()).hexdigest()
-            _last_hash = st.session_state.get(_hash_key)
-            _last_t = st.session_state.get(_time_key, 0.0)
+    if action == "delete":
+        api.delete_line(line_id)
+        return {"id": line_id, "deleted": True}
 
-            if _cur_hash != _last_hash and (time.time() - _last_t) > 0.3:
-                st.session_state[_hash_key] = _cur_hash
-                st.session_state[_time_key] = time.time()
-                _db_pts = {
-                    ln["id"]: (
-                        (ln["points"]["a"][0] * scale, ln["points"]["a"][1] * scale),
-                        (ln["points"]["b"][0] * scale, ln["points"]["b"][1] * scale),
-                    )
-                    for ln in saved_lines
-                }
-                _updated = 0
-                for _obj in canvas_result.json_data.get("objects", []):
-                    if _obj.get("type") != "line":
-                        continue
-                    _lid = _obj.get("_line_id")
-                    if not _lid or _lid not in _db_pts:
-                        continue
-                    (_ax, _ay), (_bx, _by) = _line_endpoints_from_fabric(_obj)
-                    (_oax, _oay), (_obx, _oby) = _db_pts[_lid]
-                    if (
-                        abs(_ax - _oax) > 1 or abs(_ay - _oay) > 1
-                        or abs(_bx - _obx) > 1 or abs(_by - _oby) > 1
-                    ):
-                        api.update_line(
-                            _lid,
-                            points={
-                                "a": [_ax / scale, _ay / scale],
-                                "b": [_bx / scale, _by / scale],
-                            },
-                        )
-                        _updated += 1
-                if _updated:
-                    st.session_state["needs_recount"] = True
-                    # Don't bump canvas_version or rerun — the canvas stays
-                    # live with the user's current Fabric.js state.
-
-        # Refresh button: manual escape hatch if canvas drifts out of sync
-        if st.button("🔄 Refresh canvas", use_container_width=True):
-            st.session_state.pop(_hash_key, None)
-            st.session_state["canvas_version"] += 1
-            st.rerun()
-
-    # ── Presets & Import/Export ───────────────────────────────────────────────
-    with st.expander("📐 Quick presets"):
-        ref_w = preview_video.get("width") or src_w
-        ref_h = preview_video.get("height") or src_h
-        preset_cols = st.columns(4)
-        presets = [
-            ("H-midline", (0, ref_h / 2), (ref_w, ref_h / 2), "#4ecdc4"),
-            ("V-midline", (ref_w / 2, 0), (ref_w / 2, ref_h), "#f7b731"),
-            ("Diag ↗", (0, ref_h), (ref_w, 0), "#a29bfe"),
-            ("Diag ↘", (0, 0), (ref_w, ref_h), "#fd79a8"),
-        ]
-        for col, (label, pa, pb, clr) in zip(preset_cols, presets):
-            if col.button(label, use_container_width=True):
-                api.create_line(
-                    ws["id"], label,
-                    pa[0], pa[1], pb[0], pb[1],
-                    color=clr,
-                )
-                st.session_state["canvas_version"] += 1
-                st.session_state["needs_recount"] = True
-                st.toast(f"Preset **{label}** added!", icon="📐")
-                st.rerun()
-
-    with st.expander("📥📤 Import / Export lines"):
-        # Export
-        if saved_lines:
-            export_payload = [
-                {"name": ln["name"], "color": ln.get("color", "#e24b4a"), "points": ln["points"]}
-                for ln in saved_lines
-            ]
-            st.download_button(
-                "💾 Export lines JSON",
-                data=json.dumps(export_payload, indent=2),
-                file_name=f"lines-{ws['name'].replace(' ', '_')}.json",
-                mime="application/json",
-                use_container_width=True,
-            )
-        # Import
-        uploaded = st.file_uploader(
-            "Upload lines JSON",
-            type="json",
-            label_visibility="collapsed",
-            key="lines_import",
-        )
-        if uploaded is not None:
-            try:
-                payload = json.load(uploaded)
-                if st.button("✅ Create imported lines", use_container_width=True):
-                    for item in payload:
-                        pts = item["points"]
-                        api.create_line(
-                            ws["id"],
-                            item.get("name", "imported line"),
-                            pts["a"][0], pts["a"][1],
-                            pts["b"][0], pts["b"][1],
-                            color=item.get("color", "#e24b4a"),
-                        )
-                    st.session_state["canvas_version"] += 1
-                    st.session_state["needs_recount"] = True
-                    st.toast(f"Imported {len(payload)} line(s)!", icon="📥")
-                    st.rerun()
-            except Exception as e:
-                st.error(f"Invalid JSON: {e}")
-
-    # ── Track statistics & class filter ──────────────────────────────────────
-    with st.expander("📊 Track statistics & class filter"):
-        if not _preview_stats:
-            st.caption("Statistics unavailable — video must be analyzed first.")
-        else:
-            by_cls  = _preview_stats.get("by_class", {})
-            avg_f   = _preview_stats.get("avg_track_frames", 0.0)
-            dirs    = _preview_stats.get("direction_bins", {})
-            total_t = _preview_stats["total_tracks"]
-
-            dom_cls = max(by_cls, key=by_cls.get) if by_cls else "—"
-            dom_dir = max(dirs, key=dirs.get) if dirs else "—"
-            _dir_sym = {"right": "→", "left": "←", "up": "↑", "down": "↓"}
-
-            # Overview metrics
-            sm1, sm2, sm3, sm4 = st.columns(4)
-            sm1.metric("Total tracks", total_t)
-            sm2.metric("Dominant type", dom_cls)
-            sm3.metric("Avg length", f"{avg_f:.0f} fr")
-            sm4.metric("Main direction", _dir_sym.get(dom_dir, dom_dir))
-
-            # Class breakdown bars
-            st.markdown("**Counts by vehicle type:**")
-            cls_total = sum(by_cls.values()) or 1
-            for cls_name in _ALL_CLASSES:
-                cnt = by_cls.get(cls_name, 0)
-                pct = 100.0 * cnt / cls_total
-                rgb = _TRACK_COLORS.get(cls_name, (180, 180, 180))
-                color_hex = "#{:02x}{:02x}{:02x}".format(*rgb)
-                bar_w = max(int(pct * 2.6), 1)
-                st.markdown(
-                    f'<div style="display:flex;align-items:center;gap:8px;margin:2px 0">'
-                    f'<span style="width:82px;font-size:0.82em">{cls_name}</span>'
-                    f'<div style="width:{bar_w}px;height:9px;background:{color_hex};'
-                    f'border-radius:3px"></div>'
-                    f'<span style="font-size:0.78em;color:#999">{cnt} ({pct:.0f}%)</span>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
-
-            # Direction distribution
-            st.markdown("**Direction distribution:**")
-            dir_total = sum(dirs.values()) or 1
-            dc1, dc2, dc3, dc4 = st.columns(4)
-            for dcol, dname in zip(
-                [dc1, dc2, dc3, dc4], ["right", "left", "up", "down"]
-            ):
-                cnt = dirs.get(dname, 0)
-                dcol.metric(
-                    _dir_sym.get(dname, dname),
-                    f"{cnt} ({100 * cnt // dir_total}%)",
-                )
-
-            st.divider()
-
-            # Class filter — changes active_classes, which filters the overlay
-            st.markdown(
-                "**Filter trajectory overlay by vehicle type** "
-                "(uncheck a type to hide its tracks on the canvas):"
-            )
-            st.multiselect(
-                "Show types",
-                options=_ALL_CLASSES,
-                default=st.session_state["active_classes"],
-                key="active_classes",
-                label_visibility="collapsed",
-            )
-
-            # Busy-zone highlight toggle
-            if _preview_stats.get("busy_zone"):
-                st.toggle(
-                    "📍 Highlight busiest zone on canvas",
-                    key="show_busy_zone",
-                )
+    raise ValueError(f"Unsupported line edit action: {action}")
 
 
-# ──────────────────────────── RIGHT: line panel ───────────────────────────────
-with col_panel:
-    st.subheader("Counting lines")
-
-    # ── Suggest-lines section ─────────────────────────────────────────────────
-    s_col1, s_col2 = st.columns([3, 1])
-    with s_col1:
-        n_suggest = st.number_input("Suggestions to generate", 1, 10, 3, key="n_suggest")
-    with s_col2:
-        st.write("")  # vertical alignment spacer
-        st.write("")
-        do_suggest = st.button("✨ Suggest", use_container_width=True)
-
-    if do_suggest:
-        with st.spinner("Analysing trajectories…"):
-            try:
-                st.session_state["suggest_results"] = api.suggest_lines(
-                    ws["id"], video_ids, n=int(n_suggest)
-                )
-                st.session_state["suggest_open"] = True
-            except Exception as e:
-                st.error(f"Suggestion failed: {e}")
-
-    if st.session_state["suggest_results"]:
-        with st.expander(
-            f"✨ {len(st.session_state['suggest_results'])} suggestion(s)",
-            expanded=st.session_state["suggest_open"],
-        ):
-            for sug in st.session_state["suggest_results"]:
-                with st.container(border=True):
-                    sc1, sc2, sc3 = st.columns([3, 2, 1])
-                    with sc1:
-                        st.markdown(
-                            f'<span style="color:{sug["color"]}">■</span> '
-                            f'**{sug["name"]}** — score {sug["score"]} tracks',
-                            unsafe_allow_html=True,
-                        )
-                        a, b = sug["points"]["a"], sug["points"]["b"]
-                        st.caption(
-                            f"({a[0]:.0f}, {a[1]:.0f}) → ({b[0]:.0f}, {b[1]:.0f})"
-                        )
-                    with sc2:
-                        name_input = st.text_input(
-                            "Name",
-                            value=sug["name"],
-                            key=f"sug_name_{sug['name']}",
-                            label_visibility="collapsed",
-                        )
-                    with sc3:
-                        if st.button("Add", key=f"sug_add_{sug['name']}"):
-                            pts = sug["points"]
-                            api.create_line(
-                                ws["id"], name_input,
-                                pts["a"][0], pts["a"][1],
-                                pts["b"][0], pts["b"][1],
-                                color=sug["color"],
-                            )
-                            st.session_state["canvas_version"] += 1
-                            st.session_state["needs_recount"] = True
-                            st.toast(f"Line **{name_input}** added!", icon="✅")
-                            st.rerun()
-
-    st.divider()
-
-    # ── Saved-line list ───────────────────────────────────────────────────────
-    if not saved_lines:
-        st.caption("No lines yet — draw one on the canvas or use a preset.")
-    else:
-        total_tracks = counts_by_id.get("__total_tracks", 0)
-        for ln in saved_lines:
-            cinfo = counts_by_id.get(ln["id"])
-            count_val = cinfo["total"] if cinfo else None
-
-            with st.container(border=True):
-                # Header row: colour dot, editable name, count badge, delete
-                h1, h2, h3, h4 = st.columns([0.4, 3, 1.2, 0.5])
-                with h1:
-                    st.markdown(
-                        f'<div style="width:18px;height:18px;border-radius:50%;'
-                        f'background:{ln["color"]};margin-top:8px"></div>',
-                        unsafe_allow_html=True,
-                    )
-                with h2:
-                    new_name = st.text_input(
-                        "Line name",
-                        value=ln["name"],
-                        key=f"name_{ln['id']}",
-                        label_visibility="collapsed",
-                    )
-                    if new_name != ln["name"]:
-                        api.update_line(ln["id"], name=new_name)
-                        st.session_state["needs_recount"] = True
-                        st.toast(f"Renamed to **{new_name}**", icon="✏️")
-                        st.rerun()
-                with h3:
-                    if count_val is not None:
-                        st.metric(
-                            label="count",
-                            value=count_val,
-                            label_visibility="collapsed",
-                        )
-                    else:
-                        st.caption("—")
-                with h4:
-                    with st.popover("🗑", use_container_width=True):
-                        st.write(f"Delete **{ln['name']}**?")
-                        if st.button("Confirm delete", key=f"confirm_del_{ln['id']}", type="primary"):
-                            api.delete_line(ln["id"])
-                            st.session_state["canvas_version"] += 1
-                            st.session_state["needs_recount"] = True
-                            st.toast(f"Line **{ln['name']}** deleted.", icon="🗑️")
-                            st.rerun()
-
-                # Colour picker row
-                cc1, cc2 = st.columns([1, 3])
-                with cc1:
-                    new_color = st.color_picker(
-                        "Color",
-                        value=ln["color"],
-                        key=f"color_{ln['id']}",
-                        label_visibility="collapsed",
-                    )
-                    if new_color != ln["color"]:
-                        api.update_line(ln["id"], color=new_color)
-                        st.session_state["canvas_version"] += 1
-                        st.session_state["needs_recount"] = True
-                        st.toast("Color updated!", icon="🎨")
-                        st.rerun()
-
-                # Count breakdown
-                if cinfo:
-                    dir_pos = cinfo["by_direction"].get("positive", 0)
-                    dir_neg = cinfo["by_direction"].get("negative", 0)
-                    top_cls = (
-                        max(cinfo["by_class"], key=cinfo["by_class"].get)
-                        if cinfo["by_class"]
-                        else "—"
-                    )
-                    top_cls_count = cinfo["by_class"].get(top_cls, 0)
-                    pct = cinfo.get("percent_of_video_total", 0.0)
-                    with cc2:
-                        st.caption(
-                            f"▲ {dir_pos}  ▼ {dir_neg}  |  "
-                            f"top: {top_cls} ({top_cls_count})  |  "
-                            f"{pct:.1f}% of video"
-                        )
-                else:
-                    with cc2:
-                        st.caption("Counts not yet computed.")
-
-                # Coords display
-                a, b = ln["points"]["a"], ln["points"]["b"]
-                with st.expander("coords", expanded=False):
-                    st.caption(
-                        f"A ({a[0]:.0f}, {a[1]:.0f})  →  B ({b[0]:.0f}, {b[1]:.0f})"
-                    )
-                    # Duplicate button
-                    if st.button("Duplicate +20px", key=f"dup_{ln['id']}"):
-                        api.create_line(
-                            ws["id"],
-                            f"{ln['name']} copy",
-                            a[0] + 20, a[1] + 20,
-                            b[0] + 20, b[1] + 20,
-                            color=ln["color"],
-                        )
-                        st.session_state["canvas_version"] += 1
-                        st.session_state["needs_recount"] = True
-                        st.toast("Line duplicated!", icon="📋")
-                        st.rerun()
-
-# ── Divider ───────────────────────────────────────────────────────────────────
-st.divider()
-
-# ── Stats summary ─────────────────────────────────────────────────────────────
-if counts_by_id and saved_lines:
-    total_tracks = counts_by_id.get("__total_tracks", 0)
-    per_line_list = [counts_by_id[ln["id"]] for ln in saved_lines if ln["id"] in counts_by_id]
-    if per_line_list:
-        st.subheader("Summary")
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.metric("Unique tracks (video)", total_tracks)
-        best = max(per_line_list, key=lambda r: r["total"])
-        mc2.metric("Top line", best["line_name"])
-        mc3.metric("Top count", best["total"])
-        total_cls: Dict[str, int] = {}
-        for r in per_line_list:
-            for cls, cnt in r["by_class"].items():
-                total_cls[cls] = total_cls.get(cls, 0) + cnt
-        if total_cls:
-            dom_cls = max(total_cls, key=total_cls.get)
-            mc4.metric("Dominant class", f"{dom_cls} ({total_cls[dom_cls]})")
-
-        # Per-class bar breakdown (horizontal proportional bar)
-        if total_cls:
-            total_cls_sum = sum(total_cls.values())
-            cls_md = " | ".join(
-                f"**{k}** {v} ({100*v/total_cls_sum:.0f}%)"
-                for k, v in sorted(total_cls.items(), key=lambda x: -x[1])
-            )
-            st.caption(cls_md)
-
-# ── Counts table ──────────────────────────────────────────────────────────────
-st.subheader("Counts")
-
-if not saved_lines:
-    st.info("Add at least one counting line to compute counts.")
-    st.stop()
-
-if st.button("🔁 Recompute counts", type="primary"):
-    with st.spinner("Computing…"):
-        line_ids = [ln["id"] for ln in saved_lines]
-        try:
-            result = api.compute_counts(ws["id"], video_ids, line_ids)
-            st.session_state["counts"] = {r["line_id"]: r for r in result["per_line"]}
-            st.session_state["counts"]["__total_tracks"] = result["total_unique_tracks"]
-            st.session_state["needs_recount"] = False
-        except Exception as e:
-            st.error(f"Count failed: {e}")
-            st.stop()
-    st.rerun()
-
-counts_by_id_fresh = st.session_state.get("counts") or {}
-if counts_by_id_fresh:
-    rows = []
-    for ln in saved_lines:
-        r = counts_by_id_fresh.get(ln["id"])
-        if not r:
-            continue
-        rows.append({
-            "Line": r["line_name"],
-            "Count": r["total"],
-            "% of video": r["percent_of_video_total"],
-            "% of lines": r["percent_of_drawn_lines"],
-            "Dir ▲": r["by_direction"].get("positive", 0),
-            "Dir ▼": r["by_direction"].get("negative", 0),
-            "Car": r["by_class"].get("car", 0),
-            "Truck": r["by_class"].get("truck", 0),
-            "Bus": r["by_class"].get("bus", 0),
-            "Motorcycle": r["by_class"].get("motorcycle", 0),
-            "Bicycle": r["by_class"].get("bicycle", 0),
-        })
-    if rows:
-        st.dataframe(rows, use_container_width=True, hide_index=True)
-else:
-    st.caption("Click **Recompute counts** above to update the table.")
-
-# ── Export ────────────────────────────────────────────────────────────────────
-st.divider()
-st.subheader("Export to Excel")
-if st.button("Generate xlsx"):
-    line_ids = [ln["id"] for ln in saved_lines]
+def request_live_counts(project_id: str, video_ids: List[str], line_ids: List[str]) -> Dict[str, Any]:
+    """Request live counts. Returns empty summary when there are no active lines."""
     if not line_ids:
-        st.error("No saved lines to export.")
-    else:
-        with st.spinner("Building workbook…"):
-            data = api.export_xlsx(ws["id"], video_ids, line_ids)
-        st.download_button(
-            "📥 Download counts.xlsx",
-            data=data,
-            file_name=f"counts-{ws['name'].replace(' ', '_')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        return {"total_unique_tracks": 0, "sum_across_lines": 0, "per_line": []}
+    return api.compute_counts(project_id, video_ids, line_ids)
+
+
+def _counts_for_react(counts_raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Reshape API counts payload for the React bootstrap."""
+    if not counts_raw:
+        return None
+    per_line_list = counts_raw.get("per_line") or []
+    per_line_map = {str(r["line_id"]): r for r in per_line_list}
+    return {
+        "total_unique_tracks": int(counts_raw.get("total_unique_tracks") or 0),
+        "per_line": per_line_map,
+    }
+
+
+def _points_match(api_line: Dict[str, Any], snap_line: Dict[str, Any]) -> bool:
+    points = snap_line.get("points") or []
+    if len(points) < 2:
+        return False
+    a = [float(points[0][0]), float(points[0][1])]
+    b = [float(points[-1][0]), float(points[-1][1])]
+    current = api_line.get("points") or {}
+    ca = current.get("a") or [0, 0]
+    cb = current.get("b") or [0, 0]
+    tol = 0.5
+    return (
+        abs(float(ca[0]) - a[0]) <= tol and abs(float(ca[1]) - a[1]) <= tol
+        and abs(float(cb[0]) - b[0]) <= tol and abs(float(cb[1]) - b[1]) <= tol
+    )
+
+
+def _line_patch(api_line: Dict[str, Any], snap_line: Dict[str, Any]) -> Dict[str, Any]:
+    patch: Dict[str, Any] = {}
+    if (snap_line.get("name") or "") != (api_line.get("name") or ""):
+        patch["name"] = snap_line.get("name") or "line"
+    if (snap_line.get("color") or "") != (api_line.get("color") or ""):
+        patch["color"] = snap_line.get("color") or "#e24b4a"
+    if not _points_match(api_line, snap_line):
+        patch["points"] = snap_line.get("points") or []
+    return patch
+
+
+def _normalize_snapshot_lines(snapshot_lines: List[Dict[str, Any]], id_map: Dict[str, str]) -> List[Dict[str, Any]]:
+    normalized: List[Dict[str, Any]] = []
+    for line in snapshot_lines:
+        normalized_line = dict(line)
+        line_id = str(normalized_line.get("id") or "")
+        if line_id and line_id in id_map:
+            normalized_line["id"] = id_map[line_id]
+        normalized.append(normalized_line)
+    return normalized
+
+
+def _absolute_url(rel: Optional[str]) -> Optional[str]:
+    if not rel:
+        return None
+    return api.file_url(rel)
+
+
+def _handle_pending_actions(actions: List[Dict[str, Any]], ws_id: str, spec: ViewportSpec) -> bool:
+    """Handle React-emitted side-actions. Returns True if a rerun is needed."""
+    if not actions:
+        return False
+    suggestions_key = f"hybrid_suggestions_{ws_id}"
+    changed = False
+    for act in actions:
+        kind = act.get("type")
+        if kind == "request-suggestions":
+            n = max(1, min(10, int(act.get("n") or 3)))
+            try:
+                st.session_state[suggestions_key] = api.suggest_lines(
+                    spec.project_id, spec.video_ids, n=n,
+                )
+                changed = True
+            except api.APIError as exc:
+                st.error(f"Suggest failed: {exc}")
+        elif kind == "dismiss-suggestions":
+            st.session_state.pop(suggestions_key, None)
+            changed = True
+        elif kind == "accept-suggestion":
+            # React adds the line locally; reconciliation creates it in the DB.
+            # We only need to clear the suggestion cache here.
+            st.session_state.pop(suggestions_key, None)
+            changed = True
+    return changed
+
+
+def render_page() -> None:
+    """Render the hybrid count-and-export page."""
+    st.set_page_config(page_title="Count & Export (Hybrid)", page_icon="📏", layout="wide")
+    st.title("📏 Count & Export (Hybrid)")
+
+    ws = render_sidebar()
+    if not ws:
+        st.stop()
+
+    st.caption(f"Workspace: **{ws['name']}**")
+
+    videos = [v for v in api.list_videos(ws["id"]) if v.get("status") == "analyzed"]
+    lines = api.list_lines(ws["id"])
+    spec = build_viewport_spec(ws, videos, lines)
+
+    if not videos:
+        st.info("No analyzed videos in this workspace. Analyze videos on the Videos page first.")
+        st.stop()
+
+    # Multi-video picker (counts span all selected; preview uses the first)
+    video_labels = {f'{v["filename"]} ({v.get("num_tracks", 0)} tracks)': v for v in videos}
+    default_picks = [list(video_labels.keys())[0]]
+    picks = st.multiselect(
+        "Videos to count over",
+        options=list(video_labels.keys()),
+        default=st.session_state.get("hybrid_selected_video_labels", default_picks),
+        help="Counts span all selected videos; the viewport uses the first as preview.",
+        key="hybrid_video_multiselect",
+    )
+    selected_videos = [video_labels[k] for k in picks] if picks else [videos[0]]
+    st.session_state["hybrid_selected_video_labels"] = picks or default_picks
+
+    preview_video = selected_videos[0]
+    selected_video_ids = [str(v["id"]) for v in selected_videos]
+    spec = ViewportSpec(
+        project_id=spec.project_id,
+        video_ids=selected_video_ids,
+        selected_line_ids=spec.selected_line_ids,
+        frame_count=spec.frame_count,
+        active_layers=spec.active_layers,
+    )
+
+    # Fetch scene-based keyframes + overlay asset URLs for the preview video.
+    try:
+        raw_frames = api.list_video_frames(preview_video["id"])
+        frames_for_bootstrap = [
+            {**f, "url": _absolute_url(f.get("url"))} for f in raw_frames
+        ]
+    except Exception:
+        frames_for_bootstrap = []
+
+    traj_rel = api.get_trajectories_url(preview_video["id"])
+    heatmap_rel: Optional[str] = None
+    try:
+        heatmap_rel = api.get_heatmap_url(preview_video["id"])
+    except Exception:
+        heatmap_rel = None
+
+    track_stats: Optional[Dict[str, Any]] = None
+    try:
+        track_stats = api.track_stats(preview_video["id"])
+    except Exception:
+        track_stats = None
+
+    # Live counts: prefer cached, fall back to fresh compute.
+    counts_key = f"hybrid_live_counts_{ws['id']}"
+    if counts_key not in st.session_state and lines:
+        st.session_state[counts_key] = request_live_counts(
+            spec.project_id, selected_video_ids, [str(l["id"]) for l in lines],
         )
+    live_counts_raw = st.session_state.get(counts_key)
+
+    suggestions_key = f"hybrid_suggestions_{ws['id']}"
+    suggestions = st.session_state.get(suggestions_key)
+
+    # frameCount driven by actual scene count; frameUrl is legacy fallback.
+    scene_count = max(len(frames_for_bootstrap), 1)
+    legacy_frame_url = frames_for_bootstrap[0]["url"] if frames_for_bootstrap else None
+
+    bootstrap = {
+        "spec": {
+            "projectId": spec.project_id,
+            "videoIds": spec.video_ids,
+            "selectedLineIds": spec.selected_line_ids,
+            "frameCount": scene_count,
+            "activeLayers": list(spec.active_layers),
+        },
+        "initialLines": lines,
+        "frames": frames_for_bootstrap,
+        "frameUrl": legacy_frame_url,
+        "trajectoriesUrl": _absolute_url(traj_rel),
+        "heatmapUrl": _absolute_url(heatmap_rel),
+        "videoSize": {
+            "width": int(preview_video.get("width") or 1920),
+            "height": int(preview_video.get("height") or 1080),
+        },
+        "trackStats": track_stats,
+        "counts": _counts_for_react(live_counts_raw),
+        "suggestions": suggestions,
+    }
+
+    overlay_snapshot = render_hybrid_viewport(bootstrap=bootstrap, key=f"hybrid_viewport_{ws['id']}")
+
+    if overlay_snapshot and str(overlay_snapshot.get("projectId") or "") != spec.project_id:
+        overlay_snapshot = None
+
+    needs_rerun = False
+
+    if overlay_snapshot:
+        # Handle React-emitted side-actions FIRST so that suggestions land before
+        # the next snapshot/persistence pass.
+        pending_actions = overlay_snapshot.get("pendingActions") or []
+        if _handle_pending_actions(pending_actions, str(ws["id"]), spec):
+            needs_rerun = True
+
+        snapshot_hash = json.dumps(overlay_snapshot, sort_keys=True, separators=(",", ":"))
+        hash_key = f"hybrid_last_snapshot_hash_{ws['id']}"
+        id_map_key = f"hybrid_line_id_map_{ws['id']}"
+        line_id_map = st.session_state.setdefault(id_map_key, {})
+
+        if st.session_state.get(hash_key) != snapshot_hash:
+            st.session_state[hash_key] = snapshot_hash
+
+            snapshot_lines = _normalize_snapshot_lines(overlay_snapshot.get("lines") or [], line_id_map)
+            persisted_lines = api.list_lines(ws["id"])
+            persisted_by_id = {str(line["id"]): line for line in persisted_lines}
+            snapshot_by_id = {str(line.get("id")): line for line in snapshot_lines if line.get("id")}
+
+            mutated = False
+
+            # Deletions: any persisted line missing from snapshot.
+            for persisted_id in list(persisted_by_id):
+                if persisted_id not in snapshot_by_id:
+                    try:
+                        persist_line_edit(persisted_id, {"action": "delete"})
+                        mutated = True
+                    except Exception as exc:
+                        st.error(f"Delete failed: {exc}")
+
+            # Updates and creates.
+            for snap_line in snapshot_lines:
+                snap_id = str(snap_line.get("id") or "")
+                if snap_id and snap_id in persisted_by_id:
+                    patch = _line_patch(persisted_by_id[snap_id], snap_line)
+                    if patch:
+                        try:
+                            persist_line_edit(snap_id, {"action": "update", "patch": patch})
+                            mutated = True
+                        except Exception as exc:
+                            st.error(f"Update failed: {exc}")
+                    continue
+
+                try:
+                    created = persist_line_edit(
+                        "",
+                        {"action": "create", "project_id": ws["id"], "line": snap_line},
+                    )
+                    mutated = True
+                    local_id = str(snap_line.get("id") or "")
+                    server_id = str(created.get("id") or "")
+                    if local_id and server_id:
+                        line_id_map[local_id] = server_id
+                except Exception as exc:
+                    st.error(f"Create failed: {exc}")
+
+            if mutated:
+                refreshed_lines = api.list_lines(ws["id"])
+                refreshed_line_ids = [str(line["id"]) for line in refreshed_lines]
+                st.session_state[counts_key] = request_live_counts(
+                    spec.project_id, selected_video_ids, refreshed_line_ids,
+                )
+                # Invalidate any cached export when lines change.
+                st.session_state.pop(f"hybrid_xlsx_{ws['id']}", None)
+                needs_rerun = True
+
+    if needs_rerun:
+        st.rerun()
+
+    # Export section (Streamlit-side since file download must come from the host).
+    st.divider()
+    st.subheader("Export")
+    line_ids_for_export = [str(l["id"]) for l in lines]
+    col_btn, col_dl = st.columns([2, 3])
+    with col_btn:
+        if st.button(
+            "Prepare XLSX Export",
+            disabled=not (selected_video_ids and line_ids_for_export),
+            help="Compute counts and prepare an Excel workbook for download.",
+        ):
+            try:
+                xlsx_bytes = api.export_xlsx(spec.project_id, selected_video_ids, line_ids_for_export)
+                st.session_state[f"hybrid_xlsx_{ws['id']}"] = xlsx_bytes
+            except api.APIError as exc:
+                st.error(str(exc))
+    with col_dl:
+        xlsx_bytes = st.session_state.get(f"hybrid_xlsx_{ws['id']}")
+        if xlsx_bytes:
+            st.download_button(
+                "📥 Download XLSX",
+                data=xlsx_bytes,
+                file_name=f"counts-{ws['name'].replace(' ', '_')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+
+render_page()

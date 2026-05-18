@@ -15,3 +15,5 @@ SQLAlchemy==2.0.34
 psycopg[binary]==3.2.2
 google-cloud-storage==2.18.2
 pydantic-settings==2.5.2
+# Scene/angle-change detection (optional — pipeline degrades gracefully if absent)
+scenedetect[opencv]

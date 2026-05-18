@@ -69,6 +69,9 @@ def key_video(project_id: str, video_id: str, filename: str) -> str:
 def key_tracks(project_id: str, video_id: str) -> str:
     return f"projects/{project_id}/videos/{video_id}/tracks.parquet"
 
+def key_scene_frame(project_id: str, video_id: str, n: int) -> str:
+    return f"projects/{project_id}/videos/{video_id}/frames/{n}.jpg"
+
 def key_frame(project_id: str, video_id: str) -> str:
     return f"projects/{project_id}/videos/{video_id}/frame.jpg"
 

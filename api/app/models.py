@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, Integer, Float, BigInteger, ForeignKey, DateTime, JSON
+from sqlalchemy import Column, String, Text, Integer, Float, BigInteger, Boolean, ForeignKey, DateTime, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from .db import Base
@@ -46,11 +46,47 @@ class Video(Base):
     # Analysis progress: 0.0–1.0 while analyzing, reset to None when done/error
     progress_pct = Column(Float, default=0.0)
     started_analyzing_at = Column(DateTime)
+    tus_upload_id = Column(String(64), nullable=True, index=True)
+
+    # Scene-based keyframes extracted during analysis.
+    # List of {"index": int, "time_s": float, "frame_index_in_video": int}
+    scene_frames = Column(JSON, default=list, nullable=False, server_default="[]")
+
+    # 'upload' (tus / direct) | 'local-folder' (watcher-imported, no copy)
+    source = Column(String(32), default='upload', nullable=False)
+    # Absolute host path for local-folder videos; worker reads directly from here.
+    local_source_path = Column(String(1024), nullable=True)
+
+    # Updated every ~50 frames; used by the stale-row sweeper as a heartbeat.
+    progress_updated_at = Column(DateTime, nullable=True)
+    # How many times auto-recovery has reset this row back to 'queued'.
+    retries = Column(Integer, default=0, nullable=False)
 
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     analyzed_at = Column(DateTime)
 
     project = relationship("Project", back_populates="videos")
+
+
+class TusUpload(Base):
+    """Temporary record tracking an in-progress tus resumable upload."""
+    __tablename__ = "tus_uploads"
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    project_id = Column(UUID(as_uuid=False), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    video_id = Column(UUID(as_uuid=False), ForeignKey("videos.id", ondelete="SET NULL"), nullable=True)
+    filename = Column(String(512), nullable=False)
+    upload_length = Column(BigInteger, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SystemState(Base):
+    """Single-row table for global worker control flags."""
+    __tablename__ = "system_state"
+
+    id = Column(Integer, primary_key=True, default=1)
+    processing_paused = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class CountingLine(Base):

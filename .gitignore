@@ -6,7 +6,7 @@ __pycache__/
 *.parquet
 *.mp4
 *.pt
-.streamlit/
+.streamlit/secrets.toml
 .idea/
 .vscode/
 *.egg-info/

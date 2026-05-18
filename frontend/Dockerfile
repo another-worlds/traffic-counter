@@ -17,13 +17,17 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
-COPY --from=vite-builder /build/dist ./hybrid_viewport/dist
+
+# Place built assets OUTSIDE /app so the ./frontend:/app bind-mount in docker-compose
+# does not shadow them at runtime.  The bridge reads HYBRID_VIEWPORT_DIST_PATH.
+COPY --from=vite-builder /build/dist /srv/hybrid_viewport_dist
 
 ENV PYTHONUNBUFFERED=1 \
     STREAMLIT_SERVER_PORT=8501 \
     STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
     STREAMLIT_SERVER_HEADLESS=true \
-    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
+    HYBRID_VIEWPORT_DIST_PATH=/srv/hybrid_viewport_dist
 
 EXPOSE 8501
 CMD ["streamlit", "run", "streamlit_app.py"]

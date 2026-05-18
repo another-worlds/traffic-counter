@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -60,10 +60,6 @@ def register_local_video(body: RegisterRequest, db: Session = Depends(get_db)):
     existing = db.query(Video).filter(Video.local_source_path == path).first()
     if existing:
         return RegisterResponse(video_id=existing.id, is_new=False, status=existing.status)
-
-    # Basic existence check so we don't register files that disappeared mid-scan.
-    if not Path(path).is_file():
-        raise HTTPException(400, f"path not accessible: {path}")
 
     inbox = _get_or_create_inbox(db)
     filename = Path(path).name

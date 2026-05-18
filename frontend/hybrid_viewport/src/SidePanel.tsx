@@ -46,7 +46,7 @@ export default function SidePanel({
   onAcceptSuggestion,
   onDismissSuggestions,
 }: SidePanelProps) {
-  const [suggestN, setSuggestN] = React.useState(3);
+  const [suggestN, setSuggestN] = React.useState(0);
 
   const perLine = counts?.per_line ?? {};
   const totalUnique = counts?.total_unique_tracks ?? trackStats?.total_tracks ?? 0;
@@ -164,15 +164,16 @@ export default function SidePanel({
         <div className="suggest-row">
           <input
             type="number"
-            min={1}
+            min={0}
             max={10}
             value={suggestN}
-            onChange={(e) => setSuggestN(Math.max(1, Math.min(10, Number(e.target.value) || 1)))}
+            onChange={(e) => setSuggestN(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
             className="suggest-n-input"
           />
           <button
             type="button"
             className="toolbar-button primary"
+            disabled={suggestN <= 0}
             onClick={() => onRequestSuggestions(suggestN)}
           >
             ✨ Suggest

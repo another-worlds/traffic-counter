@@ -9,6 +9,7 @@ export type LineGeometry = {
   kind: 'line' | 'polyline';
   points: Point[];
   locked?: boolean;
+  count?: number;
 };
 
 export type ViewportSpec = {

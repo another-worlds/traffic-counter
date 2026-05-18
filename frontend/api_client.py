@@ -227,3 +227,22 @@ def workspace_summary(project_id: str) -> Dict:
         r = c.get(f"/projects/{project_id}/summary")
         _raise(r)
         return r.json()
+
+
+# --- local folder / watcher ---
+
+def list_local_folder_videos(status: Optional[str] = None) -> List[Dict]:
+    """Return all videos imported from the watched local folder."""
+    with _client() as c:
+        params = {"status": status} if status else {}
+        r = c.get("/local-folder/videos", params=params)
+        _raise(r)
+        return r.json()
+
+
+def analyze_pending_local_folder() -> Dict:
+    """Queue all local-folder videos that are still in 'uploaded' state."""
+    with _client() as c:
+        r = c.post("/local-folder/analyze-pending")
+        _raise(r)
+        return r.json()

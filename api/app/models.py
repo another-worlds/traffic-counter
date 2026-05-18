@@ -52,6 +52,11 @@ class Video(Base):
     # List of {"index": int, "time_s": float, "frame_index_in_video": int}
     scene_frames = Column(JSON, default=list, nullable=False, server_default="[]")
 
+    # 'upload' (tus / direct) | 'local-folder' (watcher-imported, no copy)
+    source = Column(String(32), default='upload', nullable=False)
+    # Absolute host path for local-folder videos; worker reads directly from here.
+    local_source_path = Column(String(1024), nullable=True)
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     analyzed_at = Column(DateTime)
 

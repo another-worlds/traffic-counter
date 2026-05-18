@@ -33,6 +33,8 @@ class VideoOut(BaseModel):
     num_tracks: Optional[int]
     progress_pct: Optional[float] = None
     error_message: Optional[str]
+    source: str = 'upload'
+    local_source_path: Optional[str] = None
     created_at: datetime
     analyzed_at: Optional[datetime]
     started_analyzing_at: Optional[datetime] = None

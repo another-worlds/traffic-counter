@@ -44,7 +44,7 @@ def claim_one_queued():
     """
     with engine.begin() as conn:
         row = conn.execute(text("""
-            SELECT id, project_id, filename
+            SELECT id, project_id, filename, local_source_path
             FROM videos
             WHERE status = 'queued'
             ORDER BY created_at ASC
@@ -61,13 +61,18 @@ def claim_one_queued():
                     WHERE id=:id"""),
             {"id": row.id, "ts": datetime.utcnow()},
         )
-        return {"id": row.id, "project_id": row.project_id, "filename": row.filename}
+        return {
+            "id": row.id,
+            "project_id": row.project_id,
+            "filename": row.filename,
+            "local_source_path": row.local_source_path,
+        }
 
 
 def fetch_video(video_id: str):
     with engine.begin() as conn:
         row = conn.execute(
-            text("SELECT id, project_id, filename FROM videos WHERE id=:id"),
+            text("SELECT id, project_id, filename, local_source_path FROM videos WHERE id=:id"),
             {"id": video_id},
         ).first()
         if not row:
@@ -82,7 +87,12 @@ def fetch_video(video_id: str):
                     WHERE id=:id"""),
             {"id": video_id, "ts": datetime.utcnow()},
         )
-        return {"id": row.id, "project_id": row.project_id, "filename": row.filename}
+        return {
+            "id": row.id,
+            "project_id": row.project_id,
+            "filename": row.filename,
+            "local_source_path": row.local_source_path,
+        }
 
 
 def mark_analyzed(video_id: str, meta: dict):
@@ -142,6 +152,7 @@ def handle(video: dict):
             video_id=video["id"],
             filename=video["filename"],
             on_progress=_on_progress,
+            local_source_path=video.get("local_source_path"),
         )
         mark_analyzed(video["id"], meta)
         log.info("done %s: %s tracks", video["id"], meta.get("num_tracks"))

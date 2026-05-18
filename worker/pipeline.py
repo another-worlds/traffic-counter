@@ -145,18 +145,23 @@ def process_video(
     video_id: str,
     filename: str,
     on_progress: Optional[Callable[[float], None]] = None,
+    local_source_path: Optional[str] = None,
 ) -> Dict:
     storage = get_storage()
-    src_key = key_video(project_id, video_id, filename)
 
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        local_video = str(td / Path(filename).name)
         local_tracks = str(td / "tracks.parquet")
         local_frame = str(td / "frame.jpg")
         local_traj = str(td / "trajectories.png")
 
-        storage.download_to(src_key, local_video)
+        if local_source_path:
+            # Video lives on the watched folder mount — read it directly, no copy.
+            local_video = local_source_path
+        else:
+            src_key = key_video(project_id, video_id, filename)
+            local_video = str(td / Path(filename).name)
+            storage.download_to(src_key, local_video)
         meta = _video_meta(local_video)
         fps = meta["fps"]
         w, h = meta["width"], meta["height"]

@@ -14,6 +14,7 @@ import threading
 import time
 from pathlib import Path
 
+import cv2
 import httpx
 from watchdog.events import FileClosedEvent, FileCreatedEvent, FileMovedEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -52,6 +53,28 @@ def is_stable(path: Path) -> bool:
         return False
 
 
+
+
+def extract_video_metadata(path: Path) -> dict | None:
+    """Fast metadata extraction outside the worker pipeline."""
+    cap = cv2.VideoCapture(str(path))
+    try:
+        if not cap.isOpened():
+            return None
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration_s = (num_frames / fps) if fps > 0 else None
+        return {
+            "fps": fps if fps > 0 else None,
+            "duration_s": float(duration_s) if duration_s is not None else None,
+            "width": width or None,
+            "height": height or None,
+            "num_frames": num_frames or None,
+        }
+    finally:
+        cap.release()
 # ── registrar ────────────────────────────────────────────────────────────────
 
 class Registrar:
@@ -79,6 +102,12 @@ class Registrar:
             result = r.json()
             with self._lock:
                 self._seen.add(key)
+            metadata = extract_video_metadata(path)
+            if metadata:
+                try:
+                    self._client.post("/local-folder/update-metadata", json={"path": key, **metadata}).raise_for_status()
+                except Exception as exc:
+                    log.warning("metadata update failed for %s: %s", path.name, exc)
             if result.get("is_new"):
                 log.info("registered %s → video %s (auto_analyze=%s)",
                          path.name, result["video_id"], AUTO_ANALYZE)

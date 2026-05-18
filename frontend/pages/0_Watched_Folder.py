@@ -1,6 +1,7 @@
 import os
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
@@ -19,6 +20,34 @@ st.caption(
 
 def _duration_s(video: dict) -> float:
     return float(video.get("duration_s") or 0.0)
+
+
+def _processing_time_s(video: dict, now_utc: datetime) -> float:
+    start = video.get("started_analyzing_at")
+    if not start:
+        return 0.0
+    try:
+        start_dt = datetime.fromisoformat(str(start).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+
+    end = video.get("analyzed_at")
+    if end:
+        try:
+            end_dt = datetime.fromisoformat(str(end).replace("Z", "+00:00"))
+        except ValueError:
+            end_dt = now_utc
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=timezone.utc)
+    elif video.get("status") == "analyzing":
+        end_dt = now_utc
+    else:
+        return 0.0
+
+    return max(0.0, (end_dt - start_dt).total_seconds())
 
 
 def _folder_of(video: dict) -> str:
@@ -56,6 +85,8 @@ unstarted = status_counts["uploaded"]
 
 all_duration_s = sum(_duration_s(v) for v in videos)
 analyzed_duration_s = sum(_duration_s(v) for v in videos if v["status"] == "analyzed")
+now_utc = datetime.now(timezone.utc)
+total_processing_time_s = sum(_processing_time_s(v, now_utc) for v in videos)
 
 running = [v for v in videos if v["status"] == "analyzing" and v.get("progress_pct") is not None]
 queue_avg_progress = (sum(v["progress_pct"] for v in running) / len(running)) if running else 0.0
@@ -68,11 +99,10 @@ mc3.metric("Queue + running", in_queue)
 mc4.metric("Errors", errors)
 
 mc5, mc6, mc7, mc8 = st.columns(4)
-mc5.metric("Total minutes", f"{all_duration_s/60:.1f}")
-mc6.metric("Analyzed minutes", f"{analyzed_duration_s/60:.1f}")
+mc5.metric("Yandex folder hours", f"{all_duration_s/3600:.1f}h")
+mc6.metric("Processed hours", f"{analyzed_duration_s/3600:.1f}h")
 mc7.metric("Avg running progress", f"{queue_avg_progress*100:.0f}%")
-throughput_mph = (analyzed_duration_s / 60.0) / max(1, analyzed)
-mc8.metric("Speed (min/video)", f"{throughput_mph:.1f}")
+mc8.metric("Processing time spent", f"{total_processing_time_s/3600:.1f}h")
 
 st.progress(analyzed / max(1, total), text=f"Overall completion: {analyzed}/{total} videos")
 

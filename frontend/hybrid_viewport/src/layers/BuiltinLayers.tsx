@@ -19,7 +19,20 @@ const FrameLayer: Layer = {
         style={{ pointerEvents: 'none' }}
       />
     ) : (
-      <rect key="frame-bg" width={width} height={height} fill="#0e1117" />
+      <g key="frame-bg" style={{ pointerEvents: 'none' }}>
+        <rect width={width} height={height} fill="#0e1117" />
+        <text
+          x={width / 2}
+          y={height / 2}
+          textAnchor="middle"
+          dominantBaseline="middle"
+          fill="#8b959e"
+          fontSize={Math.round(Math.min(width, height) * 0.035)}
+          fontFamily="system-ui, sans-serif"
+        >
+          No preview frame available — re-analyze the video to regenerate it.
+        </text>
+      </g>
     );
   },
 };

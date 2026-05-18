@@ -5,8 +5,10 @@ const MOVE_THRESHOLD = 3;
 
 type PendingSelect = { lineId: string; anchor: Point } | null;
 
-// Module-level ref because Tool instances are singletons (not per-React-render).
+// Module-level refs because Tool instances are singletons (not per-React-render).
 let _pendingSelect: PendingSelect = null;
+let _pendingDrawStart: Point | null = null;
+let _drawStarted = false;
 
 export const LineTool: Tool = {
   id: 'line',
@@ -14,11 +16,13 @@ export const LineTool: Tool = {
   icon: '✏️',
   cursor: 'crosshair',
 
-  onMouseDownEmpty(point, { model, dispatch, }) {
+  onMouseDownEmpty(point, { model, dispatch }) {
     if (model.interaction.kind !== 'idle') return;
     _pendingSelect = null;
+    _pendingDrawStart = point;
+    _drawStarted = false;
     dispatch({ type: 'select-line', lineId: null });
-    dispatch({ type: 'start-draw', point, color: model.drawingColor ?? '#e24b4a' });
+    // start-draw is deferred to first meaningful drag in onMouseMove
   },
 
   onMouseDownLine(lineId, point, { model, dispatch }) {
@@ -45,9 +49,22 @@ export const LineTool: Tool = {
       }
       return;
     }
-    if (model.interaction.kind === 'drawing') {
-      dispatch({ type: 'update-draft', point });
-    } else if (model.interaction.kind === 'moving') {
+    if (_pendingDrawStart !== null) {
+      if (!_drawStarted) {
+        const dx = point[0] - _pendingDrawStart[0];
+        const dy = point[1] - _pendingDrawStart[1];
+        if (Math.hypot(dx, dy) > MOVE_THRESHOLD) {
+          _drawStarted = true;
+          dispatch({ type: 'start-draw', point: _pendingDrawStart, color: model.drawingColor ?? '#e24b4a' });
+          dispatch({ type: 'update-draft', point });
+        }
+      } else {
+        // dispatch uses functional updaters so this correctly applies after start-draw
+        dispatch({ type: 'update-draft', point });
+      }
+      return;
+    }
+    if (model.interaction.kind === 'moving') {
       dispatch({ type: 'update-move', point });
     } else if (model.interaction.kind === 'resizing') {
       dispatch({ type: 'update-resize-handle', point });
@@ -56,6 +73,8 @@ export const LineTool: Tool = {
 
   onMouseUp(_point, { model, dispatch }) {
     _pendingSelect = null;
+    _pendingDrawStart = null;
+    _drawStarted = false;
     if (model.interaction.kind === 'drawing') {
       dispatch({ type: 'commit-draft' });
     } else if (model.interaction.kind === 'moving') {

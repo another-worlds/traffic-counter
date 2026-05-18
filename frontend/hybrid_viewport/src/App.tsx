@@ -75,6 +75,9 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
     onSnapshot?.(payload);
     if (model.pendingActions.length > 0) {
       dispatch({ type: 'clear-pending-actions' });
+      // Pre-mark the cleared version as emitted so the effect doesn't fire a second snapshot.
+      const clearedPayload = buildBridgePayload({ ...model, pendingActions: [] });
+      lastEmittedRef.current = JSON.stringify(clearedPayload);
     }
   }, [model, onSnapshot, dispatch]);
 
@@ -129,8 +132,9 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
         <div className="header-info">
           <div className="frame-pill">
             {(() => {
-              const entry = bootstrap?.frames?.[model.currentFrame];
               const total = Math.max(model.spec.frameCount, 1);
+              if (total === 1) return 'Single camera angle';
+              const entry = bootstrap?.frames?.[model.currentFrame];
               if (entry) return `Scene ${model.currentFrame + 1} / ${total} · ${entry.time_s.toFixed(1)}s`;
               return `Frame ${model.currentFrame + 1} / ${total}`;
             })()}
@@ -147,6 +151,7 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
             model={model}
             bootstrap={bootstrap ?? {}}
             videoSize={videoSize}
+            counts={counts}
             onMouseDownEmpty={handleMouseDownEmpty}
             onMouseDownLine={handleMouseDownLine}
             onMouseDownHandle={handleMouseDownHandle}
@@ -154,14 +159,20 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
             onMouseUp={handleMouseUp}
           />
 
-          <input
-            className="frame-slider"
-            type="range"
-            min={0}
-            max={Math.max(model.spec.frameCount - 1, 0)}
-            value={model.currentFrame}
-            onChange={(e) => dispatch({ type: 'set-frame', frame: Number(e.target.value) })}
-          />
+          {model.spec.frameCount > 1 ? (
+            <input
+              className="frame-slider"
+              type="range"
+              min={0}
+              max={model.spec.frameCount - 1}
+              value={model.currentFrame}
+              onChange={(e) => dispatch({ type: 'set-frame', frame: Number(e.target.value) })}
+            />
+          ) : (
+            <p className="muted" style={{ margin: '10px 0 0' }}>
+              Single camera angle — no scene cuts detected.
+            </p>
+          )}
         </section>
 
         <SidePanel
@@ -179,8 +190,16 @@ export default function App({ bootstrap, onSnapshot }: AppProps) {
           onToggleLayer={(layer) => dispatch({ type: 'toggle-layer', layer })}
           onRequestSuggestions={(n) =>
             dispatch({ type: 'queue-action', action: { type: 'request-suggestions', n } })}
-          onAcceptSuggestion={(s) =>
-            dispatch({ type: 'queue-action', action: { type: 'accept-suggestion', suggestion: s } })}
+          onAcceptSuggestion={(s) => {
+            const id = typeof crypto !== 'undefined' && crypto.randomUUID
+              ? crypto.randomUUID()
+              : `line-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            dispatch({ type: 'add-line', line: {
+              id, name: s.name, color: s.color, kind: 'line',
+              points: [s.points.a, s.points.b],
+            }});
+            dispatch({ type: 'queue-action', action: { type: 'accept-suggestion', suggestion: s } });
+          }}
           onDismissSuggestions={() =>
             dispatch({ type: 'queue-action', action: { type: 'dismiss-suggestions' } })}
           dispatch={dispatch}

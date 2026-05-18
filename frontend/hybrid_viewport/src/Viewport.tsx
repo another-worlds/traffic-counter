@@ -1,5 +1,5 @@
 import React from 'react';
-import type { HostViewportBootstrap, LineGeometry, OverlayModel, Point, VideoSize } from './viewportState';
+import type { CountsBundle, HostViewportBootstrap, LineGeometry, OverlayModel, Point, VideoSize } from './viewportState';
 import { BUILTIN_IMAGE_LAYERS } from './layers';
 import type { LayerRenderContext } from './layers';
 import { getCursor } from './tools';
@@ -8,6 +8,7 @@ type ViewportProps = {
   model: OverlayModel;
   bootstrap: HostViewportBootstrap;
   videoSize: VideoSize;
+  counts?: CountsBundle;
   onMouseDownEmpty: (point: Point) => void;
   onMouseDownLine: (lineId: string, point: Point) => void;
   onMouseDownHandle: (lineId: string, handleIndex: number) => void;
@@ -33,6 +34,7 @@ export default function Viewport({
   model,
   bootstrap,
   videoSize,
+  counts,
   onMouseDownEmpty,
   onMouseDownLine,
   onMouseDownHandle,
@@ -136,28 +138,34 @@ export default function Viewport({
                   style={{ pointerEvents: 'none' }}
                 />
                 {/* Label */}
-                <g style={{ pointerEvents: 'none' }}>
-                  <text
-                    x={midX + 1}
-                    y={midY - 13}
-                    fill="rgba(0,0,0,0.85)"
-                    fontSize={18}
-                    fontWeight={600}
-                    textAnchor="middle"
-                  >
-                    {line.name}
-                  </text>
-                  <text
-                    x={midX}
-                    y={midY - 14}
-                    fill={line.color}
-                    fontSize={18}
-                    fontWeight={600}
-                    textAnchor="middle"
-                  >
-                    {line.name}
-                  </text>
-                </g>
+                {(() => {
+                  const lineTotal = counts?.per_line?.[line.id]?.total;
+                  const labelText = lineTotal != null ? `${line.name} · ${lineTotal}` : line.name;
+                  return (
+                    <g style={{ pointerEvents: 'none' }}>
+                      <text
+                        x={midX + 1}
+                        y={midY - 13}
+                        fill="rgba(0,0,0,0.85)"
+                        fontSize={18}
+                        fontWeight={600}
+                        textAnchor="middle"
+                      >
+                        {labelText}
+                      </text>
+                      <text
+                        x={midX}
+                        y={midY - 14}
+                        fill={line.color}
+                        fontSize={18}
+                        fontWeight={600}
+                        textAnchor="middle"
+                      >
+                        {labelText}
+                      </text>
+                    </g>
+                  );
+                })()}
               </g>
             );
           })}

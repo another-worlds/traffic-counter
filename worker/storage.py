@@ -73,8 +73,7 @@ def key_scene_frame(project_id: str, video_id: str, n: int) -> str:
     return f"projects/{project_id}/videos/{video_id}/frames/{n}.jpg"
 
 def key_frame(project_id: str, video_id: str) -> str:
-    # Backward-compat alias — always points at scene 0 after re-analysis.
-    return key_scene_frame(project_id, video_id, 0)
+    return f"projects/{project_id}/videos/{video_id}/frame.jpg"
 
 def key_trajectories(project_id: str, video_id: str) -> str:
     return f"projects/{project_id}/videos/{video_id}/trajectories.png"

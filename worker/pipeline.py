@@ -231,6 +231,13 @@ def process_video(
                 local_scene_frame,
             )
 
+        # Also write scene 0 to the legacy frame.jpg key for backward compat.
+        if scenes:
+            storage.upload_file(
+                key_frame(project_id, video_id),
+                str(td / f"frame_{scenes[0]['index']}.jpg"),
+            )
+
         _render_trajectories(df, w, h, local_traj)
         df.to_parquet(local_tracks, index=False)
 

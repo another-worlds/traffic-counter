@@ -50,12 +50,6 @@ export default function Uploader({ projectId, tusEndpoint, onResult }: Props) {
       onProgress(uploaded: number, total: number) {
         const pct = total > 0 ? uploaded / total : 0;
         setState({ phase: 'uploading', filename: file.name, pct, uploaded, total });
-
-        const now = Date.now();
-        if (now - lastReportRef.current > 500) {
-          lastReportRef.current = now;
-          onResult({ kind: 'progress', pct, uploaded, total });
-        }
       },
 
       onSuccess() {
@@ -90,6 +84,7 @@ export default function Uploader({ projectId, tusEndpoint, onResult }: Props) {
     shell: {
       fontFamily: "Inter, 'Segoe UI', system-ui, sans-serif",
       color: '#f4f7fb',
+      background: '#0e1117',
       padding: '12px',
     },
     dropzone: {

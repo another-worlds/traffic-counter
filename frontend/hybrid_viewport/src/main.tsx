@@ -32,10 +32,8 @@ function OverlayRoot() {
   );
 
   React.useEffect(() => {
-    // ResizeObserver keeps the iframe height in sync with actual content.
-    let observer: ResizeObserver | null = null;
     function updateHeight() {
-      Streamlit.setFrameHeight(document.documentElement.scrollHeight);
+      Streamlit.setFrameHeight(rootElement.getBoundingClientRect().height + 16);
     }
 
     function handleStreamlitRender(event: Event) {
@@ -50,15 +48,14 @@ function OverlayRoot() {
 
     Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, handleStreamlitRender);
 
-    // Start observing after mount so the DOM is fully laid out.
-    observer = new ResizeObserver(updateHeight);
-    observer.observe(document.body);
+    const observer = new ResizeObserver(updateHeight);
+    observer.observe(rootElement);
     updateHeight();
 
     Streamlit.setComponentReady();
     return () => {
       Streamlit.events.removeEventListener(Streamlit.RENDER_EVENT, handleStreamlitRender);
-      observer?.disconnect();
+      observer.disconnect();
     };
   }, []);
 

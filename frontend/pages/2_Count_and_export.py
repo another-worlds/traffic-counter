@@ -177,23 +177,10 @@ def _handle_pending_actions(actions: List[Dict[str, Any]], ws_id: str, spec: Vie
             st.session_state.pop(suggestions_key, None)
             changed = True
         elif kind == "accept-suggestion":
-            sug = act.get("suggestion") or {}
-            pts = sug.get("points") or {}
-            a = pts.get("a") or [0, 0]
-            b = pts.get("b") or [0, 0]
-            try:
-                api.create_line(
-                    spec.project_id,
-                    sug.get("name") or "suggested",
-                    float(a[0]), float(a[1]),
-                    float(b[0]), float(b[1]),
-                    color=sug.get("color") or "#4ecdc4",
-                )
-                # Auto-clear suggestions after accepting one (simpler UX).
-                st.session_state.pop(suggestions_key, None)
-                changed = True
-            except api.APIError as exc:
-                st.error(f"Could not add suggestion: {exc}")
+            # React adds the line locally; reconciliation creates it in the DB.
+            # We only need to clear the suggestion cache here.
+            st.session_state.pop(suggestions_key, None)
+            changed = True
     return changed
 
 

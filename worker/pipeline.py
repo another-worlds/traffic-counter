@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageDraw
+import torch
 
 from ultralytics import YOLO
 
@@ -45,9 +46,29 @@ DEVICE = os.environ.get("DEVICE", "cuda:0")
 HALF = os.environ.get("HALF", "true").lower() == "true"
 TRACKER = os.environ.get("TRACKER", "bytetrack.yaml")
 FRAME_STRIDE = int(os.environ.get("FRAME_STRIDE", "1"))  # process every Nth frame (1=all)
+IMGSZ = int(os.environ.get("IMGSZ", "960"))
+WORKERS = int(os.environ.get("WORKERS", "8"))
+STREAM_BUFFER = os.environ.get("STREAM_BUFFER", "true").lower() == "true"
+
+
+def _configure_torch_runtime() -> None:
+    """Enable high-throughput CUDA settings where available."""
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.backends.cudnn.benchmark = True
+    except Exception:
+        pass
+    try:
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
+    except Exception:
+        pass
 
 
 def _load_model() -> YOLO:
+    _configure_torch_runtime()
     model = YOLO(MODEL_NAME)
     # Warm up to surface device/half issues early
     try:
@@ -179,11 +200,14 @@ def process_video(
         results_iter = model.track(
             source=local_video,
             stream=True,
+            stream_buffer=STREAM_BUFFER,
             persist=True,
             classes=VEHICLE_CLASSES,
             tracker=TRACKER,
             half=HALF,
             device=DEVICE,
+            imgsz=IMGSZ,
+            workers=WORKERS,
             vid_stride=FRAME_STRIDE,
             verbose=False,
         )

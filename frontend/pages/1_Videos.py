@@ -14,6 +14,50 @@ if not ws:
 
 st.caption(f"Workspace: **{ws['name']}**")
 
+# ── global queue controls (same primitives as the Watched Folder page) ─────
+try:
+    pause_state = api.worker_pause_state()
+    err_summary = api.worker_error_summary()
+except api.APIError:
+    pause_state = {"paused": False}
+    err_summary = {"total": 0, "by_source": {}}
+
+upload_errors = err_summary.get("by_source", {}).get("upload", 0)
+paused = pause_state.get("paused", False)
+
+ctl_pause, ctl_retry, _ = st.columns([2, 2, 6])
+with ctl_pause:
+    if paused:
+        if st.button("▶ Resume processing", type="primary", key="ctl_resume"):
+            try:
+                api.resume_worker()
+                st.rerun()
+            except api.APIError as exc:
+                st.error(str(exc))
+    else:
+        if st.button("⏸ Pause processing", key="ctl_pause",
+                     help="Current video finishes; no new claims until resumed."):
+            try:
+                api.pause_worker()
+                st.rerun()
+            except api.APIError as exc:
+                st.error(str(exc))
+
+with ctl_retry:
+    if st.button(f"🔄 Retry all errors ({upload_errors})",
+                 disabled=upload_errors == 0,
+                 key="ctl_retry_upload",
+                 help="Re-queue all upload-source videos in error state."):
+        try:
+            result = api.retry_all_errors(source="upload")
+            st.success(f"Re-queued {result['queued']} video(s).")
+            st.rerun()
+        except api.APIError as exc:
+            st.error(str(exc))
+
+if paused:
+    st.warning("⏸ Processing is paused. Click **▶ Resume processing** to continue.")
+
 # Upload
 with st.expander("Upload video", expanded=True):
     prog_state = st.session_state.get(f"upload_progress_{ws['id']}", {"pct": 0, "text": "Ready to upload"})

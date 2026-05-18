@@ -1,12 +1,14 @@
 from datetime import datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 
 from ..db import get_db
 from ..models import Video, Project, SystemState
 from ..schemas import WorkerVideoStatus, PauseStateOut
+from ..services.jobs import get_job_runner
+from pydantic import BaseModel
 
 router = APIRouter(tags=["worker"])
 
@@ -69,3 +71,53 @@ def resume_worker(db: Session = Depends(get_db)):
     state.updated_at = datetime.utcnow()
     db.commit()
     return PauseStateOut(paused=False)
+
+
+class ErrorSummaryOut(BaseModel):
+    total: int
+    by_source: dict
+
+
+@router.get("/worker/error-summary", response_model=ErrorSummaryOut)
+def error_summary(db: Session = Depends(get_db)):
+    """Per-source error counts (for surfacing 'retry all' UX everywhere)."""
+    rows = (
+        db.query(Video.source, Video.id)
+        .filter(Video.status == "error")
+        .all()
+    )
+    by_source: dict[str, int] = {}
+    for src, _ in rows:
+        by_source[src or "upload"] = by_source.get(src or "upload", 0) + 1
+    return ErrorSummaryOut(total=len(rows), by_source=by_source)
+
+
+class RetryErrorsOut(BaseModel):
+    queued: int
+
+
+@router.post("/worker/retry-errors", response_model=RetryErrorsOut)
+def retry_errors(
+    source: Optional[str] = Query(None, description="Limit to one source ('upload' or 'local-folder')"),
+    project_id: Optional[str] = Query(None, description="Limit to one workspace"),
+    db: Session = Depends(get_db),
+):
+    """Re-queue all error videos, optionally filtered by source and/or project."""
+    q = db.query(Video).filter(Video.status == "error")
+    if source:
+        q = q.filter(Video.source == source)
+    if project_id:
+        q = q.filter(Video.project_id == project_id)
+
+    videos = q.all()
+    runner = get_job_runner()
+    count = 0
+    for v in videos:
+        v.status = "queued"
+        v.error_message = None
+        v.retries = 0
+        v.progress_pct = None
+        runner.enqueue(video_id=v.id, project_id=v.project_id)
+        count += 1
+    db.commit()
+    return RetryErrorsOut(queued=count)

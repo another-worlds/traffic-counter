@@ -278,3 +278,30 @@ def resume_worker() -> Dict:
         r = c.post("/worker/resume")
         _raise(r)
         return r.json()
+
+
+def worker_pause_state() -> Dict:
+    """Return {paused: bool}."""
+    with _client() as c:
+        r = c.get("/worker/pause-state")
+        _raise(r)
+        return r.json()
+
+
+def worker_error_summary() -> Dict:
+    """Per-source error counts: {total, by_source: {upload, local-folder}}."""
+    with _client() as c:
+        r = c.get("/worker/error-summary")
+        _raise(r)
+        return r.json()
+
+
+def retry_all_errors(source: Optional[str] = None, project_id: Optional[str] = None) -> Dict:
+    """Re-queue all error videos. Optionally filter by source or workspace."""
+    params: Dict = {}
+    if source: params["source"] = source
+    if project_id: params["project_id"] = project_id
+    with _client() as c:
+        r = c.post("/worker/retry-errors", params=params)
+        _raise(r)
+        return r.json()

@@ -5,6 +5,10 @@ Watches WATCH_PATH for new video files and registers them with the API.
 Runs two complementary detection strategies:
   1. inotify/watchdog events (IN_CLOSE_WRITE, file rename) — near-real-time
   2. Periodic full scan (SCAN_INTERVAL seconds) — catches anything inotify missed
+
+Concurrency model: a bounded ThreadPoolExecutor caps the number of in-flight
+register() calls so the main observer loop, the periodic scan, and the API
+all stay responsive even when 100+ files are discovered at once.
 """
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import httpx
@@ -29,6 +34,7 @@ API_URL        = os.getenv("API_URL", "http://api:8000")
 AUTO_ANALYZE   = os.getenv("AUTO_ANALYZE", "false").lower() == "true"
 SCAN_INTERVAL  = int(os.getenv("SCAN_INTERVAL", "60"))
 STABILITY_WAIT = int(os.getenv("STABILITY_WAIT", "5"))   # seconds
+MAX_CONCURRENT = int(os.getenv("WATCHER_MAX_CONCURRENT", "4"))
 
 VIDEO_EXTS = {
     ".mp4", ".mov", ".avi", ".mkv", ".ts",
@@ -55,10 +61,38 @@ def is_stable(path: Path) -> bool:
 # ── registrar ────────────────────────────────────────────────────────────────
 
 class Registrar:
+    """Schedules registration of files through a bounded thread pool.
+
+    The pool's worker count caps how many register() calls can be in flight
+    at once — this matters during full_scan() where hundreds of files may
+    be queued simultaneously. The main thread and the watchdog observer are
+    never blocked: submit() returns immediately, queueing work for the pool.
+    """
+
     def __init__(self) -> None:
         self._client = httpx.Client(base_url=API_URL, timeout=60)
         self._seen: set[str] = set()      # in-memory dedup for this run
         self._lock = threading.Lock()
+        self._executor = ThreadPoolExecutor(
+            max_workers=MAX_CONCURRENT,
+            thread_name_prefix="registrar",
+        )
+        log.info("registrar pool: max_workers=%d", MAX_CONCURRENT)
+
+    def submit(self, path: Path) -> None:
+        """Non-blocking schedule of a register() call."""
+        key = str(path)
+        # Cheap pre-check so we don't enqueue obvious duplicates.
+        with self._lock:
+            if key in self._seen:
+                return
+        self._executor.submit(self._register_safe, path)
+
+    def _register_safe(self, path: Path) -> None:
+        try:
+            self.register(path)
+        except Exception:
+            log.exception("unhandled error in register(%s)", path)
 
     def register(self, path: Path) -> None:
         key = str(path)
@@ -89,16 +123,28 @@ class Registrar:
             log.error("failed to register %s: %s", path.name, exc)
 
     def full_scan(self) -> None:
-        """Walk the entire watch path and register any unindexed videos."""
+        """Walk the entire watch path and queue any unindexed videos for registration."""
         if not WATCH_PATH.exists():
             log.warning("watch path does not exist: %s", WATCH_PATH)
             return
         found = 0
+        queued = 0
         for p in WATCH_PATH.rglob("*"):
             if is_video(p):
                 found += 1
-                threading.Thread(target=self.register, args=(p,), daemon=True).start()
-        log.info("scan complete — found %d video file(s) in %s", found, WATCH_PATH)
+                # submit() returns immediately; pool handles concurrency bound.
+                key = str(p)
+                with self._lock:
+                    already_seen = key in self._seen
+                if not already_seen:
+                    queued += 1
+                    self._executor.submit(self._register_safe, p)
+        log.info("scan complete — %d video file(s), %d new queued (pool=%d)",
+                 found, queued, MAX_CONCURRENT)
+
+    def shutdown(self) -> None:
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._client.close()
 
 
 # ── watchdog event handler ────────────────────────────────────────────────────
@@ -111,7 +157,7 @@ class VideoHandler(FileSystemEventHandler):
     def _handle(self, path_str: str) -> None:
         p = Path(path_str)
         if p.suffix.lower() in VIDEO_EXTS:
-            threading.Thread(target=self._registrar.register, args=(p,), daemon=True).start()
+            self._registrar.submit(p)
 
     def on_closed(self, event: FileClosedEvent) -> None:
         # Fired on IN_CLOSE_WRITE — file fully written to disk.
@@ -132,8 +178,8 @@ class VideoHandler(FileSystemEventHandler):
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    log.info("starting — WATCH_PATH=%s  AUTO_ANALYZE=%s  SCAN_INTERVAL=%ds",
-             WATCH_PATH, AUTO_ANALYZE, SCAN_INTERVAL)
+    log.info("starting — WATCH_PATH=%s  AUTO_ANALYZE=%s  SCAN_INTERVAL=%ds  MAX_CONCURRENT=%d",
+             WATCH_PATH, AUTO_ANALYZE, SCAN_INTERVAL, MAX_CONCURRENT)
 
     registrar = Registrar()
 
@@ -167,6 +213,7 @@ def main() -> None:
     finally:
         observer.stop()
         observer.join()
+        registrar.shutdown()
 
 
 if __name__ == "__main__":

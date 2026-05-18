@@ -38,6 +38,15 @@ class AnalyzePendingResponse(BaseModel):
     queued: int
 
 
+class MetadataUpdateRequest(BaseModel):
+    path: str
+    fps: Optional[float] = None
+    duration_s: Optional[float] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    num_frames: Optional[int] = None
+
+
 def _get_or_create_inbox(db: Session) -> Project:
     project = db.query(Project).filter(Project.name == INBOX_PROJECT_NAME).first()
     if not project:
@@ -110,6 +119,30 @@ def list_local_folder_videos(
     return q.order_by(Video.created_at.desc()).all()
 
 
+
+
+@router.post("/local-folder/update-metadata", response_model=VideoOut)
+def update_local_video_metadata(body: MetadataUpdateRequest, db: Session = Depends(get_db)):
+    """Upsert metadata for a watched-folder video by source path."""
+    path = body.path.strip()
+    v = db.query(Video).filter(Video.local_source_path == path).first()
+    if not v:
+        raise HTTPException(404, f"video not found for path: {path}")
+
+    if body.fps is not None:
+        v.fps = float(body.fps)
+    if body.duration_s is not None:
+        v.duration_s = float(body.duration_s)
+    if body.width is not None:
+        v.width = int(body.width)
+    if body.height is not None:
+        v.height = int(body.height)
+    if body.num_frames is not None:
+        v.num_frames = int(body.num_frames)
+
+    db.commit()
+    db.refresh(v)
+    return v
 @router.post("/local-folder/analyze-pending", response_model=AnalyzePendingResponse)
 def analyze_pending(db: Session = Depends(get_db)):
     """Queue all local-folder videos that have not been analyzed yet."""

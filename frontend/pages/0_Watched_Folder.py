@@ -140,11 +140,25 @@ for folder, items in folders.items():
 
 folder_rows.sort(key=lambda r: (r["completion"], -r["count"]))
 
+queue_status = defaultdict(int)
+for item in queue:
+    queue_status[item.get("status", "unknown")] += 1
+
+queued_now = queue_status["queued"]
+running_now = queue_status["analyzing"]
+queue_health_ratio = analyzed / max(1, total)
+
 # Queue controls
 st.divider()
 left, right = st.columns([3, 2])
 with left:
     st.markdown("### Queue Controls")
+    q1, q2, q3, q4 = st.columns(4)
+    q1.metric("Ready to queue", unstarted)
+    q2.metric("Queued now", queued_now)
+    q3.metric("Running now", running_now)
+    q4.metric("Queue health", f"{queue_health_ratio*100:.0f}%")
+
     c1, c2, c3 = st.columns(3)
     with c1:
         if st.button("▶ Queue all pending", disabled=unstarted == 0, use_container_width=True):
@@ -161,26 +175,29 @@ with left:
 with right:
     st.markdown("### Live Queue")
     st.caption(f"{len(queue)} item(s) currently queued/running across all workspaces")
-    for item in queue[:6]:
+    max_rows = st.slider("Visible queue rows", min_value=3, max_value=12, value=6, step=1)
+    only_running = st.toggle("Show analyzing only", value=False)
+    queue_items = [q for q in queue if (q.get("status") == "analyzing" if only_running else True)]
+    for item in queue_items[:max_rows]:
         pct = float(item.get("progress_pct") or 0.0)
-        st.write(f"**{item['filename']}** · {item['project_name']} · {item['status']}")
-        if item["status"] == "analyzing":
-            st.progress(pct)
+        with st.container(border=True):
+            st.write(f"**{item['filename']}**")
+            st.caption(f"{item['project_name']} · {item['status']}")
+            if item["status"] == "analyzing":
+                st.progress(pct, text=f"{pct*100:.0f}%")
 
 # Folder selection area
 st.divider()
 st.subheader("Folder-centric Tracking")
-left, right = st.columns([1, 2])
 
-with left:
-    options = [f"{r['folder']} ({r['analyzed']}/{r['count']})" for r in folder_rows]
-    selected = st.radio("Folders", options=options, label_visibility="collapsed")
-    sel_folder = selected.rsplit(" (", 1)[0]
+options = [f"{r['folder']} ({r['analyzed']}/{r['count']})" for r in folder_rows]
+selected = st.selectbox("Selected folder", options=options)
+sel_folder = selected.rsplit(" (", 1)[0]
 
 selected_row = next(r for r in folder_rows if r["folder"] == sel_folder)
 status_icon, accent = _health_badge(selected_row["completion"])
 
-# Current folder dashboard directly under main dashboard section and above detailed list
+# Current folder dashboard placed above folder list
 st.markdown("### Current Folder Dashboard")
 st.markdown(
     f"<div style='padding:0.55rem 0.8rem;border-left:6px solid {accent};background:#f8fafc;border-radius:8px;'>"
@@ -197,28 +214,39 @@ fc2.metric("Processed hours", f"{selected_row['processed_hours']:.2f}h")
 fc3.metric("Folder completion", f"{selected_row['completion']*100:.1f}%")
 st.progress(selected_row["completion"], text=f"{status_icon} Folder completion {selected_row['completion']*100:.1f}%")
 
-with right:
-    st.markdown("#### Videos in selected folder")
-    folder_videos = sorted(folders[sel_folder], key=lambda v: (v["status"], v["filename"]))
-    for v in folder_videos:
-        with st.container(border=True):
-            c1, c2, c3 = st.columns([4, 2, 2])
-            with c1:
-                st.write(f"**{v['filename']}**")
-                if v.get("local_source_path"):
-                    st.caption(v["local_source_path"])
-            with c2:
-                st.write(v["status"])
-                if v["status"] == "analyzing" and v.get("progress_pct") is not None:
-                    st.progress(v["progress_pct"])
-            with c3:
-                if v["status"] in {"uploaded", "error"}:
-                    if st.button("Analyze", key=f"analyze_{v['id']}"):
-                        try:
-                            api.analyze_video(v["id"])
-                            st.rerun()
-                        except api.APIError as exc:
-                            st.error(str(exc))
+st.markdown("### Folder Video List")
+folder_videos = sorted(folders[sel_folder], key=lambda v: (v["status"], v["filename"]))
+status_chip = {
+    "uploaded": "⬜ Uploaded",
+    "queued": "🟨 Queued",
+    "analyzing": "🟧 Analyzing",
+    "analyzed": "🟩 Analyzed",
+    "error": "🟥 Error",
+}
+
+for v in folder_videos:
+    with st.container(border=True):
+        c1, c2, c3 = st.columns([5, 2, 2])
+        with c1:
+            st.markdown(f"**🎞️ {v['filename']}**")
+            if v.get("local_source_path"):
+                st.caption(v["local_source_path"])
+        with c2:
+            st.markdown(status_chip.get(v["status"], v["status"]))
+            duration = _duration_s(v) / 60.0
+            st.caption(f"{duration:.1f} min")
+            if v["status"] == "analyzing" and v.get("progress_pct") is not None:
+                st.progress(v["progress_pct"], text=f"{v['progress_pct']*100:.0f}%")
+        with c3:
+            if v["status"] in {"uploaded", "error"}:
+                if st.button("Analyze", key=f"analyze_{v['id']}", use_container_width=True):
+                    try:
+                        api.analyze_video(v["id"])
+                        st.rerun()
+                    except api.APIError as exc:
+                        st.error(str(exc))
+            else:
+                st.caption("Managed by queue")
 
 if auto_refresh and in_queue > 0:
     time.sleep(3)

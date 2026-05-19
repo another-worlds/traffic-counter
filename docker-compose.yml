@@ -23,6 +23,9 @@ services:
       LOCAL_STORAGE_ROOT: /data
       JOB_RUNNER: local
       ENV: dev
+      # Must include the Streamlit origin so the embedded React iframe can
+      # call FastAPI directly (the iframe is served by Streamlit at :8501).
+      CORS_ORIGINS: "http://localhost:8501,http://localhost:8000"
     ports: ["8000:8000"]
     volumes:
       - storage:/data

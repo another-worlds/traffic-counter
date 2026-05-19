@@ -2,7 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { Streamlit, type RenderData } from 'streamlit-component-lib';
 import App from './App';
-import type { BridgePayload, HostViewportBootstrap } from './viewportState';
+import type { HostViewportBootstrap } from './viewportState';
 
 declare global {
   interface Window {
@@ -23,12 +23,6 @@ type StreamlitRenderArgs = {
 function OverlayRoot() {
   const [bootstrap, setBootstrap] = React.useState<HostViewportBootstrap>(
     () => window.__TRAFFIC_COUNTER_HYBRID_VIEWPORT__ ?? {},
-  );
-
-  // Stable reference so App's onSnapshot effect only fires when payload changes.
-  const handleSnapshot = React.useCallback(
-    (payload: BridgePayload) => Streamlit.setComponentValue(payload),
-    [],
   );
 
   React.useEffect(() => {
@@ -59,7 +53,7 @@ function OverlayRoot() {
     };
   }, []);
 
-  return <App bootstrap={bootstrap} onSnapshot={handleSnapshot} />;
+  return <App bootstrap={bootstrap} />;
 }
 
 ReactDOM.createRoot(rootElement).render(

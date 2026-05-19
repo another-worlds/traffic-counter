@@ -2,11 +2,11 @@
   /* Streamlit dark-theme tokens */
   --bg:      #0e1117;
   --surface: #262730;
-  --border:  rgba(250, 250, 250, 0.12);
+  --border:  rgba(250, 250, 250, 0.18);
   --text:    #fafafa;
-  --muted:   #8b959e;
+  --muted:   #c9d1d9;
   --accent:  #ff4b4b;   /* Streamlit primaryColor */
-  --accent2: #4c8bf5;   /* Streamlit secondary blue */
+  --accent2: #6aa3ff;   /* Streamlit secondary blue */
 
   color-scheme: dark;
   font-family: 'Source Sans Pro', 'Segoe UI', system-ui, sans-serif;
@@ -467,7 +467,7 @@ h2 { font-size: 15px; margin: 0 0 10px; }
 }
 
 .rose-legend-pct {
-  color: rgba(244, 247, 251, 0.6);
+  color: rgba(244, 247, 251, 0.85);
 }
 
 /* Class bars */
@@ -486,7 +486,7 @@ h2 { font-size: 15px; margin: 0 0 10px; }
 
 .class-bar-label {
   text-transform: capitalize;
-  color: rgba(244, 247, 251, 0.85);
+  color: rgba(244, 247, 251, 0.95);
 }
 
 .class-bar-track {

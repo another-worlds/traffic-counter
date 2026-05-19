@@ -53,9 +53,10 @@ open http://localhost:8501
 
 # 3. workflow
 #    Sidebar → create a project
-#    Videos page → upload an mp4 → click "Analyze"
-#    (worker container picks it up, processes it, marks 'analyzed')
-#    Count & export page → draw lines, click "Compute counts", "Generate xlsx"
+#    Watched Folder page → drop an mp4 in the mounted folder; the
+#      watcher registers it and (with AUTO_ANALYZE=true) the worker
+#      picks it up automatically
+#    Count & export page → draw lines, view live counts, export xlsx
 ```
 
 The `worker` container in compose runs in `WORKER_MODE=poll`, claiming queued
@@ -174,8 +175,8 @@ worker/             GPU job container
 
 frontend/           Streamlit UI
   streamlit_app.py     project picker
-  pages/1_🎥_Videos.py     upload + analyze
-  pages/2_📏_Count_and_export.py    draw lines, compute, export
+  pages/0_Watched_Folder.py        auto-register videos from a mounted folder
+  pages/2_Count_and_export.py      draw lines, compute, export
 
 infra/deploy.sh     gcloud one-shot deploy
 ```

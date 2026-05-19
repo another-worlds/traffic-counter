@@ -13,6 +13,7 @@ Usage:
 """
 from __future__ import annotations
 import math
+import os
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -195,21 +196,23 @@ def render_sidebar() -> Optional[dict]:
                     except Exception as e:
                         st.error(str(e))
 
-        # delete (danger zone)
-        confirm_key = f"confirm_del_{ws['id']}"
-        if st.button("🗑️ Delete workspace", type="secondary", use_container_width=True):
-            if st.session_state.get(confirm_key):
-                try:
-                    api.delete_project(ws["id"])
-                    st.session_state.pop("workspace", None)
-                    st.session_state.pop(confirm_key, None)
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
-            else:
-                st.session_state[confirm_key] = True
+        # delete (danger zone) — hidden during public test. Set
+        # ENABLE_WORKSPACE_DELETE=1 in the frontend env to bring it back.
+        if os.environ.get("ENABLE_WORKSPACE_DELETE", "").strip().lower() in {"1", "true", "yes"}:
+            confirm_key = f"confirm_del_{ws['id']}"
+            if st.button("🗑️ Delete workspace", type="secondary", use_container_width=True):
+                if st.session_state.get(confirm_key):
+                    try:
+                        api.delete_project(ws["id"])
+                        st.session_state.pop("workspace", None)
+                        st.session_state.pop(confirm_key, None)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+                else:
+                    st.session_state[confirm_key] = True
 
-        if st.session_state.get(confirm_key):
-            st.warning("⚠️ Click again to confirm deletion — all videos and lines will be lost.")
+            if st.session_state.get(confirm_key):
+                st.warning("⚠️ Click again to confirm deletion — all videos and lines will be lost.")
 
     return st.session_state.get("workspace")

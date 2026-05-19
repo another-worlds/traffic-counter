@@ -143,7 +143,12 @@ def _render_video_selector(ws_id: str, videos: List[Dict[str, Any]]) -> List[str
 
     def _label(vid: str) -> str:
         v = video_by_id[vid]
-        return f'{v["filename"]} · {v.get("num_tracks", 0)} tracks'
+        # Watched-folder videos carry their absolute host path; the parent
+        # folder disambiguates files that share a basename across cameras.
+        src = v.get("local_source_path") or ""
+        folder = os.path.dirname(src) if src else ""
+        prefix = f"{folder}/" if folder else ""
+        return f'{prefix}{v["filename"]} · {v.get("num_tracks", 0)} tracks'
 
     with st.expander("📼 Videos in this count", expanded=True):
         can_remove = len(selected_ids) > 1

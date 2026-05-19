@@ -3,15 +3,16 @@
 Semantic Contract Ref: counting_line_overlay/contract v0.1
 
 The Streamlit shell hosts an embedded React/Vite viewport that owns the live
-line editor, frame display, overlay toggles, counts table, auto-suggest,
-and direction rose. The API remains the source of truth for persistence
-and counting; Streamlit reconciles snapshots and runs API calls.
+line editor, frame display, overlay toggles, counts table, auto-suggest, and
+direction rose. The React iframe talks to the FastAPI directly for all line
+CRUD, counts, and suggestion calls — Streamlit only builds the initial
+bootstrap and renders the export download.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import base64
-import json
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -50,51 +51,6 @@ def build_viewport_spec(ws: Dict[str, Any], videos: List[Dict[str, Any]], lines:
     )
 
 
-def persist_line_edit(line_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Persist a single line change through the API."""
-    action = payload.get("action")
-
-    if action == "create":
-        project_id = str(payload["project_id"])
-        line = payload["line"]
-        points = line.get("points") or []
-        if len(points) < 2:
-            raise ValueError("create payload must include at least two points")
-        a = points[0]
-        b = points[-1]
-        return api.create_line(
-            project_id,
-            line.get("name") or "line",
-            float(a[0]), float(a[1]),
-            float(b[0]), float(b[1]),
-            line.get("color") or "#e24b4a",
-        )
-
-    if action == "update":
-        patch = dict(payload.get("patch") or {})
-        points = patch.pop("points", None)
-        api_points = None
-        if points is not None:
-            if len(points) < 2:
-                raise ValueError("update points must include at least two points")
-            api_points = {
-                "a": [float(points[0][0]), float(points[0][1])],
-                "b": [float(points[-1][0]), float(points[-1][1])],
-            }
-        return api.update_line(
-            line_id,
-            name=patch.get("name"),
-            color=patch.get("color"),
-            points=api_points,
-        )
-
-    if action == "delete":
-        api.delete_line(line_id)
-        return {"id": line_id, "deleted": True}
-
-    raise ValueError(f"Unsupported line edit action: {action}")
-
-
 def request_live_counts(project_id: str, video_ids: List[str], line_ids: List[str]) -> Dict[str, Any]:
     """Request live counts. Returns empty summary when there are no active lines."""
     if not line_ids:
@@ -114,48 +70,25 @@ def _counts_for_react(counts_raw: Optional[Dict[str, Any]]) -> Optional[Dict[str
     }
 
 
-def _points_match(api_line: Dict[str, Any], snap_line: Dict[str, Any]) -> bool:
-    points = snap_line.get("points") or []
-    if len(points) < 2:
-        return False
-    a = [float(points[0][0]), float(points[0][1])]
-    b = [float(points[-1][0]), float(points[-1][1])]
-    current = api_line.get("points") or {}
-    ca = current.get("a") or [0, 0]
-    cb = current.get("b") or [0, 0]
-    tol = 0.5
-    return (
-        abs(float(ca[0]) - a[0]) <= tol and abs(float(ca[1]) - a[1]) <= tol
-        and abs(float(cb[0]) - b[0]) <= tol and abs(float(cb[1]) - b[1]) <= tol
-    )
-
-
-def _line_patch(api_line: Dict[str, Any], snap_line: Dict[str, Any]) -> Dict[str, Any]:
-    patch: Dict[str, Any] = {}
-    if (snap_line.get("name") or "") != (api_line.get("name") or ""):
-        patch["name"] = snap_line.get("name") or "line"
-    if (snap_line.get("color") or "") != (api_line.get("color") or ""):
-        patch["color"] = snap_line.get("color") or "#e24b4a"
-    if not _points_match(api_line, snap_line):
-        patch["points"] = snap_line.get("points") or []
-    return patch
-
-
-def _normalize_snapshot_lines(snapshot_lines: List[Dict[str, Any]], id_map: Dict[str, str]) -> List[Dict[str, Any]]:
-    normalized: List[Dict[str, Any]] = []
-    for line in snapshot_lines:
-        normalized_line = dict(line)
-        line_id = str(normalized_line.get("id") or "")
-        if line_id and line_id in id_map:
-            normalized_line["id"] = id_map[line_id]
-        normalized.append(normalized_line)
-    return normalized
-
-
 def _absolute_url(rel: Optional[str]) -> Optional[str]:
     if not rel:
         return None
     return api.file_url(rel)
+
+
+def _browser_api_base_url() -> Optional[str]:
+    """Return the API URL the *browser* should use, or None to let the React
+    iframe derive it from window.location. ``PUBLIC_API_URL`` defaults to
+    ``http://localhost:8000`` on the server — that's correct for laptop dev
+    but wrong on a remote VPS, where the user's browser would try to hit
+    its own loopback. Strip the localhost default and let the iframe resolve.
+    """
+    raw = os.environ.get("PUBLIC_API_URL", "").strip()
+    if not raw:
+        return None
+    if "localhost" in raw or "127.0.0.1" in raw:
+        return None
+    return raw
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
@@ -183,34 +116,6 @@ def _fetch_asset_data_url(rel_url: str) -> Optional[str]:
 
 def _maybe_fetch_asset_data_url(rel_url: Optional[str]) -> Optional[str]:
     return _fetch_asset_data_url(rel_url) if rel_url else None
-
-
-def _handle_pending_actions(actions: List[Dict[str, Any]], ws_id: str, spec: ViewportSpec) -> bool:
-    """Handle React-emitted side-actions. Returns True if a rerun is needed."""
-    if not actions:
-        return False
-    suggestions_key = f"hybrid_suggestions_{ws_id}"
-    changed = False
-    for act in actions:
-        kind = act.get("type")
-        if kind == "request-suggestions":
-            n = max(1, min(10, int(act.get("n") or 3)))
-            try:
-                st.session_state[suggestions_key] = api.suggest_lines(
-                    spec.project_id, spec.video_ids, n=n,
-                )
-                changed = True
-            except api.APIError as exc:
-                st.error(f"Suggest failed: {exc}")
-        elif kind == "dismiss-suggestions":
-            st.session_state.pop(suggestions_key, None)
-            changed = True
-        elif kind == "accept-suggestion":
-            # React adds the line locally; reconciliation creates it in the DB.
-            # We only need to clear the suggestion cache here.
-            st.session_state.pop(suggestions_key, None)
-            changed = True
-    return changed
 
 
 def _render_video_selector(ws_id: str, videos: List[Dict[str, Any]]) -> List[str]:
@@ -301,91 +206,6 @@ def _render_video_selector(ws_id: str, videos: List[Dict[str, Any]]) -> List[str
     return list(st.session_state[sel_key])
 
 
-def _process_snapshot(
-    overlay_snapshot: Dict[str, Any],
-    ws_id: str,
-    selected_video_ids: List[str],
-    counts_key: str,
-) -> None:
-    """Process a React snapshot: handle side-actions and persist line edits.
-
-    Runs BEFORE the bootstrap is rebuilt so that the lines list fetched
-    afterwards already reflects any newly-created lines. Without this
-    ordering the React-side `replace-lines` reconciliation drops the
-    locally-drawn line before its POST has been issued.
-    """
-    if str(overlay_snapshot.get("projectId") or "") != ws_id:
-        return
-
-    snapshot_hash = json.dumps(overlay_snapshot, sort_keys=True, separators=(",", ":"))
-    hash_key = f"hybrid_last_snapshot_hash_{ws_id}"
-    if st.session_state.get(hash_key) == snapshot_hash:
-        # Already processed in a prior rerun; skip side-effects.
-        return
-    st.session_state[hash_key] = snapshot_hash
-
-    snap_spec = ViewportSpec(
-        project_id=ws_id,
-        video_ids=selected_video_ids,
-        selected_line_ids=[],
-        frame_count=1,
-        active_layers=(),
-    )
-    _handle_pending_actions(overlay_snapshot.get("pendingActions") or [], ws_id, snap_spec)
-
-    id_map_key = f"hybrid_line_id_map_{ws_id}"
-    line_id_map = st.session_state.setdefault(id_map_key, {})
-    snapshot_lines = _normalize_snapshot_lines(
-        overlay_snapshot.get("lines") or [], line_id_map
-    )
-    persisted_lines = api.list_lines(ws_id)
-    persisted_by_id = {str(line["id"]): line for line in persisted_lines}
-    snapshot_by_id = {str(line.get("id")): line for line in snapshot_lines if line.get("id")}
-
-    mutated = False
-
-    for persisted_id in list(persisted_by_id):
-        if persisted_id not in snapshot_by_id:
-            try:
-                persist_line_edit(persisted_id, {"action": "delete"})
-                mutated = True
-            except Exception as exc:
-                st.error(f"Delete failed: {exc}")
-
-    for snap_line in snapshot_lines:
-        snap_id = str(snap_line.get("id") or "")
-        if snap_id and snap_id in persisted_by_id:
-            patch = _line_patch(persisted_by_id[snap_id], snap_line)
-            if patch:
-                try:
-                    persist_line_edit(snap_id, {"action": "update", "patch": patch})
-                    mutated = True
-                except Exception as exc:
-                    st.error(f"Update failed: {exc}")
-            continue
-
-        try:
-            created = persist_line_edit(
-                "",
-                {"action": "create", "project_id": ws_id, "line": snap_line},
-            )
-            mutated = True
-            local_id = str(snap_line.get("id") or "")
-            server_id = str(created.get("id") or "")
-            if local_id and server_id:
-                line_id_map[local_id] = server_id
-        except Exception as exc:
-            st.error(f"Create failed: {exc}")
-
-    if mutated:
-        refreshed_lines = api.list_lines(ws_id)
-        refreshed_line_ids = [str(line["id"]) for line in refreshed_lines]
-        st.session_state[counts_key] = request_live_counts(
-            ws_id, selected_video_ids, refreshed_line_ids,
-        )
-        st.session_state.pop(f"hybrid_xlsx_{ws_id}", None)
-
-
 def render_page() -> None:
     """Render the hybrid count-and-export page."""
     st.set_page_config(page_title="Count & Export (Hybrid)", page_icon="📏", layout="wide")
@@ -406,23 +226,16 @@ def render_page() -> None:
     ws_id = str(ws["id"])
     counts_key = f"hybrid_live_counts_{ws_id}"
 
-    # Render the video selector first — _process_snapshot needs the current
-    # selection so pending suggest-lines actions hit the right video set.
     selected_video_ids = _render_video_selector(ws_id, videos)
     selected_videos = [v for v in videos if str(v["id"]) in selected_video_ids] or [videos[0]]
     preview_video = selected_videos[0]
     selected_video_ids = [str(v["id"]) for v in selected_videos]
 
-    # Process the previous rerun's React snapshot BEFORE fetching the lines
-    # list. Otherwise the bootstrap is built with stale lines (no new line
-    # yet), and React's `replace-lines` reconciliation throws away the
-    # locally-drawn line as soon as the iframe re-renders.
     hybrid_key = f"hybrid_viewport_{ws_id}"
-    pending_snapshot = st.session_state.get(hybrid_key)
-    if pending_snapshot:
-        _process_snapshot(pending_snapshot, ws_id, selected_video_ids, counts_key)
 
-    # Now fetch the lines, which include any just-persisted line.
+    # Streamlit fetches the initial line list for bootstrap only. After mount,
+    # the React iframe owns line CRUD and talks to FastAPI directly — see
+    # hybrid_viewport/src/App.tsx (server-diff effect) and api.ts.
     lines = api.list_lines(ws_id)
     spec = build_viewport_spec(ws, videos, lines)
     spec = ViewportSpec(
@@ -479,6 +292,11 @@ def render_page() -> None:
             "frameCount": scene_count,
             "activeLayers": list(spec.active_layers),
         },
+        # Browser-reachable base URL so the iframe can call FastAPI directly.
+        # Only honor a non-loopback override; otherwise let the iframe derive
+        # the host from window.location (remote browsers can't reach
+        # "localhost" on the server).
+        "apiBaseUrl": _browser_api_base_url(),
         "initialLines": lines,
         "frames": frames_for_bootstrap,
         "frameUrl": legacy_frame_url,
@@ -493,8 +311,9 @@ def render_page() -> None:
         "suggestions": suggestions,
     }
 
-    # Render the iframe. The returned value is stashed in st.session_state[hybrid_key]
-    # and will be picked up by _process_snapshot at the top of the NEXT rerun.
+    # Render the iframe. React never emits values back — line CRUD and counts
+    # refresh go straight to FastAPI. Streamlit reruns are only triggered by
+    # workspace/video selection or the XLSX export button below.
     render_hybrid_viewport(bootstrap=bootstrap, key=hybrid_key)
 
     # Export section (Streamlit-side since file download must come from the host).

@@ -60,11 +60,6 @@ export type InteractionState =
   | { kind: 'moving'; lineId: string; anchor: Point; original: Point[] }
   | { kind: 'resizing'; lineId: string; handleIndex: number };
 
-export type PendingAction =
-  | { type: 'request-suggestions'; n: number }
-  | { type: 'accept-suggestion'; suggestion: Suggestion }
-  | { type: 'dismiss-suggestions' };
-
 export type OverlayModel = {
   spec: ViewportSpec;
   currentFrame: number;
@@ -72,22 +67,8 @@ export type OverlayModel = {
   lines: LineGeometry[];
   visibleLayers: Record<LayerKey, boolean>;
   interaction: InteractionState;
-  pendingActions: PendingAction[];
-  /** Active tool id — 'line' is the only builtin tool for now. Future: 'roi', 'polygon'. */
   activeTool: string;
-  /** Drawing color carried through model so LineTool can read it without extra prop-drilling. */
   drawingColor: string;
-};
-
-export type BridgePayload = {
-  kind: 'overlay-snapshot';
-  projectId: string;
-  videoIds: string[];
-  selectedLineId: string | null;
-  currentFrame: number;
-  activeLayers: LayerKey[];
-  lines: LineGeometry[];
-  pendingActions: PendingAction[];
 };
 
 export type SceneFrame = {
@@ -98,6 +79,8 @@ export type SceneFrame = {
 
 export type HostViewportBootstrap = {
   spec?: Partial<ViewportSpec>;
+  /** Base URL the iframe should use for direct FastAPI calls (no Streamlit hop). */
+  apiBaseUrl?: string;
   initialLines?: ApiLine[] | LineGeometry[];
   /** Scene-based keyframes from the backend; replaces the single frameUrl. */
   frames?: SceneFrame[];
@@ -137,8 +120,6 @@ export type OverlayAction =
   | { type: 'start-resize-handle'; lineId: string; handleIndex: number }
   | { type: 'update-resize-handle'; point: Point }
   | { type: 'commit-resize-handle' }
-  | { type: 'queue-action'; action: PendingAction }
-  | { type: 'clear-pending-actions' }
   | { type: 'set-active-tool'; toolId: string }
   | { type: 'set-drawing-color'; color: string };
 
@@ -191,7 +172,6 @@ export function createDefaultOverlayModel(spec: ViewportSpec, lines: LineGeometr
     lines,
     visibleLayers,
     interaction: { kind: 'idle' },
-    pendingActions: [],
     activeTool: 'line',
     drawingColor: '#e24b4a',
   };
@@ -380,12 +360,6 @@ export function reduceOverlayModel(model: OverlayModel, action: OverlayAction): 
     case 'commit-resize-handle':
       return { ...model, interaction: { kind: 'idle' } };
 
-    case 'queue-action':
-      return { ...model, pendingActions: [...model.pendingActions, action.action] };
-
-    case 'clear-pending-actions':
-      return { ...model, pendingActions: [] };
-
     case 'set-active-tool':
       return { ...model, activeTool: action.toolId };
 
@@ -395,30 +369,6 @@ export function reduceOverlayModel(model: OverlayModel, action: OverlayAction): 
     default:
       return model;
   }
-}
-
-export function buildBridgePayload(model: OverlayModel): BridgePayload {
-  const activeLayers = (Object.keys(model.visibleLayers) as LayerKey[]).filter(
-    (layer) => model.visibleLayers[layer],
-  );
-
-  // Don't include the draft line in snapshots — it's local until committed.
-  const interaction = model.interaction;
-  const exportLines =
-    interaction.kind === 'drawing'
-      ? model.lines.filter((l) => l.id !== interaction.draftLineId)
-      : model.lines;
-
-  return {
-    kind: 'overlay-snapshot',
-    projectId: model.spec.projectId,
-    videoIds: [...model.spec.videoIds],
-    selectedLineId: model.selectedLineId,
-    currentFrame: model.currentFrame,
-    activeLayers,
-    lines: exportLines.map(cloneLine),
-    pendingActions: [...model.pendingActions],
-  };
 }
 
 export function buildViewportSpecFromBootstrap(bootstrap?: HostViewportBootstrap): ViewportSpec {

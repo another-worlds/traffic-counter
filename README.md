@@ -63,6 +63,34 @@ videos atomically (`SELECT ... FOR UPDATE SKIP LOCKED`). For local dev without
 a GPU, set `DEVICE=cpu` (already the default in `docker-compose.yml`); analysis
 runs in CPU mode (slow but works).
 
+## Using the Count & Export page
+
+![Counting line editor — annotated](docs/usage-guide.png)
+
+1. **Drawing** — click and drag on empty video to start a new line; drag the
+   white endpoint handles to fine-tune; press <kbd>Delete</kbd> to remove the
+   selected line.
+2. **Handles** — the two white dots are draggable endpoints; the line is
+   live-counted as you move them.
+3. **Frame / scene indicator** — when scene cuts are detected, the slider
+   below the viewport scrubs between cameras; otherwise this just reads
+   "Single camera angle".
+4. **Total readings** — live count across every selected counting line.
+5. **Layers** — toggle the trajectory trails, the speed heatmap, and the
+   line overlay independently.
+6. **Drawing color** — the color the next line you draw will use.
+7. **Counting lines** — rename, recolor, see per-class & per-direction
+   breakdown, or delete a saved line.
+8. **Auto-suggest** — pick N, click *Suggest*, and the API proposes lines
+   from trajectory clusters; accept any to commit.
+9. **Import / Export** — save the line configuration as JSON, reload it on
+   another video or project.
+10. **Direction rose** — inbound vs outbound split for the selected line(s).
+11. **Splits by direction** — per-class crossings across the selection.
+
+> Re-render the annotated image after a UI change:
+> `python docs/build_usage_guide.py` (reads `docs/usage-guide.source.png`).
+
 ### Large file uploads (>20GB)
 
 To support uploads larger than 20GB, create `frontend/.streamlit/config.toml`:

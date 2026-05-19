@@ -2,6 +2,31 @@ import type { ApiLine, CountsBundle, LineCount, Suggestion } from './viewportSta
 
 export type ApiBaseConfig = { baseUrl: string };
 
+// The bootstrap "hint" comes from PUBLIC_API_URL on the server, which is
+// often "http://localhost:8000" for dev. When the user opens Streamlit on
+// a remote host, that URL resolves to *the user's own machine*, where
+// nothing is listening, and Chrome's Private-Network-Access policy blocks
+// the loopback fetch anyway. Override to the iframe's own hostname.
+export function resolveApiBaseUrl(hint?: string | null): string {
+  const here = typeof window !== 'undefined' ? window.location : null;
+  if (!hint) {
+    if (!here) return '';
+    return `${here.protocol}//${here.hostname}:8000`;
+  }
+  try {
+    const u = new URL(hint);
+    const hintIsLocal = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+    const browserIsLocal =
+      !!here && (here.hostname === 'localhost' || here.hostname === '127.0.0.1');
+    if (hintIsLocal && here && !browserIsLocal) {
+      return `${u.protocol}//${here.hostname}:${u.port || '8000'}`;
+    }
+    return hint;
+  } catch {
+    return hint;
+  }
+}
+
 export class ApiError extends Error {
   status: number;
   body: unknown;

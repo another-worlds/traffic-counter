@@ -15,13 +15,27 @@ def create_app() -> FastAPI:
         description="Project-organized vehicle tracking and counting.",
     )
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[o.strip() for o in settings.cors_origins.split(",")],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # The iframe's effective origin depends on where the operator deploys
+    # Streamlit (localhost in dev, an arbitrary public host in prod). A
+    # static allowlist is brittle; we accept any origin and disable credentials
+    # so the "*" + cookies combination remains spec-compliant.
+    cors_origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
+    if cors_origins == ["*"] or not cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origin_regex=".*",
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+    else:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=cors_origins,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     app.include_router(projects.router)
     app.include_router(videos.router)

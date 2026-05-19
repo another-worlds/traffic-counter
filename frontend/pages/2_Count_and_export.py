@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import base64
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -73,6 +74,21 @@ def _absolute_url(rel: Optional[str]) -> Optional[str]:
     if not rel:
         return None
     return api.file_url(rel)
+
+
+def _browser_api_base_url() -> Optional[str]:
+    """Return the API URL the *browser* should use, or None to let the React
+    iframe derive it from window.location. ``PUBLIC_API_URL`` defaults to
+    ``http://localhost:8000`` on the server — that's correct for laptop dev
+    but wrong on a remote VPS, where the user's browser would try to hit
+    its own loopback. Strip the localhost default and let the iframe resolve.
+    """
+    raw = os.environ.get("PUBLIC_API_URL", "").strip()
+    if not raw:
+        return None
+    if "localhost" in raw or "127.0.0.1" in raw:
+        return None
+    return raw
 
 
 @st.cache_data(show_spinner=False, max_entries=64)
@@ -277,7 +293,10 @@ def render_page() -> None:
             "activeLayers": list(spec.active_layers),
         },
         # Browser-reachable base URL so the iframe can call FastAPI directly.
-        "apiBaseUrl": api.PUBLIC_API_URL,
+        # Only honor a non-loopback override; otherwise let the iframe derive
+        # the host from window.location (remote browsers can't reach
+        # "localhost" on the server).
+        "apiBaseUrl": _browser_api_base_url(),
         "initialLines": lines,
         "frames": frames_for_bootstrap,
         "frameUrl": legacy_frame_url,

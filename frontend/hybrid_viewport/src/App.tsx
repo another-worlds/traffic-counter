@@ -25,6 +25,7 @@ import {
   createLine as apiCreateLine,
   deleteLine as apiDeleteLine,
   requestSuggestions as apiRequestSuggestions,
+  resolveApiBaseUrl,
   updateLine as apiUpdateLine,
 } from './api';
 import Viewport from './Viewport';
@@ -40,6 +41,17 @@ type AppProps = {
 const DEFAULT_VIDEO_SIZE: VideoSize = { width: 1920, height: 1080 };
 const PATCH_DEBOUNCE_MS = 250;
 const COUNTS_DEBOUNCE_MS = 300;
+const CREATE_RETRY_MS = 2000;
+
+function describeFetchErr(err: unknown): string {
+  if (err instanceof Error) {
+    if (err.name === 'TypeError' && /fetch/i.test(err.message)) {
+      return 'API unreachable (CORS, or the API is not running on :8000)';
+    }
+    return err.message;
+  }
+  return String(err);
+}
 
 function lineToCreatePayload(line: LineGeometry): ApiLineCreatePayload {
   const a = line.points[0] ?? [0, 0];
@@ -85,7 +97,7 @@ export default function App({ bootstrap }: AppProps) {
   const trackStats: TrackStats | undefined = bootstrap?.trackStats;
 
   const apiCfg = React.useMemo<ApiBaseConfig>(
-    () => ({ baseUrl: bootstrap?.apiBaseUrl ?? '' }),
+    () => ({ baseUrl: resolveApiBaseUrl(bootstrap?.apiBaseUrl) }),
     [bootstrap?.apiBaseUrl],
   );
   const apiCfgRef = React.useRef(apiCfg);
@@ -101,6 +113,7 @@ export default function App({ bootstrap }: AppProps) {
   const [suggestions, setSuggestions] = React.useState<Suggestion[] | undefined>(
     bootstrap?.suggestions,
   );
+  const [apiError, setApiError] = React.useState<string | null>(null);
   const lastProjectIdRef = React.useRef<string>(spec.projectId);
 
   // Server-truth refs. Keyed by *server* id once a line has been persisted.
@@ -109,6 +122,11 @@ export default function App({ bootstrap }: AppProps) {
   // the diff effect skips PATCH/DELETE attempts against a not-yet-created row.
   const serverLinesRef = React.useRef<Map<string, LineGeometry>>(new Map());
   const pendingCreatesRef = React.useRef<Set<string>>(new Set());
+  // Backoff bookkeeping: tempId → wall-clock of last failed POST so the diff
+  // effect doesn't hammer the API while it's down. The line stays visible
+  // in the model — we just defer the retry.
+  const lastCreateAttemptRef = React.useRef<Map<string, number>>(new Map());
+  const retryTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const patchTimersRef = React.useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const inflightPatchRef = React.useRef<Map<string, AbortController>>(new Map());
   const countsTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -130,6 +148,8 @@ export default function App({ bootstrap }: AppProps) {
     setSuggestions(bootstrap?.suggestions);
     serverLinesRef.current = new Map(initialLines.map((l) => [l.id, l]));
     pendingCreatesRef.current.clear();
+    lastCreateAttemptRef.current.clear();
+    setApiError(null);
     for (const t of patchTimersRef.current.values()) clearTimeout(t);
     patchTimersRef.current.clear();
     for (const c of inflightPatchRef.current.values()) c.abort();
@@ -190,6 +210,19 @@ export default function App({ bootstrap }: AppProps) {
       if (pendingCreatesRef.current.has(line.id)) continue;
       const [a, b] = [line.points[0], line.points[line.points.length - 1]];
       if (!a || !b) continue;
+      const lastAttempt = lastCreateAttemptRef.current.get(line.id) ?? 0;
+      const sinceLast = Date.now() - lastAttempt;
+      if (sinceLast < CREATE_RETRY_MS) {
+        // Schedule a wake so the effect re-runs once backoff elapses.
+        if (!retryTimerRef.current) {
+          retryTimerRef.current = setTimeout(() => {
+            retryTimerRef.current = null;
+            // Touching model triggers the effect; identity-preserving update.
+            setModel((m) => ({ ...m }));
+          }, CREATE_RETRY_MS - sinceLast);
+        }
+        continue;
+      }
       pendingCreatesRef.current.add(line.id);
       const tempId = line.id;
       apiCreateLine(apiCfgRef.current, spec.projectId, lineToCreatePayload(line))
@@ -206,6 +239,7 @@ export default function App({ bootstrap }: AppProps) {
             ],
           };
           serverLinesRef.current.set(serverId, adapted);
+          lastCreateAttemptRef.current.delete(tempId);
           // Swap the temp id in the model with the server id so subsequent
           // PATCH/DELETE in the diff effect address the persisted row.
           setModel((current) => {
@@ -221,18 +255,15 @@ export default function App({ bootstrap }: AppProps) {
                 current.selectedLineId === tempId ? serverId : current.selectedLineId,
             };
           });
+          setApiError(null);
           scheduleCountsRefresh();
         })
         .catch((err) => {
           // eslint-disable-next-line no-console
           console.error('create line failed', err);
-          // Roll back the optimistic add.
-          setModel((current) => ({
-            ...current,
-            lines: current.lines.filter((l) => l.id !== tempId),
-            selectedLineId:
-              current.selectedLineId === tempId ? null : current.selectedLineId,
-          }));
+          // Keep the line visible — the diff effect will retry after backoff.
+          lastCreateAttemptRef.current.set(tempId, Date.now());
+          setApiError(`Couldn’t save line — ${describeFetchErr(err)}. Will retry.`);
         })
         .finally(() => {
           pendingCreatesRef.current.delete(tempId);
@@ -381,6 +412,18 @@ export default function App({ bootstrap }: AppProps) {
 
   return (
     <div className="overlay-shell">
+      {apiError && (
+        <div className="api-error-banner" role="alert">
+          <span>{apiError}</span>
+          <button
+            type="button"
+            aria-label="Dismiss"
+            onClick={() => setApiError(null)}
+          >
+            ×
+          </button>
+        </div>
+      )}
       <header className="overlay-header">
         <div>
           <p className="eyebrow">Counting line editor</p>

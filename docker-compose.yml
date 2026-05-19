@@ -23,9 +23,11 @@ services:
       LOCAL_STORAGE_ROOT: /data
       JOB_RUNNER: local
       ENV: dev
-      # Must include the Streamlit origin so the embedded React iframe can
-      # call FastAPI directly (the iframe is served by Streamlit at :8501).
-      CORS_ORIGINS: "http://localhost:8501,http://localhost:8000"
+      # The iframe's effective origin depends on where Streamlit is reached
+      # from (localhost on a laptop, a public IP/host on a VPS). Wildcard
+      # avoids baking the deploy host into a static list; the API holds no
+      # cookies, so the "*" + credentials trade-off doesn't apply.
+      CORS_ORIGINS: "*"
     ports: ["8000:8000"]
     volumes:
       - storage:/data
@@ -76,8 +78,12 @@ services:
       context: ./frontend
     environment:
       API_URL: http://api:8000
-      # PUBLIC_API_URL must be reachable from the user's browser (not Docker internal)
-      PUBLIC_API_URL: http://localhost:8000
+      # PUBLIC_API_URL must be reachable from the user's browser. Leave
+      # unset for single-host deployments — the React iframe will derive
+      # the API host from window.location (port 8000). Set this only when
+      # the API lives on a different host than Streamlit (split DNS, custom
+      # ingress, HTTPS termination, etc.).
+      # PUBLIC_API_URL: https://api.example.com
       STREAMLIT_SERVER_MAX_UPLOAD_SIZE: "102400"
     ports: ["8501:8501"]
     volumes:

@@ -41,12 +41,6 @@ def create_project(name: str, description: str = "") -> Dict:
         _raise(r)
         return r.json()
 
-def delete_project(project_id: str):
-    with _client() as c:
-        r = c.delete(f"/projects/{project_id}")
-        _raise(r)
-
-
 # --- videos ---
 def list_videos(project_id: str) -> List[Dict]:
     with _client() as c:

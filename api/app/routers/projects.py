@@ -6,7 +6,6 @@ from typing import List
 from ..db import get_db
 from ..models import Project, Video, CountingLine
 from ..schemas import ProjectCreate, ProjectOut, WorkspaceSummary
-from ..services.storage import get_storage
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -31,20 +30,6 @@ def get_project(project_id: str, db: Session = Depends(get_db)):
     if not p:
         raise HTTPException(404, "project not found")
     return p
-
-
-@router.delete("/{project_id}", status_code=204)
-def delete_project(project_id: str, db: Session = Depends(get_db)):
-    p = db.get(Project, project_id)
-    if not p:
-        raise HTTPException(404, "project not found")
-    db.delete(p)
-    db.commit()
-    # Best-effort storage cleanup
-    try:
-        get_storage().delete_prefix(f"projects/{project_id}")
-    except Exception:
-        pass
 
 
 @router.get("/{project_id}/summary", response_model=WorkspaceSummary)

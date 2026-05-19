@@ -57,6 +57,7 @@ def claim_one_queued():
             text("""UPDATE videos
                     SET status='analyzing',
                         started_analyzing_at=:ts,
+                        last_heartbeat_at=:ts,
                         progress_pct=0
                     WHERE id=:id"""),
             {"id": row.id, "ts": datetime.utcnow()},
@@ -83,6 +84,7 @@ def fetch_video(video_id: str):
                     SET status='analyzing',
                         error_message=NULL,
                         started_analyzing_at=:ts,
+                        last_heartbeat_at=:ts,
                         progress_pct=0
                     WHERE id=:id"""),
             {"id": video_id, "ts": datetime.utcnow()},
@@ -109,7 +111,8 @@ def mark_analyzed(video_id: str, meta: dict):
                 num_frames=:num_frames,
                 num_tracks=:num_tracks,
                 scene_frames=:scene_frames,
-                analyzed_at=:analyzed_at
+                analyzed_at=:analyzed_at,
+                last_heartbeat_at=:analyzed_at
             WHERE id=:id
         """), {
             "id": video_id,
@@ -128,16 +131,25 @@ def mark_error(video_id: str, err: Exception):
     msg = f"{type(err).__name__}: {err}\n\n{traceback.format_exc()[-2000:]}"
     with engine.begin() as conn:
         conn.execute(text("""
-            UPDATE videos SET status='error', error_message=:msg, progress_pct=NULL WHERE id=:id
-        """), {"id": video_id, "msg": msg})
+            UPDATE videos
+            SET status='error', error_message=:msg, progress_pct=NULL,
+                last_heartbeat_at=:ts
+            WHERE id=:id
+        """), {"id": video_id, "msg": msg, "ts": datetime.utcnow()})
 
 
 def update_progress(video_id: str, pct: float):
-    """Lightweight progress update (called every ~50 frames during analysis)."""
+    """Lightweight progress update (called every ~50 frames during analysis).
+
+    Doubles as the heartbeat the API reaper watches.
+    """
     with engine.begin() as conn:
         conn.execute(
-            text("UPDATE videos SET progress_pct=:pct WHERE id=:id"),
-            {"pct": round(pct, 4), "id": video_id},
+            text(
+                "UPDATE videos SET progress_pct=:pct, last_heartbeat_at=:ts "
+                "WHERE id=:id"
+            ),
+            {"pct": round(pct, 4), "ts": datetime.utcnow(), "id": video_id},
         )
 
 

@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     env: Literal["dev", "prod"] = "dev"
     cors_origins: str = "*"
 
+    # Reaper: flip videos stuck in status='analyzing' (no heartbeat for this
+    # many seconds) to status='error' so the operator can re-queue.
+    stale_claim_threshold_seconds: int = 900
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

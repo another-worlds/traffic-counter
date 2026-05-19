@@ -215,6 +215,14 @@ def worker_status() -> List[Dict]:
         return r.json()
 
 
+def reap_stale_jobs() -> Dict:
+    """Force the API reaper to flip every stuck analyzing-row to error."""
+    with _client() as c:
+        r = c.post("/worker/reap-stale")
+        _raise(r)
+        return r.json()
+
+
 def workspace_summary(project_id: str) -> Dict:
     """Single-query aggregate stats for a workspace."""
     with _client() as c:

@@ -159,7 +159,7 @@ with left:
     q3.metric("Running now", running_now)
     q4.metric("Queue health", f"{queue_health_ratio*100:.0f}%")
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1:
         if st.button("▶ Queue all pending", disabled=unstarted == 0, use_container_width=True):
             try:
@@ -169,8 +169,20 @@ with left:
             except api.APIError as exc:
                 st.error(str(exc))
     with c2:
-        st.button("⟳ Refresh now", use_container_width=True, on_click=lambda: None)
+        if st.button("🧹 Clear stuck jobs", use_container_width=True):
+            try:
+                resp = api.reap_stale_jobs()
+                count = resp.get("count", 0)
+                if count:
+                    st.success(f"Cleared {count} stuck job(s). They now show as Error — click Analyze to retry.")
+                else:
+                    st.info("No stuck jobs.")
+                st.rerun()
+            except api.APIError as exc:
+                st.error(str(exc))
     with c3:
+        st.button("⟳ Refresh now", use_container_width=True, on_click=lambda: None)
+    with c4:
         auto_refresh = st.checkbox("Auto-refresh (3s)", value=in_queue > 0)
 with right:
     st.markdown("### Live Queue")

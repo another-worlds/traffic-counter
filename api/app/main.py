@@ -1,11 +1,23 @@
+import asyncio
+import logging
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 
 from .config import settings
-from .db import init_db
+from .db import SessionLocal, init_db
 from .routers import projects, videos, lines, analysis, worker, upload_tus, local_folder
+from .services.reaper import reap_stale_claims
+
+REAPER_INTERVAL_S = 60
+log = logging.getLogger("api.reaper")
+
+
+def _reap_once() -> list[str]:
+    with SessionLocal() as db:
+        return reap_stale_claims(db, settings.stale_claim_threshold_seconds)
 
 
 def create_app() -> FastAPI:
@@ -46,8 +58,31 @@ def create_app() -> FastAPI:
     app.include_router(local_folder.router)
 
     @app.on_event("startup")
-    def _startup():
+    async def _startup():
         init_db()
+        # One-shot pass first so a fresh deploy clears the existing backlog
+        # of rows the previous (heartbeat-less) workers left behind.
+        try:
+            with SessionLocal() as db:
+                reaped = reap_stale_claims(db, settings.stale_claim_threshold_seconds)
+            if reaped:
+                log.info("startup reaper: flipped %d stale video(s) to error", len(reaped))
+        except Exception:
+            log.exception("startup reaper failed")
+
+        async def _reaper_loop():
+            while True:
+                await asyncio.sleep(REAPER_INTERVAL_S)
+                try:
+                    # Offload the blocking SQLAlchemy call so we don't stall the
+                    # event loop while it talks to Postgres.
+                    reaped = await asyncio.to_thread(_reap_once)
+                    if reaped:
+                        log.info("reaper: flipped %d stale video(s) to error", len(reaped))
+                except Exception:
+                    log.exception("reaper loop iteration failed")
+
+        asyncio.create_task(_reaper_loop())
 
     @app.get("/healthz")
     def healthz():

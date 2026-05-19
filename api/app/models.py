@@ -46,6 +46,8 @@ class Video(Base):
     # Analysis progress: 0.0–1.0 while analyzing, reset to None when done/error
     progress_pct = Column(Float, default=0.0)
     started_analyzing_at = Column(DateTime)
+    # Bumped on every progress update so the API can detect abandoned claims.
+    last_heartbeat_at = Column(DateTime, nullable=True, index=True)
     tus_upload_id = Column(String(64), nullable=True, index=True)
 
     # Scene-based keyframes extracted during analysis.

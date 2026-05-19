@@ -44,6 +44,8 @@ def _safe_add_columns():
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS size_bytes BIGINT",
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS progress_pct FLOAT DEFAULT 0.0",
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS started_analyzing_at TIMESTAMP",
+        "ALTER TABLE videos ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMP",
+        "CREATE INDEX IF NOT EXISTS ix_videos_last_heartbeat_at ON videos(last_heartbeat_at)",
         "ALTER TABLE projects ADD COLUMN IF NOT EXISTS last_exported_at TIMESTAMP",
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS tus_upload_id VARCHAR(64)",
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS scene_frames JSON DEFAULT '[]'",

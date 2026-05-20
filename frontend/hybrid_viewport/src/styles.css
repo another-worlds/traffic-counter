@@ -152,6 +152,25 @@ h2 { font-size: 15px; margin: 0 0 10px; }
   filter: drop-shadow(0 0 14px rgba(255, 75, 75, 0.7));
 }
 
+.viewport-side-count {
+  font: 600 13px/1 'Source Sans Pro', 'Segoe UI', system-ui, sans-serif;
+  paint-order: stroke fill;
+  stroke: rgba(0, 0, 0, 0.7);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+  text-anchor: middle;
+  dominant-baseline: middle;
+  pointer-events: none;
+  user-select: none;
+}
+.viewport-side-arrow {
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+.viewport-side-arrow-head {
+  stroke: none;
+}
+
 .frame-slider {
   width: 100%;
   margin: 12px 0 0;

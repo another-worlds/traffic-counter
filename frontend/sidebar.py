@@ -169,30 +169,8 @@ def render_sidebar() -> Optional[dict]:
                         st.progress(v["progress_pct"])
 
         st.divider()
-
-        # --- contextual actions ---
-        analyzed_ids = [v["id"] for v in videos if v["status"] == "analyzed"]
-
-        try:
-            lines = api.list_lines(ws["id"])
-        except Exception:
-            lines = []
-
-        if analyzed_ids and lines:
-            with st.expander("📊 Quick export"):
-                if st.button("Export all analyzed videos", use_container_width=True, key="sidebar_export_btn"):
-                    try:
-                        data = api.export_xlsx(ws["id"], analyzed_ids, [ln["id"] for ln in lines])
-                        fname = f"counts-{ws['name'].replace(' ', '_')}.xlsx"
-                        st.download_button(
-                            "💾 Download XLSX",
-                            data=data,
-                            file_name=fname,
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            use_container_width=True,
-                            key="sidebar_dl_btn",
-                        )
-                    except Exception as e:
-                        st.error(str(e))
+        # Per-video exports live on the Count & Export page now — the
+        # previous "Quick export" sidebar button assumed one shared line
+        # set across the whole workspace, which is no longer the model.
 
     return st.session_state.get("workspace")

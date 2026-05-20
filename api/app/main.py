@@ -10,8 +10,10 @@ from .config import settings
 from .db import SessionLocal, init_db
 from .routers import projects, videos, lines, analysis, worker, upload_tus, local_folder
 from .services.reaper import reap_stale_claims
+from .services import xlsx_jobs
 
 REAPER_INTERVAL_S = 60
+EXPORT_GC_MAX_AGE_MIN = 120
 log = logging.getLogger("api.reaper")
 
 
@@ -81,6 +83,12 @@ def create_app() -> FastAPI:
                         log.info("reaper: flipped %d stale video(s) to error", len(reaped))
                 except Exception:
                     log.exception("reaper loop iteration failed")
+                try:
+                    dropped = xlsx_jobs.gc_old_jobs(max_age_minutes=EXPORT_GC_MAX_AGE_MIN)
+                    if dropped:
+                        log.info("janitor: dropped %d old export(s)", dropped)
+                except Exception:
+                    log.exception("export janitor iteration failed")
 
         asyncio.create_task(_reaper_loop())
 

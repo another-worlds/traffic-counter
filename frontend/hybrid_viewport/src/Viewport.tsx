@@ -166,6 +166,92 @@ export default function Viewport({
                     </g>
                   );
                 })()}
+                {/* Per-side direction labels: arrow perpendicular to the line,
+                    count text drawn parallel. Hidden while the user is
+                    dragging so the moving line stays readable. */}
+                {(() => {
+                  if (model.interaction.kind !== 'idle') return null;
+                  const lc = counts?.per_line?.[line.id];
+                  if (!lc) return null;
+                  const pos = lc.by_direction?.positive ?? 0;
+                  const neg = lc.by_direction?.negative ?? 0;
+                  if (pos + neg === 0) return null;
+
+                  const dx = b[0] - a[0];
+                  const dy = b[1] - a[1];
+                  const len = Math.hypot(dx, dy) || 1;
+                  // Server convention (screen coords, Y down): the unit
+                  // vector pointing to the "positive" side is (-dy, dx)/|AB|.
+                  const nx = -dy / len;
+                  const ny = dx / len;
+
+                  // Keep the text reading left-to-right by flipping the
+                  // rotation when the line tilts past vertical.
+                  let theta = Math.atan2(dy, dx);
+                  if (theta > Math.PI / 2 || theta < -Math.PI / 2) theta += Math.PI;
+                  const deg = (theta * 180) / Math.PI;
+
+                  const arrowGap = 10;
+                  const arrowLen = 16;
+                  const textGap = arrowGap + arrowLen + 12;
+
+                  function arrowHead(tipX: number, tipY: number, dirX: number, dirY: number) {
+                    const size = 6;
+                    // Tip plus the two base corners on the perpendicular axis.
+                    const baseX = tipX - dirX * size * 1.4;
+                    const baseY = tipY - dirY * size * 1.4;
+                    const px = -dirY;
+                    const py = dirX;
+                    const left = `${baseX + px * size},${baseY + py * size}`;
+                    const right = `${baseX - px * size},${baseY - py * size}`;
+                    return `${tipX},${tipY} ${left} ${right}`;
+                  }
+
+                  function renderSide(side: 1 | -1, count: number) {
+                    if (count === 0) return null;
+                    const dirX = side * nx;
+                    const dirY = side * ny;
+                    const startX = midX + dirX * arrowGap;
+                    const startY = midY + dirY * arrowGap;
+                    const tipX = midX + dirX * (arrowGap + arrowLen);
+                    const tipY = midY + dirY * (arrowGap + arrowLen);
+                    const textX = midX + dirX * textGap;
+                    const textY = midY + dirY * textGap;
+                    return (
+                      <g key={side} style={{ pointerEvents: 'none' }}>
+                        <line
+                          className="viewport-side-arrow"
+                          x1={startX}
+                          y1={startY}
+                          x2={tipX}
+                          y2={tipY}
+                          stroke={line.color}
+                        />
+                        <polygon
+                          className="viewport-side-arrow-head"
+                          fill={line.color}
+                          points={arrowHead(tipX, tipY, dirX, dirY)}
+                        />
+                        <text
+                          className="viewport-side-count"
+                          x={textX}
+                          y={textY}
+                          fill={line.color}
+                          transform={`rotate(${deg} ${textX} ${textY})`}
+                        >
+                          {count}
+                        </text>
+                      </g>
+                    );
+                  }
+
+                  return (
+                    <>
+                      {renderSide(+1, pos)}
+                      {renderSide(-1, neg)}
+                    </>
+                  );
+                })()}
               </g>
             );
           })}

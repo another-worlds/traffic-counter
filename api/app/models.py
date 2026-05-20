@@ -20,7 +20,7 @@ class Project(Base):
     last_exported_at = Column(DateTime)
 
     videos = relationship("Video", back_populates="project", cascade="all, delete-orphan")
-    lines = relationship("CountingLine", back_populates="project", cascade="all, delete-orphan")
+    # Lines now hang off videos, not projects; see Video.lines / CountingLine.video_id.
 
 
 class Video(Base):
@@ -63,6 +63,9 @@ class Video(Base):
     analyzed_at = Column(DateTime)
 
     project = relationship("Project", back_populates="videos")
+    lines = relationship(
+        "CountingLine", back_populates="video", cascade="all, delete-orphan"
+    )
 
 
 class TusUpload(Base):
@@ -81,11 +84,20 @@ class CountingLine(Base):
     __tablename__ = "counting_lines"
 
     id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
-    project_id = Column(UUID(as_uuid=False), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
+    # Lines now belong to a specific video. The legacy project_id column
+    # remains in the schema (nullable) for backwards-compatibility during
+    # the migration window, but is no longer written by the API.
+    project_id = Column(UUID(as_uuid=False), ForeignKey("projects.id", ondelete="CASCADE"), nullable=True)
+    video_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("videos.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     name = Column(String(255), nullable=False)
     # JSON: {"a": [x, y], "b": [x, y]} in source-video pixel coordinates
     points = Column(JSON, nullable=False)
     color = Column(String(16), default="#e24b4a")
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
-    project = relationship("Project", back_populates="lines")
+    video = relationship("Video", back_populates="lines")

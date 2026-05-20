@@ -54,7 +54,8 @@ class LineCreate(BaseModel):
 
 class LineOut(BaseModel):
     id: str
-    project_id: str
+    video_id: str
+    project_id: Optional[str] = None
     name: str
     points: Dict[str, List[float]]
     color: str
@@ -65,7 +66,8 @@ class LineOut(BaseModel):
 
 
 class CountRequest(BaseModel):
-    video_ids: List[str]
+    # Single-video scope. Server validates that every line_id belongs to the
+    # path-param video.
     line_ids: List[str]
 
 
@@ -119,7 +121,6 @@ class LineUpdate(BaseModel):
 
 
 class SuggestLinesRequest(BaseModel):
-    video_ids: List[str]
     n: int = 3
 
 

@@ -74,19 +74,19 @@ async function request<T>(
   return (await res.json()) as T;
 }
 
-export function listLines(cfg: ApiBaseConfig, projectId: string, signal?: AbortSignal) {
-  return request<ApiLine[]>(cfg, `/projects/${encodeURIComponent(projectId)}/lines`, { signal });
+export function listLines(cfg: ApiBaseConfig, videoId: string, signal?: AbortSignal) {
+  return request<ApiLine[]>(cfg, `/videos/${encodeURIComponent(videoId)}/lines`, { signal });
 }
 
 export function createLine(
   cfg: ApiBaseConfig,
-  projectId: string,
+  videoId: string,
   payload: ApiLineCreatePayload,
   signal?: AbortSignal,
 ) {
   return request<ApiLine>(
     cfg,
-    `/projects/${encodeURIComponent(projectId)}/lines`,
+    `/videos/${encodeURIComponent(videoId)}/lines`,
     { method: 'POST', body: JSON.stringify(payload), signal },
   );
 }
@@ -114,26 +114,26 @@ export function deleteLine(cfg: ApiBaseConfig, lineId: string, signal?: AbortSig
 
 export function computeCounts(
   cfg: ApiBaseConfig,
-  projectId: string,
-  body: { video_ids: string[]; line_ids: string[] },
+  videoId: string,
+  body: { line_ids: string[] },
   signal?: AbortSignal,
 ) {
   return request<CountsApiResponse>(
     cfg,
-    `/projects/${encodeURIComponent(projectId)}/counts`,
+    `/videos/${encodeURIComponent(videoId)}/counts`,
     { method: 'POST', body: JSON.stringify(body), signal },
   );
 }
 
 export function requestSuggestions(
   cfg: ApiBaseConfig,
-  projectId: string,
-  body: { video_ids: string[]; n: number },
+  videoId: string,
+  body: { n: number },
   signal?: AbortSignal,
 ) {
   return request<Suggestion[]>(
     cfg,
-    `/projects/${encodeURIComponent(projectId)}/suggest-lines`,
+    `/videos/${encodeURIComponent(videoId)}/suggest-lines`,
     { method: 'POST', body: JSON.stringify(body), signal },
   );
 }

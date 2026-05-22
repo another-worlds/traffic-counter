@@ -16,6 +16,9 @@ class Project(Base):
     id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
     name = Column(String(255), nullable=False)
     description = Column(Text)
+    # Set by the YAML auto-sync to the absolute folder this workspace owns.
+    # NULL for workspaces created manually through the UI.
+    local_source_root = Column(String(1024), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_exported_at = Column(DateTime)
 

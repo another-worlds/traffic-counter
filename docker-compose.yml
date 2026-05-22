@@ -23,6 +23,7 @@ services:
       LOCAL_STORAGE_ROOT: /data
       JOB_RUNNER: local
       ENV: dev
+      SOURCES_CONFIG: /app/config/sources.yaml
       # The iframe's effective origin depends on where Streamlit is reached
       # from (localhost on a laptop, a public IP/host on a VPS). Wildcard
       # avoids baking the deploy host into a static list; the API holds no
@@ -32,6 +33,12 @@ services:
     volumes:
       - storage:/data
       - ./api:/app
+      - ./config:/app/config:ro
+      # The yadisk root the user mounted on the host gets passed through at
+      # the same path so the absolute paths in sources.yaml resolve inside
+      # the container without remapping. Override via .env if you mount
+      # somewhere else.
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
     depends_on:
       db:
         condition: service_healthy
@@ -53,7 +60,7 @@ services:
       - storage:/data
       - ./worker:/app
       - model_cache:/root/.cache
-      - /mnt/yandex-videos:/mnt/yandex-videos:ro
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
     depends_on:
       db:
         condition: service_healthy
@@ -63,12 +70,15 @@ services:
       context: ./watcher
     environment:
       API_URL: http://api:8000
-      WATCH_PATH: /mnt/yandex-videos
+      SOURCES_CONFIG: /app/config/sources.yaml
+      # WATCH_PATH is a legacy fallback used only when SOURCES_CONFIG is missing.
+      WATCH_PATH: ${YADISK_HOST_PATH:-/mnt/yandex-videos}
       AUTO_ANALYZE: "false"   # set to "true" to auto-queue new videos
       SCAN_INTERVAL: "60"     # full rescan every 60 s
       STABILITY_WAIT: "5"     # seconds to wait before registering a new file
     volumes:
-      - /mnt/yandex-videos:/mnt/yandex-videos:ro
+      - ./config:/app/config:ro
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
     depends_on:
       - api
     restart: unless-stopped

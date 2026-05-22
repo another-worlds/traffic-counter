@@ -1,3 +1,4 @@
 watchdog[watchmedo]>=3.0.0
 httpx>=0.25.0
 opencv-python-headless>=4.10.0
+PyYAML>=6.0

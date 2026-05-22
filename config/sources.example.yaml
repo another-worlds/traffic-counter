@@ -1,0 +1,18 @@
+# Source-folders config for the auto-import feature.
+#
+# `yadisk` is the absolute path of one Yandex.Disk sync root mounted on
+# the host (and into the api / watcher containers at the same path).
+#
+# Each entry under `workspaces` maps a workspace name (as it will appear
+# in the Streamlit sidebar) to a subfolder under `yadisk`. The API
+# auto-creates a Project row per entry on startup; the watcher only
+# registers videos that live inside one of these listed subfolders.
+#
+# Editing this file requires restarting the api + watcher containers
+# (`docker compose restart api watcher`).
+
+yadisk: /mnt/disk1/yandexsync1
+
+workspaces:
+  tashkent-MP: tashkent-450
+  tashkent-ODD: tashkent-ODD

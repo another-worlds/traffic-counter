@@ -10,6 +10,7 @@ from .config import settings
 from .db import SessionLocal, init_db
 from .routers import projects, videos, lines, analysis, worker, upload_tus, local_folder
 from .services.reaper import reap_stale_claims
+from .services import sources as sources_svc
 from .services import xlsx_jobs
 
 REAPER_INTERVAL_S = 60
@@ -62,6 +63,29 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def _startup():
         init_db()
+
+        # Reconcile YAML-declared workspaces with the DB so the Streamlit
+        # sidebar lists them from the first request. Degraded mode (file
+        # missing or malformed) logs once and keeps the app booting.
+        try:
+            cfg = sources_svc.load_sources()
+        except ValueError as exc:
+            log.warning("sources: %s — auto-import disabled", exc)
+            cfg = None
+        app.state.sources_config = cfg
+        if cfg is None:
+            log.info("sources: config file missing or empty, auto-import disabled")
+        else:
+            try:
+                with SessionLocal() as db:
+                    report = sources_svc.sync_workspaces(db, cfg)
+                log.info(report.summary())
+                if report.errors:
+                    for err in report.errors:
+                        log.warning("sources: %s", err)
+            except Exception:
+                log.exception("sources: workspace sync failed")
+
         # One-shot pass first so a fresh deploy clears the existing backlog
         # of rows the previous (heartbeat-less) workers left behind.
         try:

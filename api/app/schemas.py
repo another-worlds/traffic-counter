@@ -12,6 +12,10 @@ class ProjectOut(BaseModel):
     id: str
     name: str
     description: Optional[str]
+    # Set on workspaces auto-created from config/sources.yaml — the
+    # absolute folder this workspace owns on disk. NULL for manually-
+    # created workspaces.
+    local_source_root: Optional[str] = None
     created_at: datetime
     last_exported_at: Optional[datetime] = None
 

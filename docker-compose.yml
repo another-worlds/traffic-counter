@@ -44,6 +44,12 @@ services:
         condition: service_healthy
 
   worker:
+    # No `container_name` or port bindings — safe to run multiple
+    # replicas via `docker compose up -d --scale worker=N`. To pick a
+    # safe N for this GPU run `./scripts/gpu_probe.sh`; to apply it
+    # run `./scripts/scale_workers.sh <N>`. Job claiming is serialized
+    # by Postgres (SELECT … FOR UPDATE SKIP LOCKED in worker/main.py),
+    # so replicas never race for the same video.
     build:
       context: ./worker
     runtime: nvidia

@@ -11,6 +11,7 @@ configured environment.
 """
 from __future__ import annotations
 import os
+import socket
 import sys
 import time
 import logging
@@ -174,7 +175,7 @@ def handle(video: dict):
 
 
 def poll_loop():
-    log.info("worker started in poll mode")
+    log.info("worker started in poll mode (host=%s pid=%d)", socket.gethostname(), os.getpid())
     while True:
         try:
             v = claim_one_queued()

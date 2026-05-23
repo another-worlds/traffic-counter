@@ -186,7 +186,7 @@ def plan_segments(video_id: str, fps: float, num_frames: int, segment_duration_s
                     (id, video_id, segment_idx, status,
                      start_frame, end_frame, start_time_s, end_time_s)
                 VALUES
-                    (gen_random_uuid()::text, :video_id, :seg_idx, 'pending',
+                    (gen_random_uuid(), :video_id, :seg_idx, 'pending',
                      :start_frame, :end_frame, :start_time_s, :end_time_s)
                 ON CONFLICT (video_id, segment_idx) DO NOTHING
             """), {

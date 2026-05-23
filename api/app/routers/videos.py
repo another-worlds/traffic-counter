@@ -98,9 +98,34 @@ def get_frame_url(video_id: str, db: Session = Depends(get_db)):
     return {"url": storage.signed_url(k, expires_minutes=60)}
 
 
+# Hard cap on how many scene-keyframes the frames endpoint will ever
+# advertise to clients. Long CCTV videos can have hundreds of cuts;
+# inlining all of them on the Count & Export page used to OOM the
+# frontend container. 30 is enough for a usable scrubber strip without
+# overwhelming the API.
+MAX_RESPONSE_FRAMES = 30
+
+
+def _evenly_sample(items: list, k: int) -> list:
+    """Pick k items evenly spaced across the input (inclusive endpoints)."""
+    if k <= 0 or not items:
+        return []
+    if len(items) <= k:
+        return list(items)
+    if k == 1:
+        return [items[len(items) // 2]]
+    step = (len(items) - 1) / (k - 1)
+    return [items[round(i * step)] for i in range(k)]
+
+
 @router.get("/videos/{video_id}/frames")
 def list_video_frames(video_id: str, db: Session = Depends(get_db)):
     """Return the list of scene-based keyframe URLs for the given video.
+
+    Capped at MAX_RESPONSE_FRAMES evenly-spaced entries so already-analyzed
+    long videos (which may have 200+ scene cuts on disk) don't trigger a
+    page-load avalanche. The surplus JPEGs stay on disk untouched but the
+    endpoint never advertises them.
 
     For videos analyzed before scene detection was added, falls back to the
     single legacy frame.jpg so the viewport still works without re-analysis.
@@ -109,7 +134,7 @@ def list_video_frames(video_id: str, db: Session = Depends(get_db)):
     if not v:
         raise HTTPException(404, "video not found")
     storage = get_storage()
-    scenes = v.scene_frames if v.scene_frames else []
+    scenes = _evenly_sample(v.scene_frames or [], MAX_RESPONSE_FRAMES)
     if scenes:
         result = []
         for sf in scenes:

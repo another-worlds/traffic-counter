@@ -61,6 +61,10 @@ services:
       MODEL_NAME: /models/yolov8m.pt
       DEVICE: cuda:0
       HALF: "true"
+      # Cap on how many scene-keyframes the worker emits per video.
+      # Long CCTV recordings can otherwise produce 200+ JPEGs which
+      # bloat /data and overwhelm the Count & Export page.
+      MAX_SCENE_FRAMES: "30"
       NVIDIA_VISIBLE_DEVICES: all
     volumes:
       - storage:/data

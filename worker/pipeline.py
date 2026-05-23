@@ -45,6 +45,10 @@ DEVICE = os.environ.get("DEVICE", "cuda:0")
 HALF = os.environ.get("HALF", "true").lower() == "true"
 TRACKER = os.environ.get("TRACKER", "bytetrack.yaml")
 FRAME_STRIDE = int(os.environ.get("FRAME_STRIDE", "1"))  # process every Nth frame (1=all)
+# Cap on how many scene-keyframes the worker will emit per video. Long
+# videos with lots of lighting changes can otherwise generate 200+ JPEGs,
+# which floods the API + frontend when the user opens Count & Export.
+MAX_SCENE_FRAMES = int(os.environ.get("MAX_SCENE_FRAMES", "30"))
 
 
 def _load_model() -> YOLO:
@@ -107,6 +111,18 @@ def _detect_scenes(video_path: str, fps: float, num_frames: int) -> list:
                 "frame_index_in_video": int(mid_frame),
                 "time_s": round(mid_frame / fps, 2) if fps > 0 else 0.0,
             })
+        # Cap to MAX_SCENE_FRAMES evenly spaced before any JPEG encode/upload.
+        # Reindex so the on-disk filename (`key_scene_frame(..., sf['index'])`)
+        # matches the list position consumers see.
+        if MAX_SCENE_FRAMES >= 1 and len(result) > MAX_SCENE_FRAMES:
+            if MAX_SCENE_FRAMES == 1:
+                sampled = [result[len(result) // 2]]
+            else:
+                step = (len(result) - 1) / (MAX_SCENE_FRAMES - 1)
+                sampled = [result[round(i * step)] for i in range(MAX_SCENE_FRAMES)]
+            for new_i, sf in enumerate(sampled):
+                sf["index"] = new_i
+            result = sampled
         return result
     except Exception:
         return fallback
@@ -228,6 +244,11 @@ def process_video(
 
         # Detect scene/angle changes; extract one representative frame per scene.
         scenes = _detect_scenes(local_video, fps, meta["num_frames"] or 1)
+        # Defensive heartbeat: scene encode on a long, slow disk can run
+        # tens of seconds; bump progress so the reaper doesn't fire while
+        # we're still post-processing.
+        if on_progress:
+            on_progress(0.95)
         for scene in scenes:
             local_scene_frame = str(td / f"frame_{scene['index']}.jpg")
             _grab_frame(local_video, scene["frame_index_in_video"], local_scene_frame)
@@ -235,6 +256,10 @@ def process_video(
                 key_scene_frame(project_id, video_id, scene["index"]),
                 local_scene_frame,
             )
+            if on_progress:
+                # Re-heartbeat after each scene encode for very long videos
+                # where even 30 frames may take a couple of minutes total.
+                on_progress(0.95)
 
         # Also write scene 0 to the legacy frame.jpg key for backward compat.
         if scenes:

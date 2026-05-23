@@ -155,6 +155,88 @@ def _render_video_selector(ws_id: str, videos: List[Dict[str, Any]]) -> str:
     return st.session_state[sel_key]
 
 
+# Fragment-scoped reruns keep the export poll out of the full-page
+# rerun cycle. The decorator is only available on Streamlit ≥ 1.33;
+# on older versions we degrade to a plain function call and a
+# whole-page rerun (the previous behaviour).
+_fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+if _fragment is not None:
+    _export_block_decorator = _fragment
+else:
+    def _export_block_decorator(fn):
+        return fn
+
+
+@_export_block_decorator
+def _export_block(selected_video_id: str, line_ids_for_export: List[str]) -> None:
+    """Render the XLSX-export button + status + download.
+
+    On Streamlit ≥ 1.33 this is a fragment, so polling reruns affect
+    only this widget — the iframe and its frame URLs are not rebuilt.
+    """
+    job_key = f"hybrid_export_job_{selected_video_id}"
+    file_key = f"hybrid_xlsx_{selected_video_id}"
+    name_key = f"hybrid_xlsx_name_{selected_video_id}"
+
+    def _rerun() -> None:
+        # st.rerun(scope="fragment") was added alongside st.fragment;
+        # try the scoped form first, fall back to whole-page rerun.
+        try:
+            st.rerun(scope="fragment")
+        except TypeError:
+            st.rerun()
+
+    col_btn, col_status = st.columns([2, 3])
+    with col_btn:
+        can_export = bool(selected_video_id and line_ids_for_export)
+        if st.button(
+            "Prepare XLSX Export",
+            disabled=not can_export,
+            help="Compute counts and prepare an Excel workbook for download.",
+        ):
+            try:
+                resp = api.start_export(selected_video_id, line_ids_for_export)
+                st.session_state[job_key] = resp["job_id"]
+                st.session_state.pop(file_key, None)
+                _rerun()
+            except api.APIError as exc:
+                st.error(str(exc))
+
+    with col_status:
+        job_id = st.session_state.get(job_key)
+        if job_id and not st.session_state.get(file_key):
+            try:
+                status = api.get_export_status(job_id)
+            except api.APIError as exc:
+                st.error(str(exc))
+                st.session_state.pop(job_key, None)
+            else:
+                if status["status"] in ("pending", "running"):
+                    st.info(f"Preparing… ({status['status']})")
+                    time.sleep(1.5)
+                    _rerun()
+                elif status["status"] == "error":
+                    st.error(f"Export failed: {status.get('error') or 'unknown error'}")
+                    st.session_state.pop(job_key, None)
+                elif status["status"] == "done":
+                    try:
+                        st.session_state[file_key] = api.download_export(job_id)
+                        st.session_state[name_key] = status.get("filename", "counts.xlsx")
+                    except api.APIError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success("Ready.")
+
+        xlsx_bytes = st.session_state.get(file_key)
+        if xlsx_bytes:
+            st.download_button(
+                "📥 Download XLSX",
+                data=xlsx_bytes,
+                file_name=st.session_state.get(name_key) or "counts.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+
 def render_page() -> None:
     """Render the hybrid count-and-export page."""
     st.set_page_config(page_title="Count & Export (Hybrid)", page_icon="📏", layout="wide")
@@ -188,13 +270,18 @@ def render_page() -> None:
     lines = api.list_lines(selected_video_id)
     spec = build_viewport_spec(ws, preview_video, lines)
 
-    # Fetch scene-based keyframes + overlay asset URLs for the selected video.
-    # Bytes are inlined as data: URIs so the browser never has to reach the API
-    # directly — see _fetch_asset_data_url for the why.
+    # Fetch scene-based keyframes. The browser loads the JPEGs directly from
+    # `PUBLIC_API_URL` (via `api.file_url`) as the user scrubs — we used to
+    # pre-inline every frame as a base64 data URI but that synchronously
+    # fetched N images at render time and, for long videos with hundreds of
+    # scene cuts, OOM-killed the frontend container. Overlay PNGs
+    # (trajectories, heatmap) stay inlined below since they're one-each and
+    # avoid one round-trip when the iframe boots.
     try:
         raw_frames = api.list_video_frames(preview_video["id"])
         frames_for_bootstrap = [
-            {**f, "url": _maybe_fetch_asset_data_url(f.get("url"))} for f in raw_frames
+            {**f, "url": api.file_url(f["url"]) if f.get("url") else None}
+            for f in raw_frames
         ]
     except Exception:
         frames_for_bootstrap = []
@@ -258,66 +345,19 @@ def render_page() -> None:
     # workspace/video selection or the XLSX export button below.
     render_hybrid_viewport(bootstrap=bootstrap, key=hybrid_key)
 
-    # Export — async job + poll. The previous synchronous POST blocked the
-    # Streamlit script thread long enough for Tornado to drop the websocket;
-    # the page would appear to crash. We now kick off a background xlsx
-    # build, poll the status every 1.5 s, and only then download the bytes.
+    # Export — async job + fragment-scoped poll. The previous version
+    # used a full-page `st.rerun()` every 1.5 s while a job was active,
+    # which re-ran the iframe-bootstrap-building code (including the
+    # per-frame fetch loop above) on every poll. Wrapping the poll in
+    # `st.fragment` confines reruns to the export widget so the rest of
+    # the page stays still; it also stops cleanly when the websocket
+    # disconnects, so closing the tab no longer leaves a background
+    # poll loop hammering the API. Older Streamlit (<1.33) without
+    # `st.fragment` falls back to a no-op decorator.
     st.divider()
     st.subheader("Export")
     line_ids_for_export = [str(l["id"]) for l in lines]
-    job_key = f"hybrid_export_job_{selected_video_id}"
-    file_key = f"hybrid_xlsx_{selected_video_id}"
-    name_key = f"hybrid_xlsx_name_{selected_video_id}"
-
-    col_btn, col_status = st.columns([2, 3])
-    with col_btn:
-        can_export = bool(selected_video_id and line_ids_for_export)
-        if st.button(
-            "Prepare XLSX Export",
-            disabled=not can_export,
-            help="Compute counts and prepare an Excel workbook for download.",
-        ):
-            try:
-                resp = api.start_export(selected_video_id, line_ids_for_export)
-                st.session_state[job_key] = resp["job_id"]
-                st.session_state.pop(file_key, None)
-                st.rerun()
-            except api.APIError as exc:
-                st.error(str(exc))
-
-    with col_status:
-        job_id = st.session_state.get(job_key)
-        if job_id and not st.session_state.get(file_key):
-            try:
-                status = api.get_export_status(job_id)
-            except api.APIError as exc:
-                st.error(str(exc))
-                st.session_state.pop(job_key, None)
-            else:
-                if status["status"] in ("pending", "running"):
-                    st.info(f"Preparing… ({status['status']})")
-                    time.sleep(1.5)
-                    st.rerun()
-                elif status["status"] == "error":
-                    st.error(f"Export failed: {status.get('error') or 'unknown error'}")
-                    st.session_state.pop(job_key, None)
-                elif status["status"] == "done":
-                    try:
-                        st.session_state[file_key] = api.download_export(job_id)
-                        st.session_state[name_key] = status.get("filename", "counts.xlsx")
-                    except api.APIError as exc:
-                        st.error(str(exc))
-                    else:
-                        st.success("Ready.")
-
-        xlsx_bytes = st.session_state.get(file_key)
-        if xlsx_bytes:
-            st.download_button(
-                "📥 Download XLSX",
-                data=xlsx_bytes,
-                file_name=st.session_state.get(name_key) or "counts.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+    _export_block(selected_video_id, line_ids_for_export)
 
 
 render_page()

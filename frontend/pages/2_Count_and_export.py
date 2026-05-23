@@ -56,25 +56,6 @@ def build_viewport_spec(
     )
 
 
-def request_live_counts(video_id: str, line_ids: List[str]) -> Dict[str, Any]:
-    """Request live counts. Returns empty summary when there are no active lines."""
-    if not line_ids:
-        return {"total_unique_tracks": 0, "sum_across_lines": 0, "per_line": []}
-    return api.compute_counts(video_id, line_ids)
-
-
-def _counts_for_react(counts_raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Reshape API counts payload for the React bootstrap."""
-    if not counts_raw:
-        return None
-    per_line_list = counts_raw.get("per_line") or []
-    per_line_map = {str(r["line_id"]): r for r in per_line_list}
-    return {
-        "total_unique_tracks": int(counts_raw.get("total_unique_tracks") or 0),
-        "per_line": per_line_map,
-    }
-
-
 def _absolute_url(rel: Optional[str]) -> Optional[str]:
     if not rel:
         return None
@@ -262,7 +243,6 @@ def render_page() -> None:
     # Hybrid iframe key includes the video id so React fully remounts when the
     # user picks a different video — different bootstrap, different line set.
     hybrid_key = f"hybrid_viewport_{ws_id}_{selected_video_id}"
-    counts_key = f"hybrid_live_counts_{selected_video_id}"
 
     # Streamlit fetches the initial line list for bootstrap only. After mount,
     # the React iframe owns line CRUD and talks to FastAPI directly — see
@@ -299,13 +279,10 @@ def render_page() -> None:
     except Exception:
         track_stats = None
 
-    # Live counts: prefer cached, fall back to fresh compute.
-    if counts_key not in st.session_state and lines:
-        st.session_state[counts_key] = request_live_counts(
-            selected_video_id, [str(l["id"]) for l in lines],
-        )
-    live_counts_raw = st.session_state.get(counts_key)
-
+    # Live counts are computed entirely browser-side by the iframe — see the
+    # mount-time scheduleCountsRefresh() in App.tsx. Pre-fetching them here
+    # used to block the page render for minutes on the first cold-cache call
+    # for a long video and trip httpx's 120s timeout.
     suggestions_key = f"hybrid_suggestions_{selected_video_id}"
     suggestions = st.session_state.get(suggestions_key)
 
@@ -336,7 +313,6 @@ def render_page() -> None:
             "height": int(preview_video.get("height") or 1080),
         },
         "trackStats": track_stats,
-        "counts": _counts_for_react(live_counts_raw),
         "suggestions": suggestions,
     }
 

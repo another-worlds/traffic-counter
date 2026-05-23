@@ -204,6 +204,16 @@ export default function App({ bootstrap }: AppProps) {
     }, COUNTS_DEBOUNCE_MS);
   }, [spec.videoId]);
 
+  // Self-bootstrap counts on mount and on video switch. Streamlit used to
+  // pre-fetch /counts and pass them through `bootstrap.counts`, but that
+  // blocked page render for minutes on long cold-cache videos. The iframe
+  // now owns the initial fetch too — it shows the line editor immediately
+  // while the request is in flight and swaps results in when they arrive.
+  React.useEffect(() => {
+    if (serverLinesRef.current.size === 0) return;
+    scheduleCountsRefresh();
+  }, [spec.videoId, scheduleCountsRefresh]);
+
   // Core sync: diff React lines against server-truth and issue create/patch/delete.
   React.useEffect(() => {
     if (model.interaction.kind !== 'idle') return;

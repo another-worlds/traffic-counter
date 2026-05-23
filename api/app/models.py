@@ -51,6 +51,10 @@ class Video(Base):
     started_analyzing_at = Column(DateTime)
     # Bumped on every progress update so the API can detect abandoned claims.
     last_heartbeat_at = Column(DateTime, nullable=True, index=True)
+    # Incremented by the reaper each time a claim goes stale. The reaper
+    # requeues the row until this hits settings.max_analyze_attempts, then
+    # finally marks it error so a permanently-bad video doesn't loop.
+    analyze_attempts = Column(Integer, default=0, nullable=False, server_default="0")
     tus_upload_id = Column(String(64), nullable=True, index=True)
 
     # Scene-based keyframes extracted during analysis.

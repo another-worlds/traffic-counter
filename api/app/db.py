@@ -46,6 +46,7 @@ def _safe_add_columns():
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS started_analyzing_at TIMESTAMP",
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMP",
         "CREATE INDEX IF NOT EXISTS ix_videos_last_heartbeat_at ON videos(last_heartbeat_at)",
+        "ALTER TABLE videos ADD COLUMN IF NOT EXISTS analyze_attempts INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE projects ADD COLUMN IF NOT EXISTS last_exported_at TIMESTAMP",
         "ALTER TABLE projects ADD COLUMN IF NOT EXISTS local_source_root VARCHAR(1024)",
         "ALTER TABLE videos ADD COLUMN IF NOT EXISTS tus_upload_id VARCHAR(64)",

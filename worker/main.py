@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
+import threading
 import time
 import logging
 import traceback
@@ -140,10 +141,7 @@ def mark_error(video_id: str, err: Exception):
 
 
 def update_progress(video_id: str, pct: float):
-    """Lightweight progress update (called every ~50 frames during analysis).
-
-    Doubles as the heartbeat the API reaper watches.
-    """
+    """Single DB write: bump progress_pct + last_heartbeat_at."""
     with engine.begin() as conn:
         conn.execute(
             text(
@@ -154,19 +152,77 @@ def update_progress(video_id: str, pct: float):
         )
 
 
+# Wall-clock cadence for the heartbeat thread. The reaper's threshold is
+# 30 min by default — pinging every 10 s leaves plenty of margin even if
+# several writes fail in a row.
+HEARTBEAT_INTERVAL_S = float(os.environ.get("WORKER_HEARTBEAT_INTERVAL_S", "10"))
+
+
+class Heartbeat:
+    """Decouples DB heartbeats from the YOLO progress callback.
+
+    The previous design tied last_heartbeat_at writes to "every 50 frames",
+    so when ffmpeg or YOLO stalled on a single batch for >15 min the
+    reaper falsely flagged the video as crashed. This helper runs a
+    daemon thread that writes the latest known progress on the wall
+    clock; the inference loop only needs to set the in-memory value.
+
+    Usage:
+        with Heartbeat(video_id) as hb:
+            process_video(..., on_progress=hb.set_progress)
+    """
+
+    def __init__(self, video_id: str, interval_s: float = HEARTBEAT_INTERVAL_S):
+        self.video_id = video_id
+        self.interval = interval_s
+        self._pct = 0.0
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def set_progress(self, pct: float) -> None:
+        # Single-writer, single-reader → no lock needed for a plain float.
+        self._pct = float(pct)
+
+    def _tick(self) -> None:
+        try:
+            update_progress(self.video_id, self._pct)
+        except Exception:
+            # Never let a DB hiccup kill the heartbeat thread; the next
+            # tick retries. Without this, a transient network blip would
+            # silently freeze last_heartbeat_at and the reaper would fire.
+            log.warning("heartbeat write failed for %s", self.video_id, exc_info=True)
+
+    def _run(self) -> None:
+        while not self._stop.wait(self.interval):
+            self._tick()
+
+    def __enter__(self) -> "Heartbeat":
+        self._thread = threading.Thread(
+            target=self._run, name=f"heartbeat-{self.video_id}", daemon=True
+        )
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=self.interval + 1)
+        # Final flush so the row reflects the last progress value the loop
+        # set before exiting (e.g. 0.99 right before mark_analyzed runs).
+        self._tick()
+
+
 def handle(video: dict):
     log.info("processing video %s (%s)", video["id"], video["filename"])
     try:
-        def _on_progress(pct: float):
-            update_progress(video["id"], pct)
-
-        meta = process_video(
-            project_id=video["project_id"],
-            video_id=video["id"],
-            filename=video["filename"],
-            on_progress=_on_progress,
-            local_source_path=video.get("local_source_path"),
-        )
+        with Heartbeat(video["id"]) as hb:
+            meta = process_video(
+                project_id=video["project_id"],
+                video_id=video["id"],
+                filename=video["filename"],
+                on_progress=hb.set_progress,
+                local_source_path=video.get("local_source_path"),
+            )
         mark_analyzed(video["id"], meta)
         log.info("done %s: %s tracks", video["id"], meta.get("num_tracks"))
     except Exception as e:

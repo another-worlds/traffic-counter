@@ -61,6 +61,13 @@ services:
     # run `./scripts/scale_workers.sh <N>`. Job claiming is serialized
     # by Postgres (SELECT … FOR UPDATE SKIP LOCKED in worker/main.py),
     # so replicas never race for the same video.
+    #
+    # Note: replicas above the GPU count rarely improve throughput.
+    # CUDA streams serialise across processes on a single device, so
+    # five replicas typically finish slower than one — and the extra
+    # contention can stall per-batch YOLO inference long enough to
+    # trigger the API's stale-claim reaper. Set N ≈ #GPUs unless you
+    # have a specific reason.
     build:
       context: ./worker
     runtime: nvidia

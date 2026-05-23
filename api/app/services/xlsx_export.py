@@ -13,7 +13,7 @@ from openpyxl.utils import get_column_letter
 import pandas as pd
 
 from .counting import compute_counts_for_lines, COCO_VEHICLE_CLASSES
-from .tracks import load_tracks_for_video, load_tracks_for_videos
+from .tracks import load_materialized_tracks, load_tracks_for_video, load_tracks_for_videos
 
 
 HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -99,9 +99,12 @@ def build_xlsx(
 
     # One sheet per video
     for v in video_rows:
-        df = load_tracks_for_video(project_id, v["id"])
+        # Use the cached materialised form: the /counts endpoint has very
+        # likely already paid the cold-build cost for the video the user is
+        # exporting, so each per-video sheet is effectively free.
+        mt = load_materialized_tracks(project_id, v["id"])
         # In a per-video sheet, "scope" is the single video → namespacing not needed
-        per = compute_counts_for_lines(df, lines)
+        per = compute_counts_for_lines(mt, lines)
 
         title = (v["filename"][:28] + "…") if len(v["filename"]) > 28 else v["filename"]
         # openpyxl sheet titles must be unique and <= 31 chars, no /\?*[]:

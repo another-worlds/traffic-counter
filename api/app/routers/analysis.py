@@ -15,7 +15,7 @@ from ..schemas import (
     SuggestLinesRequest,
     SuggestLineOut,
 )
-from ..services.tracks import load_tracks_for_video
+from ..services.tracks import load_materialized_tracks, load_tracks_for_video
 from ..services.counting import compute_counts_for_lines
 from ..services.suggest import suggest_lines as _suggest_lines
 from ..services import xlsx_jobs
@@ -67,8 +67,11 @@ async def counts(video_id: str, body: CountRequest, db: Session = Depends(get_db
             raise HTTPException(409, "video must be analyzed first")
 
         lines = _load_lines_for_video(db, video_id, body.line_ids)
-        tracks = load_tracks_for_video(v.project_id, video_id)
-        result = compute_counts_for_lines(tracks, _lines_to_dict(lines))
+        # MaterializedTracks: sort + groupby + modal-class precomputed once per
+        # video, shared across every line in this request and every subsequent
+        # request for the same video until re-analysis bumps the cache key.
+        mt = load_materialized_tracks(v.project_id, video_id)
+        result = compute_counts_for_lines(mt, _lines_to_dict(lines))
 
         return CountResponse(
             total_unique_tracks=result["total_unique_tracks"],

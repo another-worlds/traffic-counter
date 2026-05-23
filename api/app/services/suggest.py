@@ -26,7 +26,7 @@ from typing import List, Dict
 import numpy as np
 import pandas as pd
 
-from .counting import count_crossings_for_line
+from .counting import count_crossings_for_line, materialize_tracks
 
 # ──────────────────────────── tuneable constants ──────────────────────────── #
 GRID_N = 5              # grid resolution per axis
@@ -164,11 +164,15 @@ def suggest_lines(
             break
 
     # ── 4. Build and score candidate lines ── #
+    # Materialise the tracks once and reuse the shaped form across every
+    # candidate. Without this, each count_crossings_for_line call would
+    # re-sort + re-group the DataFrame on its own.
+    mt = materialize_tracks(tracks_df)
     results = []
     for idx, (cx_ctr, cy_ctr, mean_dx, mean_dy) in enumerate(selected):
         pt_a, pt_b = _make_line_from_cell(cx_ctr, cy_ctr, mean_dx, mean_dy,
                                           line_half_len, video_width, video_height)
-        crossing = count_crossings_for_line(tracks_df, pt_a, pt_b)
+        crossing = count_crossings_for_line(mt, pt_a, pt_b)
         score = crossing["total"]
         color = _PALETTE[idx % len(_PALETTE)]
         results.append({

@@ -153,6 +153,42 @@ job, scale to zero between jobs."
 - For warm workers, swap the Cloud Run Job for a Cloud Run **Worker Pool**
   with the same image (`gcloud run worker-pools …`).
 
+## Scaling workers on a single GPU
+
+The worker container is stateless and claims jobs via
+`SELECT … FOR UPDATE SKIP LOCKED`, so multiple replicas can share one
+GPU safely — each loads its own copy of YOLOv8m onto cuda:0 and they
+race for queued videos through Postgres row locks. Two scripts pick a
+safe replica count and apply it:
+
+```bash
+# 1. Measure GPU + per-worker VRAM, print a recommended N.
+#    Requires no workers running (they'd hide free VRAM).
+docker compose stop worker
+./scripts/gpu_probe.sh
+
+# 2. Apply the recommendation (or any other N).
+./scripts/scale_workers.sh 6
+```
+
+`gpu_probe.sh` reads total/free VRAM via `nvidia-smi`, spawns one
+ephemeral worker container that loads the actual model and runs a
+warm-up inference to capture `torch.cuda.max_memory_allocated()`,
+pads the result by 15 %, subtracts a 512 MiB safety margin from free
+VRAM, and divides. `--json` for machine output, `--safety-margin
+<MiB>` to override, `--no-measure` to skip the docker probe and use
+an 800 MiB estimate.
+
+`scale_workers.sh N` validates N, persists `WORKER_REPLICAS=N` into
+`.env` for future reference, and runs
+`docker compose up -d --scale worker=N worker`. Shrink back with
+`./scripts/scale_workers.sh 1`.
+
+In-flight jobs on replicas that are killed or scaled away are reaped
+to `status=error` after `stale_claim_threshold_seconds` (default
+900 s) + one reaper tick (~16 min total) — same path as a crashed
+worker. Click **Analyze** on the row to re-queue.
+
 ## Project layout
 
 ```

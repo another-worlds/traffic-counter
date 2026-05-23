@@ -2,9 +2,11 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from typing import List
 
+from ..config import settings
 from ..db import get_db
 from ..models import Video, Project
 from ..schemas import WorkerVideoStatus
+from ..services.reaper import reap_stale_claims
 
 router = APIRouter(tags=["worker"])
 
@@ -31,3 +33,13 @@ def worker_status(db: Session = Depends(get_db)):
         )
         for v, project_name in rows
     ]
+
+
+@router.post("/worker/reap-stale")
+def reap_stale(db: Session = Depends(get_db)):
+    """Synchronously flip every stuck 'analyzing' row to 'error'.
+
+    Gives the operator a manual lever without waiting for the next reaper tick.
+    """
+    ids = reap_stale_claims(db, settings.stale_claim_threshold_seconds)
+    return {"reaped": ids, "count": len(ids)}

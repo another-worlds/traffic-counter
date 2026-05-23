@@ -8,7 +8,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -16,11 +16,10 @@ from ..db import get_db
 from ..models import Project, Video
 from ..schemas import VideoOut
 from ..services.jobs import get_job_runner
+from ..services.sources import find_workspace_for_path
 from ..services.storage import key_video
 
 router = APIRouter(tags=["local-folder"])
-
-INBOX_PROJECT_NAME = "Yandex Disk Inbox"
 
 
 class RegisterRequest(BaseModel):
@@ -47,21 +46,20 @@ class MetadataUpdateRequest(BaseModel):
     num_frames: Optional[int] = None
 
 
-def _get_or_create_inbox(db: Session) -> Project:
-    project = db.query(Project).filter(Project.name == INBOX_PROJECT_NAME).first()
-    if not project:
-        project = Project(name=INBOX_PROJECT_NAME, description="Auto-imported from watched folder")
-        db.add(project)
-        db.flush()
-    return project
-
-
 @router.post("/local-folder/register", response_model=RegisterResponse, status_code=200)
-def register_local_video(body: RegisterRequest, db: Session = Depends(get_db)):
+def register_local_video(
+    body: RegisterRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     """Register a video file from the local watched folder.
 
     Idempotent: returns the existing record if the path was already indexed.
     The file is NOT copied — the worker will read it directly from the given path.
+
+    The owning workspace is resolved by longest-prefix match against the
+    YAML-declared `local_source_root` per Project. Paths that fall outside
+    every configured workspace folder are rejected with 422.
     """
     path = body.path.strip()
 
@@ -74,7 +72,30 @@ def register_local_video(body: RegisterRequest, db: Session = Depends(get_db)):
     if not Path(path).is_file():
         raise HTTPException(400, f"path not accessible: {path}")
 
-    inbox = _get_or_create_inbox(db)
+    cfg = getattr(request.app.state, "sources_config", None)
+    ws = find_workspace_for_path(cfg, path)
+    if ws is None:
+        raise HTTPException(
+            422,
+            f"path {path} is outside any configured workspace; "
+            "add it to config/sources.yaml or move the file under a listed folder",
+        )
+
+    project = (
+        db.query(Project)
+        .filter(Project.name == ws.name)
+        .first()
+    )
+    if project is None:
+        # Sync should have created this row at startup; recreate defensively.
+        project = Project(
+            name=ws.name,
+            description=f"Yandex Disk: {ws.subpath}",
+            local_source_root=str(ws.abs_path),
+        )
+        db.add(project)
+        db.flush()
+
     filename = Path(path).name
 
     try:
@@ -85,7 +106,7 @@ def register_local_video(body: RegisterRequest, db: Session = Depends(get_db)):
     status = "queued" if body.auto_analyze else "uploaded"
 
     v = Video(
-        project_id=inbox.id,
+        project_id=project.id,
         filename=filename,
         storage_path="",          # filled after flush
         source="local-folder",
@@ -95,7 +116,7 @@ def register_local_video(body: RegisterRequest, db: Session = Depends(get_db)):
     )
     db.add(v)
     db.flush()
-    v.storage_path = key_video(inbox.id, v.id, filename)
+    v.storage_path = key_video(project.id, v.id, filename)
 
     db.commit()
     db.refresh(v)

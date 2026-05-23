@@ -23,23 +23,60 @@ services:
       LOCAL_STORAGE_ROOT: /data
       JOB_RUNNER: local
       ENV: dev
+      SOURCES_CONFIG: /app/config/sources.yaml
       # The iframe's effective origin depends on where Streamlit is reached
       # from (localhost on a laptop, a public IP/host on a VPS). Wildcard
       # avoids baking the deploy host into a static list; the API holds no
       # cookies, so the "*" + credentials trade-off doesn't apply.
       CORS_ORIGINS: "*"
+      # Make glibc return freed pages to the kernel more eagerly so Docker's
+      # RSS-based mem_limit doesn't gradually creep past the budget after
+      # transient parquet/sort allocations. Default is 128 KiB; the glibc
+      # default of 128 MiB lets the heap baloon for the life of the process.
+      MALLOC_TRIM_THRESHOLD_: "131072"
     ports: ["8000:8000"]
+    # Cap RAM so a runaway trajectory load fails as a clean Docker stop
+    # (uvicorn's lifespan shutdown closes DB connections gracefully)
+    # instead of a kernel SIGKILL that leaves Postgres transactions
+    # mid-flight — that was the failure mode behind the "Child process
+    # died" + "unexpected EOF on client connection" crash pattern.
+    mem_limit: 4g
     volumes:
       - storage:/data
       - ./api:/app
+      - ./config:/app/config:ro
+      # The yadisk root the user mounted on the host gets passed through at
+      # the same path so the absolute paths in sources.yaml resolve inside
+      # the container without remapping. Override via .env if you mount
+      # somewhere else.
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
     depends_on:
       db:
         condition: service_healthy
 
   worker:
+    # No `container_name` or port bindings — safe to run multiple
+    # replicas via `docker compose up -d --scale worker=N`. To pick a
+    # safe N for this GPU run `./scripts/gpu_probe.sh`; to apply it
+    # run `./scripts/scale_workers.sh <N>`. Job claiming is serialized
+    # by Postgres (SELECT … FOR UPDATE SKIP LOCKED in worker/main.py),
+    # so replicas never race for the same video.
+    #
+    # Note: replicas above the GPU count rarely improve throughput.
+    # CUDA streams serialise across processes on a single device, so
+    # five replicas typically finish slower than one — and the extra
+    # contention can stall per-batch YOLO inference long enough to
+    # trigger the API's stale-claim reaper. Set N ≈ #GPUs unless you
+    # have a specific reason.
     build:
       context: ./worker
     runtime: nvidia
+    # Default to a single worker. On one GPU that is the throughput
+    # optimum — extra replicas serialise on the same CUDA streams and
+    # finish slower. `docker compose up -d --scale worker=N` still
+    # overrides this for multi-GPU hosts.
+    deploy:
+      replicas: 1
     environment:
       DATABASE_URL: postgresql+psycopg://traffic:traffic@db:5432/traffic
       STORAGE_BACKEND: local
@@ -48,12 +85,19 @@ services:
       MODEL_NAME: /models/yolov8m.pt
       DEVICE: cuda:0
       HALF: "true"
+      # Frames per GPU forward pass. Higher = better single-GPU
+      # utilisation until VRAM fills; tune with ./scripts/gpu_probe.sh.
+      BATCH_SIZE: "16"
+      # Cap on how many scene-keyframes the worker emits per video.
+      # Long CCTV recordings can otherwise produce 200+ JPEGs which
+      # bloat /data and overwhelm the Count & Export page.
+      MAX_SCENE_FRAMES: "30"
       NVIDIA_VISIBLE_DEVICES: all
     volumes:
       - storage:/data
       - ./worker:/app
       - model_cache:/root/.cache
-      - /mnt/yandex-videos:/mnt/yandex-videos:ro
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
     depends_on:
       db:
         condition: service_healthy
@@ -63,12 +107,15 @@ services:
       context: ./watcher
     environment:
       API_URL: http://api:8000
-      WATCH_PATH: /mnt/yandex-videos
+      SOURCES_CONFIG: /app/config/sources.yaml
+      # WATCH_PATH is a legacy fallback used only when SOURCES_CONFIG is missing.
+      WATCH_PATH: ${YADISK_HOST_PATH:-/mnt/yandex-videos}
       AUTO_ANALYZE: "false"   # set to "true" to auto-queue new videos
       SCAN_INTERVAL: "60"     # full rescan every 60 s
       STABILITY_WAIT: "5"     # seconds to wait before registering a new file
     volumes:
-      - /mnt/yandex-videos:/mnt/yandex-videos:ro
+      - ./config:/app/config:ro
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
     depends_on:
       - api
     restart: unless-stopped

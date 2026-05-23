@@ -12,6 +12,10 @@ class ProjectOut(BaseModel):
     id: str
     name: str
     description: Optional[str]
+    # Set on workspaces auto-created from config/sources.yaml — the
+    # absolute folder this workspace owns on disk. NULL for manually-
+    # created workspaces.
+    local_source_root: Optional[str] = None
     created_at: datetime
     last_exported_at: Optional[datetime] = None
 
@@ -54,7 +58,8 @@ class LineCreate(BaseModel):
 
 class LineOut(BaseModel):
     id: str
-    project_id: str
+    video_id: str
+    project_id: Optional[str] = None
     name: str
     points: Dict[str, List[float]]
     color: str
@@ -65,7 +70,8 @@ class LineOut(BaseModel):
 
 
 class CountRequest(BaseModel):
-    video_ids: List[str]
+    # Single-video scope. Server validates that every line_id belongs to the
+    # path-param video.
     line_ids: List[str]
 
 
@@ -119,7 +125,6 @@ class LineUpdate(BaseModel):
 
 
 class SuggestLinesRequest(BaseModel):
-    video_ids: List[str]
     n: int = 3
 
 

@@ -3,32 +3,34 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from ..db import get_db
-from ..models import Project, CountingLine
+from ..models import Video, CountingLine
 from ..schemas import LineCreate, LineOut, LineUpdate
 
 router = APIRouter(tags=["lines"])
 
 
-@router.get("/projects/{project_id}/lines", response_model=List[LineOut])
-def list_lines(project_id: str, db: Session = Depends(get_db)):
-    if not db.get(Project, project_id):
-        raise HTTPException(404, "project not found")
+@router.get("/videos/{video_id}/lines", response_model=List[LineOut])
+def list_lines(video_id: str, db: Session = Depends(get_db)):
+    if not db.get(Video, video_id):
+        raise HTTPException(404, "video not found")
     return (
         db.query(CountingLine)
-        .filter(CountingLine.project_id == project_id)
+        .filter(CountingLine.video_id == video_id)
         .order_by(CountingLine.created_at.asc())
         .all()
     )
 
 
-@router.post("/projects/{project_id}/lines", response_model=LineOut, status_code=201)
-def create_line(project_id: str, payload: LineCreate, db: Session = Depends(get_db)):
-    if not db.get(Project, project_id):
-        raise HTTPException(404, "project not found")
+@router.post("/videos/{video_id}/lines", response_model=LineOut, status_code=201)
+def create_line(video_id: str, payload: LineCreate, db: Session = Depends(get_db)):
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "video not found")
     if "a" not in payload.points or "b" not in payload.points:
         raise HTTPException(422, "points must have keys 'a' and 'b'")
     line = CountingLine(
-        project_id=project_id,
+        video_id=video_id,
+        project_id=v.project_id,  # kept for legacy reads; not authoritative
         name=payload.name,
         points=payload.points,
         color=payload.color or "#e24b4a",

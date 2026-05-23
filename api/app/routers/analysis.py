@@ -1,128 +1,159 @@
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+import asyncio
+from collections import defaultdict
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import List
-from datetime import datetime
-import io
-import uuid
 
 from ..db import get_db
-from ..models import Project, Video, CountingLine
-from ..schemas import CountRequest, CountResponse, LineCountResult, SuggestLinesRequest, SuggestLineOut
-from ..services.tracks import load_tracks_for_videos
+from ..models import Video, CountingLine
+from ..schemas import (
+    CountRequest,
+    CountResponse,
+    LineCountResult,
+    SuggestLinesRequest,
+    SuggestLineOut,
+)
+from ..services.tracks import load_materialized_tracks, load_tracks_for_video
 from ..services.counting import compute_counts_for_lines
-from ..services.xlsx_export import build_xlsx
 from ..services.suggest import suggest_lines as _suggest_lines
+from ..services import xlsx_jobs
 
 router = APIRouter(tags=["analysis"])
 
 
 def _lines_to_dict(lines: List[CountingLine]) -> list:
-    out = []
-    for ln in lines:
-        out.append({
+    return [
+        {
             "id": ln.id,
             "name": ln.name,
             "a": ln.points["a"],
             "b": ln.points["b"],
-        })
-    return out
+        }
+        for ln in lines
+    ]
 
 
-@router.post("/projects/{project_id}/counts", response_model=CountResponse)
-def counts(project_id: str, body: CountRequest, db: Session = Depends(get_db)):
-    if not db.get(Project, project_id):
-        raise HTTPException(404, "project not found")
-
-    videos = (
-        db.query(Video)
-        .filter(Video.project_id == project_id, Video.id.in_(body.video_ids))
-        .all()
-    )
-    if len(videos) != len(body.video_ids):
-        raise HTTPException(400, "one or more video_ids do not belong to this project")
-    if any(v.status != "analyzed" for v in videos):
-        raise HTTPException(409, "all selected videos must be analyzed first")
-
+def _load_lines_for_video(db: Session, video_id: str, line_ids: List[str]) -> List[CountingLine]:
     lines = (
         db.query(CountingLine)
         .filter(
-            CountingLine.project_id == project_id,
-            CountingLine.id.in_(body.line_ids),
+            CountingLine.video_id == video_id,
+            CountingLine.id.in_(line_ids),
         )
         .all()
     )
-    if len(lines) != len(body.line_ids):
-        raise HTTPException(400, "one or more line_ids do not belong to this project")
-
-    tracks = load_tracks_for_videos(project_id, [v.id for v in videos])
-    result = compute_counts_for_lines(tracks, _lines_to_dict(lines))
-
-    return CountResponse(
-        total_unique_tracks=result["total_unique_tracks"],
-        sum_across_lines=result["sum_across_lines"],
-        per_line=[LineCountResult(**r) for r in result["per_line"]],
-    )
+    if len(lines) != len(line_ids):
+        raise HTTPException(400, "one or more line_ids do not belong to this video")
+    return lines
 
 
-@router.post("/projects/{project_id}/export")
-def export(project_id: str, body: CountRequest, db: Session = Depends(get_db)):
-    project = db.get(Project, project_id)
-    if not project:
-        raise HTTPException(404, "project not found")
+# One asyncio lock per video. When a user draws lines quickly, the
+# frontend coalesces /counts requests but two clients (or a stale
+# in-flight request that hasn't aborted yet) can still race. The lock
+# keeps N concurrent requests for the same video from each loading the
+# parquet on a cold cache and doubling peak memory.
+_recompute_locks: "dict[str, asyncio.Lock]" = defaultdict(asyncio.Lock)
 
-    videos = (
-        db.query(Video)
-        .filter(Video.project_id == project_id, Video.id.in_(body.video_ids))
-        .all()
-    )
-    lines = (
-        db.query(CountingLine)
-        .filter(
-            CountingLine.project_id == project_id,
-            CountingLine.id.in_(body.line_ids),
+
+@router.post("/videos/{video_id}/counts", response_model=CountResponse)
+async def counts(video_id: str, body: CountRequest, db: Session = Depends(get_db)):
+    async with _recompute_locks[video_id]:
+        v = db.get(Video, video_id)
+        if not v:
+            raise HTTPException(404, "video not found")
+        if v.status != "analyzed":
+            raise HTTPException(409, "video must be analyzed first")
+
+        lines = _load_lines_for_video(db, video_id, body.line_ids)
+        # MaterializedTracks: sort + groupby + modal-class precomputed once per
+        # video, shared across every line in this request and every subsequent
+        # request for the same video until re-analysis bumps the cache key.
+        mt = load_materialized_tracks(v.project_id, video_id)
+        result = compute_counts_for_lines(mt, _lines_to_dict(lines))
+
+        return CountResponse(
+            total_unique_tracks=result["total_unique_tracks"],
+            sum_across_lines=result["sum_across_lines"],
+            per_line=[LineCountResult(**r) for r in result["per_line"]],
         )
-        .all()
+
+
+@router.post("/videos/{video_id}/export", status_code=202)
+def export_start(
+    video_id: str,
+    body: CountRequest,
+    background: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Kick off an async xlsx build. Returns a job id the client polls."""
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "video not found")
+    if not body.line_ids:
+        raise HTTPException(400, "must select at least one line")
+    if v.status != "analyzed":
+        raise HTTPException(409, "video must be analyzed first")
+
+    # Validate lines belong to the video before scheduling work.
+    _load_lines_for_video(db, video_id, body.line_ids)
+
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in v.filename)
+    project_name = v.project.name if v.project else "project"
+    job = xlsx_jobs.start_job(
+        video_id=video_id,
+        filename=f"counts-{safe_name}.xlsx",
     )
-    if not videos or not lines:
-        raise HTTPException(400, "must select at least one video and one line")
+    background.add_task(
+        xlsx_jobs.run_export_job,
+        job_id=job.job_id,
+        project_id=str(v.project_id),
+        project_name=project_name,
+        video_id=video_id,
+        video_filename=v.filename,
+        line_ids=body.line_ids,
+    )
+    return {"job_id": job.job_id, "status": job.status}
 
-    video_rows = [{"id": v.id, "filename": v.filename} for v in videos]
-    data = build_xlsx(project_id, project.name, video_rows, _lines_to_dict(lines))
 
-    project.last_exported_at = datetime.utcnow()
-    db.commit()
+@router.get("/export-jobs/{job_id}")
+def export_status(job_id: str):
+    j = xlsx_jobs.get(job_id)
+    if not j:
+        raise HTTPException(404, "job not found")
+    return {
+        "job_id": j.job_id,
+        "video_id": j.video_id,
+        "status": j.status,
+        "error": j.error,
+        "filename": j.filename,
+    }
 
-    fname = f"counts-{project.name.replace(' ', '_')}-{uuid.uuid4().hex[:6]}.xlsx"
-    return StreamingResponse(
-        io.BytesIO(data),
+
+@router.get("/export-jobs/{job_id}/file")
+def export_file(job_id: str):
+    j = xlsx_jobs.get(job_id)
+    if not j or j.status != "done" or not j.file_path:
+        raise HTTPException(404, "file not ready")
+    return FileResponse(
+        j.file_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        filename=j.filename,
     )
 
 
-@router.post("/projects/{project_id}/suggest-lines", response_model=List[SuggestLineOut])
-def suggest_lines(project_id: str, body: SuggestLinesRequest, db: Session = Depends(get_db)):
-    """Return up to *n* automatically placed counting-line suggestions."""
-    if not db.get(Project, project_id):
-        raise HTTPException(404, "project not found")
+@router.post("/videos/{video_id}/suggest-lines", response_model=List[SuggestLineOut])
+def suggest_lines(video_id: str, body: SuggestLinesRequest, db: Session = Depends(get_db)):
+    """Return up to *n* automatically placed counting-line suggestions for one video."""
+    v = db.get(Video, video_id)
+    if not v:
+        raise HTTPException(404, "video not found")
+    if v.status != "analyzed":
+        raise HTTPException(409, "video must be analyzed first")
 
-    videos = (
-        db.query(Video)
-        .filter(Video.project_id == project_id, Video.id.in_(body.video_ids))
-        .all()
-    )
-    if len(videos) != len(body.video_ids):
-        raise HTTPException(400, "one or more video_ids do not belong to this project")
-    if any(v.status != "analyzed" for v in videos):
-        raise HTTPException(409, "all selected videos must be analyzed first")
-
-    tracks = load_tracks_for_videos(project_id, [v.id for v in videos])
-
-    # Use dimensions from the first video; fall back to 1920×1080 if not set.
-    ref = videos[0]
-    w = ref.width or 1920
-    h = ref.height or 1080
-
+    tracks = load_tracks_for_video(v.project_id, video_id)
+    w = v.width or 1920
+    h = v.height or 1080
     suggestions = _suggest_lines(tracks, w, h, n=body.n)
     return [SuggestLineOut(**s) for s in suggestions]

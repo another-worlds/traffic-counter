@@ -40,7 +40,12 @@ type AppProps = {
 
 const DEFAULT_VIDEO_SIZE: VideoSize = { width: 1920, height: 1080 };
 const PATCH_DEBOUNCE_MS = 250;
-const COUNTS_DEBOUNCE_MS = 300;
+// 750 ms lets a burst of line-drawing (commit, drag-to-resize, immediately
+// draw another line) coalesce into a single /counts request. The existing
+// AbortController logic in scheduleCountsRefresh cancels the in-flight call
+// when a new one is scheduled, so the API only ever processes one recompute
+// per burst — important because /counts loads the full trajectory parquet.
+const COUNTS_DEBOUNCE_MS = 750;
 const CREATE_RETRY_MS = 2000;
 
 function describeFetchErr(err: unknown): string {
@@ -114,7 +119,7 @@ export default function App({ bootstrap }: AppProps) {
     bootstrap?.suggestions,
   );
   const [apiError, setApiError] = React.useState<string | null>(null);
-  const lastProjectIdRef = React.useRef<string>(spec.projectId);
+  const lastVideoIdRef = React.useRef<string>(spec.videoId);
 
   // Server-truth refs. Keyed by *server* id once a line has been persisted.
   // For lines that have not yet finished POSTing, their temp id lives only in
@@ -135,14 +140,16 @@ export default function App({ bootstrap }: AppProps) {
   // Seed server-truth from initial bootstrap.
   React.useEffect(() => {
     serverLinesRef.current = new Map(initialLines.map((l) => [l.id, l]));
-  // Run only when projectId changes — see project-switch effect below.
+  // Run only when videoId changes — see video-switch effect below.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Project switch → reset everything from a fresh bootstrap.
+  // Video switch → reset everything from a fresh bootstrap. (The Streamlit
+  // host remounts the iframe on video change so this is largely defensive,
+  // but keeps the React state consistent if the host swaps bootstrap inline.)
   React.useEffect(() => {
-    if (lastProjectIdRef.current === spec.projectId) return;
-    lastProjectIdRef.current = spec.projectId;
+    if (lastVideoIdRef.current === spec.videoId) return;
+    lastVideoIdRef.current = spec.videoId;
     setModel(initialModel);
     setCounts(bootstrap?.counts);
     setSuggestions(bootstrap?.suggestions);
@@ -154,7 +161,7 @@ export default function App({ bootstrap }: AppProps) {
     patchTimersRef.current.clear();
     for (const c of inflightPatchRef.current.values()) c.abort();
     inflightPatchRef.current.clear();
-  }, [spec.projectId, initialModel, initialLines, bootstrap?.counts, bootstrap?.suggestions]);
+  }, [spec.videoId, initialModel, initialLines, bootstrap?.counts, bootstrap?.suggestions]);
 
   // Counts/suggestions: also resync if the bootstrap brings fresh ones for the
   // same project (e.g. Streamlit rerendered after a workspace-side button).
@@ -183,8 +190,8 @@ export default function App({ bootstrap }: AppProps) {
       inflightCountsRef.current = ctrl;
       computeCounts(
         apiCfgRef.current,
-        spec.projectId,
-        { video_ids: spec.videoIds, line_ids: lineIds },
+        spec.videoId,
+        { line_ids: lineIds },
         ctrl.signal,
       )
         .then((resp) => setCounts(countsApiToBundle(resp)))
@@ -195,7 +202,17 @@ export default function App({ bootstrap }: AppProps) {
           }
         });
     }, COUNTS_DEBOUNCE_MS);
-  }, [spec.projectId, spec.videoIds]);
+  }, [spec.videoId]);
+
+  // Self-bootstrap counts on mount and on video switch. Streamlit used to
+  // pre-fetch /counts and pass them through `bootstrap.counts`, but that
+  // blocked page render for minutes on long cold-cache videos. The iframe
+  // now owns the initial fetch too — it shows the line editor immediately
+  // while the request is in flight and swaps results in when they arrive.
+  React.useEffect(() => {
+    if (serverLinesRef.current.size === 0) return;
+    scheduleCountsRefresh();
+  }, [spec.videoId, scheduleCountsRefresh]);
 
   // Core sync: diff React lines against server-truth and issue create/patch/delete.
   React.useEffect(() => {
@@ -225,7 +242,7 @@ export default function App({ bootstrap }: AppProps) {
       }
       pendingCreatesRef.current.add(line.id);
       const tempId = line.id;
-      apiCreateLine(apiCfgRef.current, spec.projectId, lineToCreatePayload(line))
+      apiCreateLine(apiCfgRef.current, spec.videoId, lineToCreatePayload(line))
         .then((created) => {
           const serverId = String(created.id);
           const adapted: LineGeometry = {
@@ -326,7 +343,7 @@ export default function App({ bootstrap }: AppProps) {
           console.error('delete line failed', err);
         });
     }
-  }, [model.lines, model.interaction.kind, spec.projectId, scheduleCountsRefresh]);
+  }, [model.lines, model.interaction.kind, spec.videoId, scheduleCountsRefresh]);
 
   // Route keyboard events through the active tool.
   React.useEffect(() => {
@@ -372,8 +389,7 @@ export default function App({ bootstrap }: AppProps) {
   const handleRequestSuggestions = React.useCallback(
     (n: number) => {
       if (!apiCfgRef.current.baseUrl) return;
-      apiRequestSuggestions(apiCfgRef.current, spec.projectId, {
-        video_ids: spec.videoIds,
+      apiRequestSuggestions(apiCfgRef.current, spec.videoId, {
         n: Math.max(1, Math.min(10, n)),
       })
         .then((resp) => setSuggestions(resp))
@@ -382,7 +398,7 @@ export default function App({ bootstrap }: AppProps) {
           console.error('suggest-lines failed', err);
         });
     },
-    [spec.projectId, spec.videoIds],
+    [spec.videoId],
   );
 
   const handleAcceptSuggestion = React.useCallback(

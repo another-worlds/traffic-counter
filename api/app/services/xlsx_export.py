@@ -13,7 +13,7 @@ from openpyxl.utils import get_column_letter
 import pandas as pd
 
 from .counting import compute_counts_for_lines, COCO_VEHICLE_CLASSES
-from .tracks import load_tracks_for_video, load_tracks_for_videos
+from .tracks import load_materialized_tracks, load_tracks_for_video, load_tracks_for_videos
 
 
 HEADER_FONT = Font(bold=True, color="FFFFFF")
@@ -99,9 +99,12 @@ def build_xlsx(
 
     # One sheet per video
     for v in video_rows:
-        df = load_tracks_for_video(project_id, v["id"])
+        # Use the cached materialised form: the /counts endpoint has very
+        # likely already paid the cold-build cost for the video the user is
+        # exporting, so each per-video sheet is effectively free.
+        mt = load_materialized_tracks(project_id, v["id"])
         # In a per-video sheet, "scope" is the single video → namespacing not needed
-        per = compute_counts_for_lines(df, lines)
+        per = compute_counts_for_lines(mt, lines)
 
         title = (v["filename"][:28] + "…") if len(v["filename"]) > 28 else v["filename"]
         # openpyxl sheet titles must be unique and <= 31 chars, no /\?*[]:
@@ -124,6 +127,53 @@ def build_xlsx(
         wsv.cell(row=rr, column=2, value="UNIQUE TRACKS IN VIDEO").font = Font(bold=True)
         wsv.cell(row=rr, column=3, value=per["total_unique_tracks"]).font = Font(bold=True)
         _autosize(wsv)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def build_xlsx_for_video(
+    project_name: str,
+    video_filename: str,
+    tracks_df,
+    lines: List[Dict],
+) -> bytes:
+    """One-video workbook: Summary header + a single details sheet.
+
+    Used by the per-video export job. Skips the multi-video aggregation
+    in :func:`build_xlsx` since the per-video model has only one scope.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Summary"
+    ws.cell(row=1, column=1, value=f"Project: {project_name}").font = Font(bold=True, size=14)
+    ws.cell(row=2, column=1, value=f"Video: {video_filename}")
+    ws.cell(row=3, column=1, value=f"Lines: {len(lines)}")
+
+    class_keys = list(COCO_VEHICLE_CLASSES.values())
+    headers = [
+        "Scope", "Line", "Total tracks",
+        "% of total in scope", "% of drawn lines (in scope)",
+        "Dir +", "Dir -",
+        *class_keys,
+    ]
+    _write_header(ws, headers, row=5)
+
+    counts = compute_counts_for_lines(tracks_df, lines)
+    r = 6
+    for row in _line_rows(counts, scope=video_filename):
+        for j, val in enumerate(row, start=1):
+            ws.cell(row=r, column=j, value=val)
+        r += 1
+
+    ws.cell(row=r, column=2, value="TOTAL (unique tracks across lines)").font = Font(bold=True)
+    ws.cell(row=r, column=3, value=counts["sum_across_lines"]).font = Font(bold=True)
+    r += 1
+    ws.cell(row=r, column=2, value="UNIQUE TRACKS IN VIDEO").font = Font(bold=True)
+    ws.cell(row=r, column=3, value=counts["total_unique_tracks"]).font = Font(bold=True)
+    _autosize(ws)
 
     buf = io.BytesIO()
     wb.save(buf)

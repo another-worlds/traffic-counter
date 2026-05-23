@@ -13,10 +13,11 @@ class APIError(Exception):
     pass
 
 
-def _client() -> httpx.Client:
-    # Increased timeout for large file uploads (can take 10+ minutes for 100GB over slow networks)
-    # Timeout is per request, not per connection, so 3600s (1 hour) is reasonable for very large files
-    return httpx.Client(base_url=API_URL, timeout=3600.0)
+def _client(timeout: float = 3600.0) -> httpx.Client:
+    # Increased default for large file uploads (can take 10+ minutes for 100GB over
+    # slow networks). Override via the `timeout=` kw on a per-call basis when a
+    # snappier failure is more useful (e.g. polling endpoints).
+    return httpx.Client(base_url=API_URL, timeout=timeout)
 
 
 def _raise(r: httpx.Response):
@@ -122,25 +123,25 @@ def track_stats(video_id: str) -> Optional[Dict]:
         return r.json()
 
 
-# --- lines ---
-def list_lines(project_id: str) -> List[Dict]:
-    with _client() as c:
-        r = c.get(f"/projects/{project_id}/lines")
+# --- lines (per video) ---
+def list_lines(video_id: str) -> List[Dict]:
+    with _client(timeout=30.0) as c:
+        r = c.get(f"/videos/{video_id}/lines")
         _raise(r)
         return r.json()
 
-def create_line(project_id: str, name: str, ax: float, ay: float, bx: float, by: float,
+def create_line(video_id: str, name: str, ax: float, ay: float, bx: float, by: float,
                 color: str = "#e24b4a") -> Dict:
-    with _client() as c:
+    with _client(timeout=30.0) as c:
         r = c.post(
-            f"/projects/{project_id}/lines",
+            f"/videos/{video_id}/lines",
             json={"name": name, "points": {"a": [ax, ay], "b": [bx, by]}, "color": color},
         )
         _raise(r)
         return r.json()
 
 def delete_line(line_id: str):
-    with _client() as c:
+    with _client(timeout=30.0) as c:
         r = c.delete(f"/lines/{line_id}")
         _raise(r)
 
@@ -159,38 +160,49 @@ def update_line(
         payload["color"] = color
     if points is not None:
         payload["points"] = points
-    with _client() as c:
+    with _client(timeout=30.0) as c:
         r = c.patch(f"/lines/{line_id}", json=payload)
         _raise(r)
         return r.json()
 
 
-def suggest_lines(project_id: str, video_ids: List[str], n: int = 3) -> List[Dict]:
-    with _client() as c:
+def suggest_lines(video_id: str, n: int = 3) -> List[Dict]:
+    with _client(timeout=60.0) as c:
+        r = c.post(f"/videos/{video_id}/suggest-lines", json={"n": n})
+        _raise(r)
+        return r.json()
+
+
+# --- counts / export (per video) ---
+def compute_counts(video_id: str, line_ids: List[str]) -> Dict:
+    with _client(timeout=120.0) as c:
         r = c.post(
-            f"/projects/{project_id}/suggest-lines",
-            json={"video_ids": video_ids, "n": n},
+            f"/videos/{video_id}/counts",
+            json={"line_ids": line_ids},
         )
         _raise(r)
         return r.json()
 
 
-# --- counts / export ---
-def compute_counts(project_id: str, video_ids: List[str], line_ids: List[str]) -> Dict:
-    with _client() as c:
-        r = c.post(
-            f"/projects/{project_id}/counts",
-            json={"video_ids": video_ids, "line_ids": line_ids},
-        )
+def start_export(video_id: str, line_ids: List[str]) -> Dict:
+    """Kick off an async xlsx build. Returns {"job_id", "status"}."""
+    with _client(timeout=15.0) as c:
+        r = c.post(f"/videos/{video_id}/export", json={"line_ids": line_ids})
         _raise(r)
         return r.json()
 
-def export_xlsx(project_id: str, video_ids: List[str], line_ids: List[str]) -> bytes:
-    with _client() as c:
-        r = c.post(
-            f"/projects/{project_id}/export",
-            json={"video_ids": video_ids, "line_ids": line_ids},
-        )
+
+def get_export_status(job_id: str) -> Dict:
+    with _client(timeout=15.0) as c:
+        r = c.get(f"/export-jobs/{job_id}")
+        _raise(r)
+        return r.json()
+
+
+def download_export(job_id: str) -> bytes:
+    # File already lives on disk on the API; just streams the bytes back.
+    with _client(timeout=300.0) as c:
+        r = c.get(f"/export-jobs/{job_id}/file")
         _raise(r)
         return r.content
 
@@ -211,6 +223,14 @@ def worker_status() -> List[Dict]:
     """Return videos currently queued or being analyzed."""
     with _client() as c:
         r = c.get("/worker/status")
+        _raise(r)
+        return r.json()
+
+
+def reap_stale_jobs() -> Dict:
+    """Force the API reaper to flip every stuck analyzing-row to error."""
+    with _client() as c:
+        r = c.post("/worker/reap-stale")
         _raise(r)
         return r.json()
 

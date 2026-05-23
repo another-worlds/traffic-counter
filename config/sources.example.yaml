@@ -1,0 +1,54 @@
+# Source-folders config for the auto-import feature.
+#
+# `yadisk` is the absolute path of one Yandex.Disk sync root mounted on
+# the host (and into the api / watcher containers at the same path —
+# see `YADISK_HOST_PATH` in docker-compose.yml; the default mount point
+# is /mnt/yandex-videos, kept for backwards compatibility with the old
+# single-folder WATCH_PATH setup).
+#
+# Each entry under `workspaces` maps a workspace name (as it will appear
+# in the Streamlit sidebar) to a subfolder *relative to* `yadisk`. The
+# API auto-creates a Project row per entry on startup (idempotent;
+# existing workspaces with the same name are adopted, never overwritten).
+# The watcher only forwards videos that live inside one of these listed
+# subfolders; anything else under `yadisk` is logged once and skipped.
+#
+# Subpaths must be relative and may not contain '..'.
+#
+# Editing this file requires restarting the api + watcher containers:
+#     docker compose restart api watcher
+# To verify the file matches what's on disk (file counts, total
+# duration, strays), run:
+#     ./scripts/verify_sources.py
+
+
+# ── Before the YAML existed ───────────────────────────────────────────
+# The previous deployment hard-coded a single folder:
+#     WATCH_PATH: /mnt/yandex-videos
+# …mapped to one catch-all workspace named "Yandex Disk Inbox". Every
+# imported video landed there regardless of which subfolder it came from.
+#
+# To reproduce that legacy behaviour under the new model, point yadisk
+# at the same mount and declare one workspace covering the root:
+#
+#     yadisk: /mnt/yandex-videos
+#     workspaces:
+#       Yandex Disk Inbox: .
+#
+# (A subpath of `.` means "the yadisk root itself"; it is the only way
+# to get the legacy single-folder semantics back.)
+# ──────────────────────────────────────────────────────────────────────
+
+
+# Current production layout — multiple cameras synced via Yandex.Disk to
+# one mounted disk, each camera's recordings landing in its own subfolder:
+
+yadisk: /mnt/disk1/yandexsync1
+
+workspaces:
+  # Workspace name (shown in the sidebar)   →   subfolder under yadisk
+  tashkent-MP:    tashkent-450
+  tashkent-ODD:   tashkent-ODD
+  # Add more cameras / sources here, one entry per workspace, e.g.:
+  #   samarkand-north:  samarkand/north-cam
+  #   archive-2024:     archive/2024

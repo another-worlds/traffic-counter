@@ -1,11 +1,26 @@
+import asyncio
+import logging
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 
 from .config import settings
-from .db import init_db
+from .db import SessionLocal, init_db
 from .routers import projects, videos, lines, analysis, worker, upload_tus, local_folder
+from .services.reaper import reap_stale_claims
+from .services import sources as sources_svc
+from .services import xlsx_jobs
+
+REAPER_INTERVAL_S = 60
+EXPORT_GC_MAX_AGE_MIN = 120
+log = logging.getLogger("api.reaper")
+
+
+def _reap_once() -> list[str]:
+    with SessionLocal() as db:
+        return reap_stale_claims(db, settings.stale_claim_threshold_seconds)
 
 
 def create_app() -> FastAPI:
@@ -46,8 +61,60 @@ def create_app() -> FastAPI:
     app.include_router(local_folder.router)
 
     @app.on_event("startup")
-    def _startup():
+    async def _startup():
         init_db()
+
+        # Reconcile YAML-declared workspaces with the DB so the Streamlit
+        # sidebar lists them from the first request. Degraded mode (file
+        # missing or malformed) logs once and keeps the app booting.
+        try:
+            cfg = sources_svc.load_sources()
+        except ValueError as exc:
+            log.warning("sources: %s — auto-import disabled", exc)
+            cfg = None
+        app.state.sources_config = cfg
+        if cfg is None:
+            log.info("sources: config file missing or empty, auto-import disabled")
+        else:
+            try:
+                with SessionLocal() as db:
+                    report = sources_svc.sync_workspaces(db, cfg)
+                log.info(report.summary())
+                if report.errors:
+                    for err in report.errors:
+                        log.warning("sources: %s", err)
+            except Exception:
+                log.exception("sources: workspace sync failed")
+
+        # One-shot pass first so a fresh deploy clears the existing backlog
+        # of rows the previous (heartbeat-less) workers left behind.
+        try:
+            with SessionLocal() as db:
+                reaped = reap_stale_claims(db, settings.stale_claim_threshold_seconds)
+            if reaped:
+                log.info("startup reaper: flipped %d stale video(s) to error", len(reaped))
+        except Exception:
+            log.exception("startup reaper failed")
+
+        async def _reaper_loop():
+            while True:
+                await asyncio.sleep(REAPER_INTERVAL_S)
+                try:
+                    # Offload the blocking SQLAlchemy call so we don't stall the
+                    # event loop while it talks to Postgres.
+                    reaped = await asyncio.to_thread(_reap_once)
+                    if reaped:
+                        log.info("reaper: flipped %d stale video(s) to error", len(reaped))
+                except Exception:
+                    log.exception("reaper loop iteration failed")
+                try:
+                    dropped = xlsx_jobs.gc_old_jobs(max_age_minutes=EXPORT_GC_MAX_AGE_MIN)
+                    if dropped:
+                        log.info("janitor: dropped %d old export(s)", dropped)
+                except Exception:
+                    log.exception("export janitor iteration failed")
+
+        asyncio.create_task(_reaper_loop())
 
     @app.get("/healthz")
     def healthz():

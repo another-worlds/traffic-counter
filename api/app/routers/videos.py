@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
@@ -10,6 +12,11 @@ from ..services.storage import (
     get_storage, key_video, key_frame, key_scene_frame, key_trajectories, key_heatmap,
 )
 from ..services.jobs import get_job_runner
+
+# A claim whose heartbeat is fresher than this is treated as owned by a
+# live worker — the heartbeat thread writes every ~10 s, so 60 s without
+# one means the worker is gone and a manual re-analyze should requeue.
+_ANALYZE_LIVENESS_GRACE_S = 60
 
 router = APIRouter(tags=["videos"])
 
@@ -75,11 +82,25 @@ def analyze_video(video_id: str, db: Session = Depends(get_db)):
     v = db.get(Video, video_id)
     if not v:
         raise HTTPException(404, "video not found")
-    if v.status in ("queued", "analyzing"):
-        return AnalyzeResponse(video_id=video_id, status=v.status)
+    if v.status == "queued":
+        return AnalyzeResponse(video_id=video_id, status="queued")
+    if v.status == "analyzing":
+        # Only treat it as in-progress if a worker is actually alive on it.
+        # An orphaned claim (container restart, crash) has a stale heartbeat
+        # and must be requeueable, or the user is stuck until the reaper runs.
+        hb = v.last_heartbeat_at
+        fresh = hb is not None and hb > datetime.utcnow() - timedelta(
+            seconds=_ANALYZE_LIVENESS_GRACE_S
+        )
+        if fresh:
+            return AnalyzeResponse(video_id=video_id, status="analyzing")
+        # Stale claim — fall through and requeue.
 
     v.status = "queued"
     v.error_message = None
+    v.started_analyzing_at = None
+    v.last_heartbeat_at = None
+    v.progress_pct = None
     db.commit()
 
     get_job_runner().enqueue(video_id=video_id, project_id=v.project_id)
@@ -98,9 +119,34 @@ def get_frame_url(video_id: str, db: Session = Depends(get_db)):
     return {"url": storage.signed_url(k, expires_minutes=60)}
 
 
+# Hard cap on how many scene-keyframes the frames endpoint will ever
+# advertise to clients. Long CCTV videos can have hundreds of cuts;
+# inlining all of them on the Count & Export page used to OOM the
+# frontend container. 30 is enough for a usable scrubber strip without
+# overwhelming the API.
+MAX_RESPONSE_FRAMES = 30
+
+
+def _evenly_sample(items: list, k: int) -> list:
+    """Pick k items evenly spaced across the input (inclusive endpoints)."""
+    if k <= 0 or not items:
+        return []
+    if len(items) <= k:
+        return list(items)
+    if k == 1:
+        return [items[len(items) // 2]]
+    step = (len(items) - 1) / (k - 1)
+    return [items[round(i * step)] for i in range(k)]
+
+
 @router.get("/videos/{video_id}/frames")
 def list_video_frames(video_id: str, db: Session = Depends(get_db)):
     """Return the list of scene-based keyframe URLs for the given video.
+
+    Capped at MAX_RESPONSE_FRAMES evenly-spaced entries so already-analyzed
+    long videos (which may have 200+ scene cuts on disk) don't trigger a
+    page-load avalanche. The surplus JPEGs stay on disk untouched but the
+    endpoint never advertises them.
 
     For videos analyzed before scene detection was added, falls back to the
     single legacy frame.jpg so the viewport still works without re-analysis.
@@ -109,7 +155,7 @@ def list_video_frames(video_id: str, db: Session = Depends(get_db)):
     if not v:
         raise HTTPException(404, "video not found")
     storage = get_storage()
-    scenes = v.scene_frames if v.scene_frames else []
+    scenes = _evenly_sample(v.scene_frames or [], MAX_RESPONSE_FRAMES)
     if scenes:
         result = []
         for sf in scenes:

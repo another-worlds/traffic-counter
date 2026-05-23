@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import base64
 import os
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -28,46 +29,31 @@ class ViewportSpec:
     """Describe the hybrid overlay viewport and its API-ready inputs."""
 
     project_id: str
-    video_ids: List[str]
+    video_id: str
     selected_line_ids: List[str]
     frame_count: int
     active_layers: Tuple[str, ...]
 
 
-def build_viewport_spec(ws: Dict[str, Any], videos: List[Dict[str, Any]], lines: List[Dict[str, Any]]) -> ViewportSpec:
+def build_viewport_spec(
+    ws: Dict[str, Any],
+    video: Dict[str, Any],
+    lines: List[Dict[str, Any]],
+) -> ViewportSpec:
     """Build the state package consumed by the embedded React/Vite overlay."""
     active_layers = ["saved-lines", "frame-scrubber", "trajectories"]
     if lines:
         active_layers.append("direction-overlay")
-    if any(v.get("status") == "analyzed" for v in videos):
+    if video.get("status") == "analyzed":
         active_layers.append("counts")
 
     return ViewportSpec(
         project_id=str(ws["id"]),
-        video_ids=[str(v["id"]) for v in videos],
+        video_id=str(video["id"]),
         selected_line_ids=[str(ln["id"]) for ln in lines],
         frame_count=100,
         active_layers=tuple(dict.fromkeys(active_layers)),
     )
-
-
-def request_live_counts(project_id: str, video_ids: List[str], line_ids: List[str]) -> Dict[str, Any]:
-    """Request live counts. Returns empty summary when there are no active lines."""
-    if not line_ids:
-        return {"total_unique_tracks": 0, "sum_across_lines": 0, "per_line": []}
-    return api.compute_counts(project_id, video_ids, line_ids)
-
-
-def _counts_for_react(counts_raw: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Reshape API counts payload for the React bootstrap."""
-    if not counts_raw:
-        return None
-    per_line_list = counts_raw.get("per_line") or []
-    per_line_map = {str(r["line_id"]): r for r in per_line_list}
-    return {
-        "total_unique_tracks": int(counts_raw.get("total_unique_tracks") or 0),
-        "per_line": per_line_map,
-    }
 
 
 def _absolute_url(rel: Optional[str]) -> Optional[str]:
@@ -118,92 +104,118 @@ def _maybe_fetch_asset_data_url(rel_url: Optional[str]) -> Optional[str]:
     return _fetch_asset_data_url(rel_url) if rel_url else None
 
 
-def _render_video_selector(ws_id: str, videos: List[Dict[str, Any]]) -> List[str]:
-    """Render the multi-video selector and return the list of selected video IDs.
+def _render_video_selector(ws_id: str, videos: List[Dict[str, Any]]) -> str:
+    """Render the single-video selector and return the chosen video ID.
 
-    Identity is keyed by video ID (not by label string), so re-analysis can
-    change the track count without dropping the selection. The selection
-    lives in a single session_state key and is reconciled against the
-    current video list on every rerun.
+    Lines now belong to one video at a time, so the page operates on exactly
+    one selection. Identity is keyed by video ID (not by label) so re-analysis
+    can change the track count without dropping the selection.
     """
-    sel_key = f"count_export_selected_videos_{ws_id}"
+    sel_key = f"count_export_selected_video_{ws_id}"
     video_by_id: Dict[str, Dict[str, Any]] = {str(v["id"]): v for v in videos}
+    ids = list(video_by_id.keys())
 
-    if sel_key not in st.session_state:
-        st.session_state[sel_key] = [str(videos[0]["id"])] if videos else []
-    else:
-        current_ids = set(video_by_id.keys())
-        st.session_state[sel_key] = [
-            vid for vid in st.session_state[sel_key] if vid in current_ids
-        ]
-        if not st.session_state[sel_key] and videos:
-            st.session_state[sel_key] = [str(videos[0]["id"])]
-
-    selected_ids: List[str] = list(st.session_state[sel_key])
+    current = st.session_state.get(sel_key)
+    if current not in video_by_id:
+        current = ids[0]
+        st.session_state[sel_key] = current
 
     def _label(vid: str) -> str:
         v = video_by_id[vid]
-        return f'{v["filename"]} · {v.get("num_tracks", 0)} tracks'
+        src = v.get("local_source_path") or ""
+        folder = os.path.dirname(src) if src else ""
+        prefix = f"{folder}/" if folder else ""
+        return f'{prefix}{v["filename"]} · {v.get("num_tracks", 0)} tracks'
 
-    with st.expander("📼 Videos in this count", expanded=True):
-        can_remove = len(selected_ids) > 1
-        for vid in selected_ids:
-            row = st.columns([0.06, 0.84, 0.10])
-            with row[0]:
-                if st.button(
-                    "✕",
-                    key=f"_remove_video_{ws_id}_{vid}",
-                    help=(
-                        "Remove from selection" if can_remove
-                        else "At least one video must remain selected"
-                    ),
-                    disabled=not can_remove,
-                ):
-                    st.session_state[sel_key] = [
-                        v for v in st.session_state[sel_key] if v != vid
-                    ]
-                    st.rerun()
-            with row[1]:
-                st.write(_label(vid))
-            with row[2]:
-                if vid == selected_ids[0]:
-                    st.caption("preview source")
+    st.selectbox(
+        "📼 Video",
+        options=ids,
+        format_func=_label,
+        key=sel_key,
+    )
+    return st.session_state[sel_key]
 
-        unselected = [vid for vid in video_by_id if vid not in selected_ids]
-        picker_key = f"_add_video_picker_{ws_id}"
-        if unselected:
-            options = [""] + unselected
-            # Drop a stale picker value (the previously-picked video is now
-            # selected and has dropped out of options). This MUST happen
-            # before the selectbox is instantiated this run.
-            if (
-                st.session_state.get(picker_key)
-                and st.session_state[picker_key] not in options
-            ):
-                st.session_state[picker_key] = ""
 
-            def _on_pick() -> None:
-                picked = st.session_state.get(picker_key) or ""
-                if picked and picked not in st.session_state[sel_key]:
-                    st.session_state[sel_key] = st.session_state[sel_key] + [picked]
+# Fragment-scoped reruns keep the export poll out of the full-page
+# rerun cycle. The decorator is only available on Streamlit ≥ 1.33;
+# on older versions we degrade to a plain function call and a
+# whole-page rerun (the previous behaviour).
+_fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
+if _fragment is not None:
+    _export_block_decorator = _fragment
+else:
+    def _export_block_decorator(fn):
+        return fn
 
-            st.selectbox(
-                "Add another video",
-                options=options,
-                format_func=lambda v: "➕ Add another video…" if v == "" else _label(v),
-                key=picker_key,
-                on_change=_on_pick,
-                label_visibility="collapsed",
+
+@_export_block_decorator
+def _export_block(selected_video_id: str, line_ids_for_export: List[str]) -> None:
+    """Render the XLSX-export button + status + download.
+
+    On Streamlit ≥ 1.33 this is a fragment, so polling reruns affect
+    only this widget — the iframe and its frame URLs are not rebuilt.
+    """
+    job_key = f"hybrid_export_job_{selected_video_id}"
+    file_key = f"hybrid_xlsx_{selected_video_id}"
+    name_key = f"hybrid_xlsx_name_{selected_video_id}"
+
+    def _rerun() -> None:
+        # st.rerun(scope="fragment") was added alongside st.fragment;
+        # try the scoped form first, fall back to whole-page rerun.
+        try:
+            st.rerun(scope="fragment")
+        except TypeError:
+            st.rerun()
+
+    col_btn, col_status = st.columns([2, 3])
+    with col_btn:
+        can_export = bool(selected_video_id and line_ids_for_export)
+        if st.button(
+            "Prepare XLSX Export",
+            disabled=not can_export,
+            help="Compute counts and prepare an Excel workbook for download.",
+        ):
+            try:
+                resp = api.start_export(selected_video_id, line_ids_for_export)
+                st.session_state[job_key] = resp["job_id"]
+                st.session_state.pop(file_key, None)
+                _rerun()
+            except api.APIError as exc:
+                st.error(str(exc))
+
+    with col_status:
+        job_id = st.session_state.get(job_key)
+        if job_id and not st.session_state.get(file_key):
+            try:
+                status = api.get_export_status(job_id)
+            except api.APIError as exc:
+                st.error(str(exc))
+                st.session_state.pop(job_key, None)
+            else:
+                if status["status"] in ("pending", "running"):
+                    st.info(f"Preparing… ({status['status']})")
+                    time.sleep(1.5)
+                    _rerun()
+                elif status["status"] == "error":
+                    st.error(f"Export failed: {status.get('error') or 'unknown error'}")
+                    st.session_state.pop(job_key, None)
+                elif status["status"] == "done":
+                    try:
+                        st.session_state[file_key] = api.download_export(job_id)
+                        st.session_state[name_key] = status.get("filename", "counts.xlsx")
+                    except api.APIError as exc:
+                        st.error(str(exc))
+                    else:
+                        st.success("Ready.")
+
+        xlsx_bytes = st.session_state.get(file_key)
+        if xlsx_bytes:
+            st.download_button(
+                "📥 Download XLSX",
+                data=xlsx_bytes,
+                file_name=st.session_state.get(name_key) or "counts.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-
-        if selected_ids:
-            preview_name = video_by_id[selected_ids[0]]["filename"]
-            st.caption(
-                f"Counting over **{len(selected_ids)}** video(s). "
-                f"Preview frame and overlays from **{preview_name}**."
-            )
-
-    return list(st.session_state[sel_key])
 
 
 def render_page() -> None:
@@ -220,39 +232,36 @@ def render_page() -> None:
     videos = [v for v in api.list_videos(ws["id"]) if v.get("status") == "analyzed"]
 
     if not videos:
-        st.info("No analyzed videos in this workspace. Analyze videos on the Videos page first.")
+        st.info("No analyzed videos in this workspace. Process videos on the Watched Folder page first.")
         st.stop()
 
     ws_id = str(ws["id"])
-    counts_key = f"hybrid_live_counts_{ws_id}"
 
-    selected_video_ids = _render_video_selector(ws_id, videos)
-    selected_videos = [v for v in videos if str(v["id"]) in selected_video_ids] or [videos[0]]
-    preview_video = selected_videos[0]
-    selected_video_ids = [str(v["id"]) for v in selected_videos]
+    selected_video_id = _render_video_selector(ws_id, videos)
+    preview_video = next(v for v in videos if str(v["id"]) == selected_video_id)
 
-    hybrid_key = f"hybrid_viewport_{ws_id}"
+    # Hybrid iframe key includes the video id so React fully remounts when the
+    # user picks a different video — different bootstrap, different line set.
+    hybrid_key = f"hybrid_viewport_{ws_id}_{selected_video_id}"
 
     # Streamlit fetches the initial line list for bootstrap only. After mount,
     # the React iframe owns line CRUD and talks to FastAPI directly — see
     # hybrid_viewport/src/App.tsx (server-diff effect) and api.ts.
-    lines = api.list_lines(ws_id)
-    spec = build_viewport_spec(ws, videos, lines)
-    spec = ViewportSpec(
-        project_id=spec.project_id,
-        video_ids=selected_video_ids,
-        selected_line_ids=spec.selected_line_ids,
-        frame_count=spec.frame_count,
-        active_layers=spec.active_layers,
-    )
+    lines = api.list_lines(selected_video_id)
+    spec = build_viewport_spec(ws, preview_video, lines)
 
-    # Fetch scene-based keyframes + overlay asset URLs for the preview video.
-    # Bytes are inlined as data: URIs so the browser never has to reach the API
-    # directly — see _fetch_asset_data_url for the why.
+    # Fetch scene-based keyframes. The browser loads the JPEGs directly from
+    # `PUBLIC_API_URL` (via `api.file_url`) as the user scrubs — we used to
+    # pre-inline every frame as a base64 data URI but that synchronously
+    # fetched N images at render time and, for long videos with hundreds of
+    # scene cuts, OOM-killed the frontend container. Overlay PNGs
+    # (trajectories, heatmap) stay inlined below since they're one-each and
+    # avoid one round-trip when the iframe boots.
     try:
         raw_frames = api.list_video_frames(preview_video["id"])
         frames_for_bootstrap = [
-            {**f, "url": _maybe_fetch_asset_data_url(f.get("url"))} for f in raw_frames
+            {**f, "url": api.file_url(f["url"]) if f.get("url") else None}
+            for f in raw_frames
         ]
     except Exception:
         frames_for_bootstrap = []
@@ -270,14 +279,11 @@ def render_page() -> None:
     except Exception:
         track_stats = None
 
-    # Live counts: prefer cached, fall back to fresh compute.
-    if counts_key not in st.session_state and lines:
-        st.session_state[counts_key] = request_live_counts(
-            spec.project_id, selected_video_ids, [str(l["id"]) for l in lines],
-        )
-    live_counts_raw = st.session_state.get(counts_key)
-
-    suggestions_key = f"hybrid_suggestions_{ws_id}"
+    # Live counts are computed entirely browser-side by the iframe — see the
+    # mount-time scheduleCountsRefresh() in App.tsx. Pre-fetching them here
+    # used to block the page render for minutes on the first cold-cache call
+    # for a long video and trip httpx's 120s timeout.
+    suggestions_key = f"hybrid_suggestions_{selected_video_id}"
     suggestions = st.session_state.get(suggestions_key)
 
     # frameCount driven by actual scene count; frameUrl is legacy fallback.
@@ -287,7 +293,7 @@ def render_page() -> None:
     bootstrap = {
         "spec": {
             "projectId": spec.project_id,
-            "videoIds": spec.video_ids,
+            "videoId": spec.video_id,
             "selectedLineIds": spec.selected_line_ids,
             "frameCount": scene_count,
             "activeLayers": list(spec.active_layers),
@@ -307,7 +313,6 @@ def render_page() -> None:
             "height": int(preview_video.get("height") or 1080),
         },
         "trackStats": track_stats,
-        "counts": _counts_for_react(live_counts_raw),
         "suggestions": suggestions,
     }
 
@@ -316,31 +321,19 @@ def render_page() -> None:
     # workspace/video selection or the XLSX export button below.
     render_hybrid_viewport(bootstrap=bootstrap, key=hybrid_key)
 
-    # Export section (Streamlit-side since file download must come from the host).
+    # Export — async job + fragment-scoped poll. The previous version
+    # used a full-page `st.rerun()` every 1.5 s while a job was active,
+    # which re-ran the iframe-bootstrap-building code (including the
+    # per-frame fetch loop above) on every poll. Wrapping the poll in
+    # `st.fragment` confines reruns to the export widget so the rest of
+    # the page stays still; it also stops cleanly when the websocket
+    # disconnects, so closing the tab no longer leaves a background
+    # poll loop hammering the API. Older Streamlit (<1.33) without
+    # `st.fragment` falls back to a no-op decorator.
     st.divider()
     st.subheader("Export")
     line_ids_for_export = [str(l["id"]) for l in lines]
-    col_btn, col_dl = st.columns([2, 3])
-    with col_btn:
-        if st.button(
-            "Prepare XLSX Export",
-            disabled=not (selected_video_ids and line_ids_for_export),
-            help="Compute counts and prepare an Excel workbook for download.",
-        ):
-            try:
-                xlsx_bytes = api.export_xlsx(spec.project_id, selected_video_ids, line_ids_for_export)
-                st.session_state[f"hybrid_xlsx_{ws['id']}"] = xlsx_bytes
-            except api.APIError as exc:
-                st.error(str(exc))
-    with col_dl:
-        xlsx_bytes = st.session_state.get(f"hybrid_xlsx_{ws['id']}")
-        if xlsx_bytes:
-            st.download_button(
-                "📥 Download XLSX",
-                data=xlsx_bytes,
-                file_name=f"counts-{ws['name'].replace(' ', '_')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+    _export_block(selected_video_id, line_ids_for_export)
 
 
 render_page()

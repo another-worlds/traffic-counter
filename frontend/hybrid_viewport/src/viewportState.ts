@@ -13,7 +13,8 @@ export type LineGeometry = {
 
 export type ViewportSpec = {
   projectId: string;
-  videoIds: string[];
+  /** The single video this viewport edits lines for. */
+  videoId: string;
   selectedLineIds: string[];
   frameCount: number;
   activeLayers: LayerKey[];
@@ -374,7 +375,7 @@ export function reduceOverlayModel(model: OverlayModel, action: OverlayAction): 
 export function buildViewportSpecFromBootstrap(bootstrap?: HostViewportBootstrap): ViewportSpec {
   return {
     projectId: bootstrap?.spec?.projectId ?? 'preview',
-    videoIds: bootstrap?.spec?.videoIds ?? [],
+    videoId: bootstrap?.spec?.videoId ?? '',
     selectedLineIds: bootstrap?.spec?.selectedLineIds ?? [],
     frameCount: bootstrap?.frames?.length ?? bootstrap?.spec?.frameCount ?? 1,
     activeLayers:

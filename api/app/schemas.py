@@ -42,6 +42,28 @@ class VideoOut(BaseModel):
     created_at: datetime
     analyzed_at: Optional[datetime]
     started_analyzing_at: Optional[datetime] = None
+    total_segments: Optional[int] = None
+    segment_duration_s: Optional[float] = None
+
+    class Config:
+        from_attributes = True
+
+
+class VideoSegmentOut(BaseModel):
+    id: str
+    video_id: str
+    segment_idx: int
+    status: str
+    start_frame: int
+    end_frame: int
+    start_time_s: float
+    end_time_s: float
+    num_tracks: Optional[int] = None
+    error_message: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+    last_heartbeat_at: Optional[datetime] = None
+    wall_clock_s: Optional[float] = None  # computed: completed_at − started_at
 
     class Config:
         from_attributes = True
@@ -99,6 +121,13 @@ class WorkerVideoStatus(BaseModel):
     status: str
     progress_pct: float
     started_analyzing_at: Optional[datetime]
+    # Segment-aware progress fields (populated for segmented videos)
+    current_segment_idx: Optional[int] = None
+    total_segments: Optional[int] = None
+    completed_segments: Optional[int] = None
+    eta_seconds: Optional[float] = None
+    speed_ratio: Optional[float] = None       # video-seconds per wall-clock-second
+    worker_status_text: Optional[str] = None  # e.g. "Segment 3 of 12 (2:00–3:00)"
 
 
 class WorkspaceSummary(BaseModel):

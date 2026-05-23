@@ -235,6 +235,14 @@ def reap_stale_jobs() -> Dict:
         return r.json()
 
 
+def get_video_segments(video_id: str) -> List[Dict]:
+    """Return per-hour processing segments for a video."""
+    with _client(timeout=15.0) as c:
+        r = c.get(f"/videos/{video_id}/segments")
+        _raise(r)
+        return r.json()
+
+
 def workspace_summary(project_id: str) -> Dict:
     """Single-query aggregate stats for a workspace."""
     with _client() as c:

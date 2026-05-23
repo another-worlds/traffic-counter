@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime
-from sqlalchemy import Column, String, Text, Integer, Float, BigInteger, ForeignKey, DateTime, JSON
+from sqlalchemy import Column, String, Text, Integer, Float, BigInteger, ForeignKey, DateTime, JSON, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 from .db import Base
@@ -66,12 +66,20 @@ class Video(Base):
     # Absolute host path for local-folder videos; worker reads directly from here.
     local_source_path = Column(String(1024), nullable=True)
 
+    # Per-hour segmented processing.  NULL on old videos (not yet segmented).
+    total_segments = Column(Integer, nullable=True)
+    segment_duration_s = Column(Float, nullable=True)  # seconds per segment, default 3600
+
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     analyzed_at = Column(DateTime)
 
     project = relationship("Project", back_populates="videos")
     lines = relationship(
         "CountingLine", back_populates="video", cascade="all, delete-orphan"
+    )
+    segments = relationship(
+        "VideoSegment", back_populates="video", cascade="all, delete-orphan",
+        order_by="VideoSegment.segment_idx",
     )
 
 
@@ -108,3 +116,44 @@ class CountingLine(Base):
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     video = relationship("Video", back_populates="lines")
+
+
+class VideoSegment(Base):
+    """One hour-sized processing chunk of a video.
+
+    The worker processes each segment independently with a fresh ByteTrack
+    instance and writes a per-segment parquet.  On any restart the worker
+    skips segments whose status is already 'done' and resumes from the
+    first pending one — giving crash-safe, docker-compose-restart-safe
+    checkpointing with no special shutdown logic required.
+    """
+    __tablename__ = "video_segments"
+    __table_args__ = (
+        UniqueConstraint("video_id", "segment_idx", name="uq_video_segments_video_idx"),
+    )
+
+    id = Column(UUID(as_uuid=False), primary_key=True, default=gen_uuid)
+    video_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("videos.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    segment_idx = Column(Integer, nullable=False)  # 0-based
+
+    # pending → analyzing → done | error
+    status = Column(String(32), nullable=False, default="pending")
+
+    start_frame = Column(Integer, nullable=False)
+    end_frame = Column(Integer, nullable=False)
+    start_time_s = Column(Float, nullable=False)
+    end_time_s = Column(Float, nullable=False)
+
+    num_tracks = Column(Integer, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    last_heartbeat_at = Column(DateTime, nullable=True)
+
+    video = relationship("Video", back_populates="segments")

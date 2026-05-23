@@ -1,23 +1,31 @@
 """
 Worker pipeline.
 
-Steps:
-  1. Pull source video from storage to a local temp file.
-  2. Run Ultralytics YOLO + ByteTrack with stream mode (process frame-by-frame).
-  3. For each frame, append every tracked vehicle's center to a list.
-  4. Pull a representative frame (the one with the most active tracks) for the UI.
-  5. Render trajectory overlay PNG (transparent PNG, lines per track).
-  6. Write tracks.parquet, frame.jpg, trajectories.png back to storage.
+Steps per video segment:
+  1. Open the source video and seek to the segment's start frame.
+  2. Run Ultralytics YOLO + ByteTrack on frames [start_frame, end_frame).
+  3. For each frame, append every tracked vehicle's centre to a list.
+  4. Write tracks_segment_{idx:04d}.parquet to storage.
 
-Outputs (Parquet schema):
-  frame_idx int32, t_seconds float64, track_id int32,
-  class_id int16, conf float32, cx float32, cy float32, w float32, h float32
+Finalisation (after all segments are done):
+  5. Detect scene/angle changes across the full video.
+  6. Extract one representative JPEG per scene and upload.
+  7. Load all segment parquets, render a single trajectory overlay PNG
+     for the whole video, upload it.
+
+Segment parquet schema:
+  frame_idx int32, t_seconds float32, track_id int32,
+  class_id int8, conf float32, cx float32, cy float32, w float32, h float32
+
+Track IDs are local to each segment (ByteTrack resets between segments).
+Consumers that merge segments must offset them by segment_idx * TRACK_ID_SEGMENT_OFFSET
+to avoid collisions.
 """
 from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, Generator, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -33,11 +41,17 @@ from ultralytics import YOLO
 torch.backends.cudnn.benchmark = True
 
 from storage import (
-    get_storage, key_video, key_tracks, key_frame, key_scene_frame, key_trajectories,
+    get_storage, key_video, key_tracks, key_tracks_segment,
+    key_frame, key_scene_frame, key_trajectories,
 )
 
 # Vehicle classes (COCO defaults that Ultralytics yolov8 uses).
 VEHICLE_CLASSES = [1, 2, 3, 5, 7]  # bicycle, car, motorcycle, bus, truck
+
+# Consumers merge all segment parquets into one DataFrame.  Offset each
+# segment's track_ids by this multiplier so IDs from different hours
+# never collide when grouping or drawing trajectories.
+TRACK_ID_SEGMENT_OFFSET = 1_000_000
 
 try:
     from scenedetect import open_video as _sd_open_video, SceneManager as _SceneManager
@@ -51,21 +65,16 @@ DEVICE = os.environ.get("DEVICE", "cuda:0")
 HALF = os.environ.get("HALF", "true").lower() == "true"
 TRACKER = os.environ.get("TRACKER", "bytetrack.yaml")
 FRAME_STRIDE = int(os.environ.get("FRAME_STRIDE", "1"))  # process every Nth frame (1=all)
-# Frames fed to the GPU per forward pass. batch=1 leaves a single GPU
-# badly under-utilised (SMs and VRAM mostly idle); larger batches keep it
-# busy. Ultralytics' video loader reads BATCH_SIZE consecutive frames per
-# step and the ByteTrack callback still associates them in temporal order,
-# so tracking semantics are preserved. Tune up until VRAM is ~80% full.
+# Frames fed to the GPU per forward pass. Higher = better GPU utilisation.
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "16"))
-# Cap on how many scene-keyframes the worker will emit per video. Long
-# videos with lots of lighting changes can otherwise generate 200+ JPEGs,
-# which floods the API + frontend when the user opens Count & Export.
+# Cap on scene-keyframes emitted per video.
 MAX_SCENE_FRAMES = int(os.environ.get("MAX_SCENE_FRAMES", "30"))
+# Default segment length in seconds (1 hour).
+SEGMENT_DURATION_S = float(os.environ.get("SEGMENT_DURATION_S", "3600"))
 
 
 def _load_model() -> YOLO:
     model = YOLO(MODEL_NAME)
-    # Warm up to surface device/half issues early
     try:
         model.to(DEVICE)
     except Exception:
@@ -73,7 +82,7 @@ def _load_model() -> YOLO:
     return model
 
 
-def _video_meta(path: str) -> Dict:
+def video_meta(path: str) -> Dict:
     cap = cv2.VideoCapture(path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
     w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -81,6 +90,142 @@ def _video_meta(path: str) -> Dict:
     n = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     cap.release()
     return {"fps": fps, "width": w, "height": h, "num_frames": n}
+
+
+def plan_video_segments(
+    fps: float, num_frames: int, segment_duration_s: float = SEGMENT_DURATION_S
+) -> List[Dict]:
+    """Return the list of segment descriptors for this video.
+
+    Each descriptor has keys: segment_idx, start_frame, end_frame,
+    start_time_s, end_time_s.
+    """
+    frames_per_seg = max(1, int(round(fps * segment_duration_s)))
+    segments = []
+    idx = 0
+    f = 0
+    while f < num_frames:
+        end_f = min(f + frames_per_seg, num_frames)
+        segments.append({
+            "segment_idx": idx,
+            "start_frame": f,
+            "end_frame": end_f,
+            "start_time_s": round(f / fps, 3) if fps > 0 else 0.0,
+            "end_time_s": round(end_f / fps, 3) if fps > 0 else 0.0,
+        })
+        f = end_f
+        idx += 1
+    return segments
+
+
+def _frame_generator(
+    video_path: str, start_frame: int, end_frame: int, stride: int = 1
+) -> Generator:
+    """Yield BGR frames from [start_frame, end_frame) with optional stride."""
+    cap = cv2.VideoCapture(video_path)
+    if start_frame > 0:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    current = start_frame
+    while current < end_frame:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        yield frame
+        current += stride
+        if stride > 1 and current < end_frame:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, current)
+    cap.release()
+
+
+def process_video_segment(
+    project_id: str,
+    video_id: str,
+    segment_idx: int,
+    video_path: str,
+    start_frame: int,
+    end_frame: int,
+    fps: float,
+    on_progress: Optional[Callable[[float], None]] = None,
+) -> int:
+    """Run YOLO+ByteTrack on one segment of the video.
+
+    Writes ``tracks_segment_{segment_idx:04d}.parquet`` to storage and
+    returns the number of unique track IDs found in this segment.
+    Track IDs are local to the segment (ByteTrack state resets each call).
+    """
+    storage = get_storage()
+    model = _load_model()
+
+    # Reset any cached predictor so ByteTrack starts fresh for this segment.
+    if hasattr(model, "predictor") and model.predictor is not None:
+        model.predictor = None
+
+    rows: List[dict] = []
+    total_seg_frames = max(1, (end_frame - start_frame + FRAME_STRIDE - 1) // FRAME_STRIDE)
+    frames_done = 0
+    last_reported = 0
+
+    results_iter = model.track(
+        source=_frame_generator(video_path, start_frame, end_frame, FRAME_STRIDE),
+        stream=True,
+        persist=True,
+        classes=VEHICLE_CLASSES,
+        tracker=TRACKER,
+        half=HALF,
+        device=DEVICE,
+        batch=BATCH_SIZE,
+        verbose=False,
+    )
+
+    # Frame index within the ORIGINAL video (absolute).
+    abs_frame = start_frame
+    for r in results_iter:
+        frame_idx = abs_frame
+        abs_frame += FRAME_STRIDE
+        frames_done += 1
+
+        if on_progress and frames_done - last_reported >= 50:
+            pct = min(frames_done / total_seg_frames, 0.99)
+            on_progress(pct)
+            last_reported = frames_done
+
+        if r.boxes is None or r.boxes.id is None:
+            continue
+        xywh = r.boxes.xywh.cpu().numpy()
+        ids = r.boxes.id.cpu().numpy().astype(np.int32)
+        cls = r.boxes.cls.cpu().numpy().astype(np.int16)
+        conf = r.boxes.conf.cpu().numpy().astype(np.float32)
+
+        for k in range(len(ids)):
+            rows.append({
+                "frame_idx": frame_idx,
+                "t_seconds": frame_idx / fps if fps > 0 else 0.0,
+                "track_id": int(ids[k]),
+                "class_id": int(cls[k]),
+                "conf": float(conf[k]),
+                "cx": float(xywh[k][0]),
+                "cy": float(xywh[k][1]),
+                "w": float(xywh[k][2]),
+                "h": float(xywh[k][3]),
+            })
+
+    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
+        "frame_idx", "t_seconds", "track_id", "class_id", "conf",
+        "cx", "cy", "w", "h",
+    ])
+    num_tracks = int(df["track_id"].nunique()) if not df.empty else 0
+
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tf:
+        tmp_path = tf.name
+    try:
+        df.to_parquet(tmp_path, index=False)
+        storage.upload_file(key_tracks_segment(project_id, video_id, segment_idx), tmp_path)
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+    if on_progress:
+        on_progress(1.0)
+    return num_tracks
 
 
 def _grab_frame(video_path: str, frame_idx: int, out_path: str) -> bool:
@@ -95,11 +240,7 @@ def _grab_frame(video_path: str, frame_idx: int, out_path: str) -> bool:
 
 
 def _detect_scenes(video_path: str, fps: float, num_frames: int) -> list:
-    """Detect scene/angle changes and return one keyframe per scene.
-
-    Falls back to a single mid-video frame if PySceneDetect is unavailable or
-    finds no cuts (uniform footage).
-    """
+    """Detect scene/angle changes and return one keyframe per scene."""
     fallback_idx = max(0, num_frames // 2)
     fallback = [{"index": 0, "frame_index_in_video": fallback_idx,
                  "time_s": round(fallback_idx / fps, 2) if fps > 0 else 0.0}]
@@ -123,9 +264,6 @@ def _detect_scenes(video_path: str, fps: float, num_frames: int) -> list:
                 "frame_index_in_video": int(mid_frame),
                 "time_s": round(mid_frame / fps, 2) if fps > 0 else 0.0,
             })
-        # Cap to MAX_SCENE_FRAMES evenly spaced before any JPEG encode/upload.
-        # Reindex so the on-disk filename (`key_scene_frame(..., sf['index'])`)
-        # matches the list position consumers see.
         if MAX_SCENE_FRAMES >= 1 and len(result) > MAX_SCENE_FRAMES:
             if MAX_SCENE_FRAMES == 1:
                 sampled = [result[len(result) // 2]]
@@ -141,16 +279,12 @@ def _detect_scenes(video_path: str, fps: float, num_frames: int) -> list:
 
 
 def _render_trajectories(df: pd.DataFrame, w: int, h: int, out_path: str) -> None:
-    """
-    Render a transparent PNG of all tracks as polylines.
-    Colors are stable per class.
-    """
     palette = {
-        1: (28, 158, 117, 200),   # bicycle - teal
-        2: (55, 138, 221, 200),   # car - blue
-        3: (239, 159, 39, 220),   # motorcycle - amber
-        5: (215, 90, 48, 220),    # bus - coral
-        7: (226, 75, 74, 220),    # truck - red
+        1: (28, 158, 117, 200),
+        2: (55, 138, 221, 200),
+        3: (239, 159, 39, 220),
+        5: (215, 90, 48, 220),
+        7: (226, 75, 74, 220),
     }
     img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
@@ -161,134 +295,89 @@ def _render_trajectories(df: pd.DataFrame, w: int, h: int, out_path: str) -> Non
             continue
         cls = int(g["class_id"].mode().iloc[0])
         color = palette.get(cls, (180, 180, 180, 200))
-        # Draw as connected lines
         flat = [(float(x), float(y)) for x, y in pts]
         draw.line(flat, fill=color, width=2)
 
     img.save(out_path, optimize=True)
 
 
-def process_video(
+def finalize_video_post_processing(
     project_id: str,
     video_id: str,
-    filename: str,
+    video_path: str,
+    meta: Dict,
+    total_segments: int,
     on_progress: Optional[Callable[[float], None]] = None,
-    local_source_path: Optional[str] = None,
-) -> Dict:
+) -> Tuple[List[dict], int]:
+    """Run scene detection, upload keyframes, render and upload the
+    whole-video trajectory PNG.
+
+    Returns (scene_frames, total_num_tracks).  Called once after all
+    segments have been processed.
+    """
     storage = get_storage()
+    fps = meta["fps"]
+    w, h = meta["width"], meta["height"]
+    num_frames = meta["num_frames"] or 1
+
+    # Load all segment parquets and concat for trajectory rendering.
+    seg_dfs: List[pd.DataFrame] = []
+    total_tracks = 0
+    for seg_idx in range(total_segments):
+        seg_key = key_tracks_segment(project_id, video_id, seg_idx)
+        if not storage.exists(seg_key):
+            continue
+        local = getattr(storage, "local_path", lambda _k: None)(seg_key)
+        if local:
+            seg_df = pd.read_parquet(local)
+        else:
+            import io
+            with storage.open_read(seg_key) as fp:
+                seg_df = pd.read_parquet(io.BytesIO(fp.read()))
+        if not seg_df.empty:
+            # Offset track IDs so they don't collide across segments.
+            seg_df = seg_df.copy()
+            seg_df["track_id"] = seg_df["track_id"] + seg_idx * TRACK_ID_SEGMENT_OFFSET
+            total_tracks += int(seg_df["track_id"].nunique())
+        seg_dfs.append(seg_df)
+
+    all_tracks = pd.concat(seg_dfs, ignore_index=True) if seg_dfs else pd.DataFrame(
+        columns=["frame_idx", "t_seconds", "track_id", "class_id", "conf",
+                 "cx", "cy", "w", "h"]
+    )
+
+    if on_progress:
+        on_progress(0.9)
+
+    scenes = _detect_scenes(video_path, fps, num_frames)
 
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)
-        local_tracks = str(td / "tracks.parquet")
-        local_frame = str(td / "frame.jpg")
-        local_traj = str(td / "trajectories.png")
 
-        if local_source_path:
-            # Video lives on the watched folder mount — read it directly, no copy.
-            local_video = local_source_path
-        else:
-            src_key = key_video(project_id, video_id, filename)
-            local_video = str(td / Path(filename).name)
-            storage.download_to(src_key, local_video)
-        meta = _video_meta(local_video)
-        fps = meta["fps"]
-        w, h = meta["width"], meta["height"]
-
-        model = _load_model()
-
-        rows: List[dict] = []
-        per_frame_counts: Dict[int, int] = {}
-        total_frames = meta["num_frames"] or 1
-        frames_processed = 0
-        last_reported = 0
-
-        # Ultralytics' track() handles ByteTrack and ID assignment for us.
-        # stream=True yields a Results object per frame without storing them all.
-        results_iter = model.track(
-            source=local_video,
-            stream=True,
-            persist=True,
-            classes=VEHICLE_CLASSES,
-            tracker=TRACKER,
-            half=HALF,
-            device=DEVICE,
-            vid_stride=FRAME_STRIDE,
-            batch=BATCH_SIZE,
-            verbose=False,
-        )
-
-        for r in results_iter:
-            frame_idx = int(getattr(r, "frame_id", 0) or 0)
-            frames_processed += 1
-
-            # Report progress every 50 frames (keeps DB writes negligible)
-            if on_progress and frames_processed - last_reported >= 50:
-                pct = min(frames_processed / total_frames, 0.99)
-                on_progress(pct)
-                last_reported = frames_processed
-
-            if r.boxes is None or r.boxes.id is None:
-                continue
-            xywh = r.boxes.xywh.cpu().numpy()
-            ids = r.boxes.id.cpu().numpy().astype(np.int32)
-            cls = r.boxes.cls.cpu().numpy().astype(np.int16)
-            conf = r.boxes.conf.cpu().numpy().astype(np.float32)
-            per_frame_counts[frame_idx] = len(ids)
-
-            for k in range(len(ids)):
-                rows.append({
-                    "frame_idx": frame_idx,
-                    "t_seconds": frame_idx / fps if fps > 0 else 0.0,
-                    "track_id": int(ids[k]),
-                    "class_id": int(cls[k]),
-                    "conf": float(conf[k]),
-                    "cx": float(xywh[k][0]),
-                    "cy": float(xywh[k][1]),
-                    "w": float(xywh[k][2]),
-                    "h": float(xywh[k][3]),
-                })
-
-        df = pd.DataFrame(rows)
-        if df.empty:
-            df = pd.DataFrame(columns=[
-                "frame_idx", "t_seconds", "track_id", "class_id", "conf",
-                "cx", "cy", "w", "h",
-            ])
-
-        # Detect scene/angle changes; extract one representative frame per scene.
-        scenes = _detect_scenes(local_video, fps, meta["num_frames"] or 1)
-        # Defensive heartbeat: scene encode on a long, slow disk can run
-        # tens of seconds; bump progress so the reaper doesn't fire while
-        # we're still post-processing.
         if on_progress:
-            on_progress(0.95)
+            on_progress(0.92)
+
         for scene in scenes:
-            local_scene_frame = str(td / f"frame_{scene['index']}.jpg")
-            _grab_frame(local_video, scene["frame_index_in_video"], local_scene_frame)
+            local_sf = str(td / f"frame_{scene['index']}.jpg")
+            _grab_frame(video_path, scene["frame_index_in_video"], local_sf)
             storage.upload_file(
                 key_scene_frame(project_id, video_id, scene["index"]),
-                local_scene_frame,
+                local_sf,
             )
             if on_progress:
-                # Re-heartbeat after each scene encode for very long videos
-                # where even 30 frames may take a couple of minutes total.
-                on_progress(0.95)
+                on_progress(0.93)
 
-        # Also write scene 0 to the legacy frame.jpg key for backward compat.
         if scenes:
             storage.upload_file(
                 key_frame(project_id, video_id),
                 str(td / f"frame_{scenes[0]['index']}.jpg"),
             )
 
-        _render_trajectories(df, w, h, local_traj)
-        df.to_parquet(local_tracks, index=False)
-
-        storage.upload_file(key_tracks(project_id, video_id), local_tracks)
+        local_traj = str(td / "trajectories.png")
+        _render_trajectories(all_tracks, w, h, local_traj)
         storage.upload_file(key_trajectories(project_id, video_id), local_traj)
 
-    return {
-        **meta,
-        "num_tracks": int(df["track_id"].nunique()) if not df.empty else 0,
-        "scene_frames": scenes,
-    }
+    if on_progress:
+        on_progress(1.0)
+
+    return scenes, total_tracks

@@ -66,6 +66,24 @@ def _health_badge(percentage: float) -> tuple[str, str]:
     return "🔴", "#dc2626"
 
 
+def _fmt_eta(seconds: float) -> str:
+    """Format seconds as a human-readable ETA string."""
+    if seconds < 60:
+        return f"~{int(seconds)}s"
+    if seconds < 3600:
+        return f"~{int(seconds / 60)}m"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    return f"~{h}h {m:02d}m"
+
+
+def _fmt_speed(ratio: float) -> str:
+    """Format speed ratio as 'Nx faster than real time'."""
+    if ratio >= 1:
+        return f"{ratio:.1f}× speed"
+    return f"1/{1/ratio:.1f}× speed"
+
+
 try:
     videos = api.list_local_folder_videos()
     queue = api.worker_status()
@@ -79,6 +97,9 @@ if not videos:
         f"`{WATCH_PATH}`."
     )
     st.stop()
+
+# Build lookup dict for queue items by video_id (includes enriched segment data).
+queue_by_id = {item["video_id"]: item for item in queue}
 
 status_counts = defaultdict(int)
 for v in videos:
@@ -127,6 +148,12 @@ for folder, items in folders.items():
     total_hours = sum(_duration_s(v) for v in items) / 3600.0
     processed_hours = sum(_duration_s(v) for v in items if v["status"] == "analyzed") / 3600.0
     completion = analyzed_n / max(1, count)
+    # ETA for this folder: sum of ETAs from queue items that belong to this folder.
+    folder_eta_s = sum(
+        queue_by_id[v["id"]].get("eta_seconds") or 0.0
+        for v in items
+        if v["id"] in queue_by_id and queue_by_id[v["id"]].get("eta_seconds")
+    )
     folder_rows.append({
         "folder": folder,
         "count": count,
@@ -136,6 +163,7 @@ for folder, items in folders.items():
         "total_hours": total_hours,
         "processed_hours": processed_hours,
         "completion": completion,
+        "eta_s": folder_eta_s,
     })
 
 folder_rows.sort(key=lambda r: (r["completion"], -r["count"]))
@@ -174,7 +202,10 @@ with left:
                 resp = api.reap_stale_jobs()
                 count = resp.get("count", 0)
                 if count:
-                    st.success(f"Cleared {count} stuck job(s). They now show as Error — click Analyze to retry.")
+                    st.success(
+                        f"Cleared {count} stuck job(s). "
+                        "Completed segments are preserved — click Analyze to resume from last checkpoint."
+                    )
                 else:
                     st.info("No stuck jobs.")
                 st.rerun()
@@ -196,7 +227,15 @@ with right:
             st.write(f"**{item['filename']}**")
             st.caption(f"{item['project_name']} · {item['status']}")
             if item["status"] == "analyzing":
-                st.progress(pct, text=f"{pct*100:.0f}%")
+                status_txt = item.get("worker_status_text") or f"{pct*100:.0f}%"
+                st.progress(pct, text=status_txt)
+                meta_parts = []
+                if item.get("speed_ratio"):
+                    meta_parts.append(_fmt_speed(item["speed_ratio"]))
+                if item.get("eta_seconds"):
+                    meta_parts.append(f"ETA {_fmt_eta(item['eta_seconds'])}")
+                if meta_parts:
+                    st.caption(" · ".join(meta_parts))
 
 # Folder selection area
 st.divider()
@@ -220,10 +259,14 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-fc1, fc2, fc3 = st.columns(3)
+fc1, fc2, fc3, fc4 = st.columns(4)
 fc1.metric("Total hours in folder", f"{selected_row['total_hours']:.2f}h")
 fc2.metric("Processed hours", f"{selected_row['processed_hours']:.2f}h")
 fc3.metric("Folder completion", f"{selected_row['completion']*100:.1f}%")
+if selected_row["eta_s"] > 0:
+    fc4.metric("Folder ETA", _fmt_eta(selected_row["eta_s"]))
+else:
+    fc4.metric("Folder ETA", "—")
 st.progress(selected_row["completion"], text=f"{status_icon} Folder completion {selected_row['completion']*100:.1f}%")
 
 st.markdown("### Folder Video List")
@@ -237,6 +280,7 @@ status_chip = {
 }
 
 for v in folder_videos:
+    q_item = queue_by_id.get(v["id"])
     with st.container(border=True):
         c1, c2, c3 = st.columns([5, 2, 2])
         with c1:
@@ -246,12 +290,36 @@ for v in folder_videos:
         with c2:
             st.markdown(status_chip.get(v["status"], v["status"]))
             duration = _duration_s(v) / 60.0
-            st.caption(f"{duration:.1f} min")
-            if v["status"] == "analyzing" and v.get("progress_pct") is not None:
-                st.progress(v["progress_pct"], text=f"{v['progress_pct']*100:.0f}%")
+            total_segs = v.get("total_segments")
+            if total_segs:
+                st.caption(f"{duration:.1f} min · {total_segs} segments")
+            else:
+                st.caption(f"{duration:.1f} min")
+            if v["status"] == "analyzing":
+                pct = v.get("progress_pct") or 0.0
+                status_txt = (q_item or {}).get("worker_status_text") or f"{pct*100:.0f}%"
+                st.progress(pct, text=status_txt)
+                if q_item:
+                    speed = q_item.get("speed_ratio")
+                    eta = q_item.get("eta_seconds")
+                    caps = []
+                    if speed:
+                        caps.append(_fmt_speed(speed))
+                    if eta:
+                        caps.append(f"ETA {_fmt_eta(eta)}")
+                    if caps:
+                        st.caption(" · ".join(caps))
+            elif v["status"] == "error":
+                err = v.get("error_message") or ""
+                # Show a concise first line; full message in expander.
+                first_line = err.splitlines()[0] if err else "Unknown error"
+                st.caption(f"⚠️ {first_line[:80]}")
         with c3:
             if v["status"] in {"uploaded", "error"}:
-                if st.button("Analyze", key=f"analyze_{v['id']}", use_container_width=True):
+                btn_label = "Analyze" if v["status"] == "uploaded" else "Retry"
+                if v["status"] == "error" and v.get("total_segments"):
+                    btn_label = "Resume"
+                if st.button(btn_label, key=f"analyze_{v['id']}", use_container_width=True):
                     try:
                         api.analyze_video(v["id"])
                         st.rerun()
@@ -259,6 +327,58 @@ for v in folder_videos:
                         st.error(str(exc))
             else:
                 st.caption("Managed by queue")
+
+        # Expandable segment breakdown (shown when segments exist)
+        seg_count = v.get("total_segments") or 0
+        if seg_count > 0:
+            completed_segs = (q_item or {}).get("completed_segments") or 0
+            label = f"Segments ({completed_segs}/{seg_count} done)"
+            with st.expander(label, expanded=False):
+                try:
+                    segs = api.get_video_segments(v["id"])
+                except api.APIError:
+                    st.warning("Could not load segment data.")
+                    segs = []
+                if segs:
+                    seg_status_icon = {
+                        "pending": "⬜",
+                        "analyzing": "🟧",
+                        "done": "🟩",
+                        "error": "🟥",
+                    }
+                    for s in segs:
+                        t0 = s["start_time_s"]
+                        t1 = s["end_time_s"]
+                        h0 = int(t0 // 3600)
+                        h1 = int(t1 // 3600)
+                        time_range = f"{h0}:00–{h1}:00"
+                        icon = seg_status_icon.get(s["status"], "❓")
+                        parts = [f"{icon} Seg {s['segment_idx']+1}: {time_range}"]
+                        if s["status"] == "done":
+                            if s.get("num_tracks") is not None:
+                                parts.append(f"{s['num_tracks']} tracks")
+                            if s.get("wall_clock_s"):
+                                wc = s["wall_clock_s"]
+                                vid_s = t1 - t0
+                                ratio = vid_s / wc if wc > 0 else None
+                                parts.append(f"{wc/60:.1f} min wall")
+                                if ratio:
+                                    parts.append(_fmt_speed(ratio))
+                        elif s["status"] == "error" and s.get("error_message"):
+                            first = s["error_message"].splitlines()[0][:60]
+                            parts.append(f"⚠️ {first}")
+                        elif s["status"] == "analyzing":
+                            parts.append("⏳ In progress")
+                        st.caption(" · ".join(parts))
+                elif v.get("status") == "analyzed":
+                    st.caption("Segment data not available (legacy single-parquet video).")
+                else:
+                    st.caption("No segments planned yet.")
+
+        # Full error details expander
+        if v["status"] == "error" and v.get("error_message"):
+            with st.expander("Full error details", expanded=False):
+                st.code(v["error_message"], language=None)
 
 if auto_refresh and in_queue > 0:
     time.sleep(3)

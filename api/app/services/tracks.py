@@ -26,7 +26,7 @@ from .counting import (
     materialize_tracks,
     materialized_nbytes,
 )
-from .storage import get_storage, key_tracks
+from .storage import get_storage, key_tracks, key_tracks_segment
 
 
 _EMPTY_COLS = [
@@ -177,7 +177,66 @@ def _resolve_cache_key(project_id: str, video_id: str) -> Optional[tuple]:
     return (project_id, video_id, stat["mtime"], stat["size"])
 
 
+# Maximum number of hourly segments we will scan for (100 h ≈ 4 days).
+_MAX_SEGMENTS = 100
+
+# Offset applied to track_ids from each segment so IDs from different
+# hours never collide when the full DataFrame is assembled.
+_TRACK_ID_SEGMENT_OFFSET = 1_000_000
+
+
+def _resolve_segment_cache_key(project_id: str, video_id: str) -> Optional[tuple]:
+    """Return a cache key based on the set of completed segment parquets.
+
+    Returns None if no segment parquets exist yet (fall through to legacy key).
+    """
+    storage = get_storage()
+    stats = []
+    for seg_idx in range(_MAX_SEGMENTS):
+        key = key_tracks_segment(project_id, video_id, seg_idx)
+        if not storage.exists(key):
+            break
+        st = storage.stat(key)
+        stats.append((st["mtime"], st["size"]))
+    if not stats:
+        return None
+    return (project_id, video_id, "segments", len(stats), hash(tuple(stats)))
+
+
+def _load_segments_df(project_id: str, video_id: str) -> Optional[pd.DataFrame]:
+    """Load and concatenate all per-segment parquets, offsetting track IDs.
+
+    Returns None if no segment parquets exist.
+    """
+    storage = get_storage()
+    seg_dfs: list[pd.DataFrame] = []
+    for seg_idx in range(_MAX_SEGMENTS):
+        key = key_tracks_segment(project_id, video_id, seg_idx)
+        if not storage.exists(key):
+            break
+        df = _normalise_dtypes(_read_parquet(storage, key))
+        if not df.empty:
+            df = df.copy()
+            df["track_id"] = df["track_id"] + seg_idx * _TRACK_ID_SEGMENT_OFFSET
+        seg_dfs.append(df)
+    if not seg_dfs:
+        return None
+    return pd.concat(seg_dfs, ignore_index=True)
+
+
 def load_tracks_for_video(project_id: str, video_id: str) -> pd.DataFrame:
+    # Prefer per-segment parquets (segmented 8-24h videos).
+    seg_ck = _resolve_segment_cache_key(project_id, video_id)
+    if seg_ck is not None:
+        entry = _cache_get(seg_ck)
+        if entry is not None:
+            return entry.df
+        df = _load_segments_df(project_id, video_id)
+        if df is not None:
+            _cache_put_df(seg_ck, df)
+            return df
+
+    # Fall back to the legacy single-parquet path (short videos, old data).
     ck = _resolve_cache_key(project_id, video_id)
     if ck is None:
         return pd.DataFrame(columns=_EMPTY_COLS)
@@ -194,23 +253,27 @@ def load_materialized_tracks(project_id: str, video_id: str) -> MaterializedTrac
     """Return the per-video MaterializedTracks, building (and caching) it on
     first use. Cache identity matches the parquet cache so a re-analysis
     transparently invalidates both halves at once."""
-    ck = _resolve_cache_key(project_id, video_id)
+    # Resolve the appropriate cache key (segment-based or legacy).
+    seg_ck = _resolve_segment_cache_key(project_id, video_id)
+    ck = seg_ck or _resolve_cache_key(project_id, video_id)
+
     if ck is None:
-        # No tracks on disk yet; materialise the empty frame so callers don't
-        # need to special-case the missing-file path.
         return materialize_tracks(pd.DataFrame(columns=_EMPTY_COLS))
+
     entry = _cache_get(ck)
     if entry is None:
-        storage = get_storage()
-        df = _normalise_dtypes(_read_parquet(storage, key_tracks(project_id, video_id)))
+        if seg_ck is not None:
+            df = _load_segments_df(project_id, video_id) or pd.DataFrame(columns=_EMPTY_COLS)
+        else:
+            storage = get_storage()
+            df = _normalise_dtypes(_read_parquet(storage, key_tracks(project_id, video_id)))
         entry = _cache_put_df(ck, df)
+
     if entry.mt is not None:
         return entry.mt
-    # Build outside the lock — materialise can take a second or two on huge
-    # videos and we don't want to block concurrent readers of *other* videos.
+
     mt = materialize_tracks(entry.df)
     with _cache_lock:
-        # Re-check after acquiring: another caller may have raced us.
         existing = _cache.get(ck)
         if existing is not None and existing.mt is None:
             _attach_materialized_locked(existing, mt)

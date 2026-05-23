@@ -58,6 +58,9 @@ def _safe_add_columns():
         "ALTER TABLE counting_lines ALTER COLUMN project_id DROP NOT NULL",
         "ALTER TABLE counting_lines ADD COLUMN IF NOT EXISTS video_id UUID REFERENCES videos(id) ON DELETE CASCADE",
         "CREATE INDEX IF NOT EXISTS ix_counting_lines_video_id ON counting_lines(video_id)",
+        # Per-segment processing columns (for 8-24h video support).
+        "ALTER TABLE videos ADD COLUMN IF NOT EXISTS total_segments INTEGER",
+        "ALTER TABLE videos ADD COLUMN IF NOT EXISTS segment_duration_s FLOAT",
         # Migration ledger — used to gate one-shot data migrations.
         """CREATE TABLE IF NOT EXISTS _migrations (
             name VARCHAR PRIMARY KEY,
@@ -71,6 +74,25 @@ def _safe_add_columns():
             upload_length BIGINT NOT NULL,
             created_at TIMESTAMP DEFAULT NOW()
         )""",
+        # Per-segment checkpoint table for 8-24h video processing.
+        """CREATE TABLE IF NOT EXISTS video_segments (
+            id VARCHAR PRIMARY KEY,
+            video_id VARCHAR NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+            segment_idx INTEGER NOT NULL,
+            status VARCHAR(32) NOT NULL DEFAULT 'pending',
+            start_frame INTEGER NOT NULL,
+            end_frame INTEGER NOT NULL,
+            start_time_s FLOAT NOT NULL,
+            end_time_s FLOAT NOT NULL,
+            num_tracks INTEGER,
+            started_at TIMESTAMP,
+            completed_at TIMESTAMP,
+            last_heartbeat_at TIMESTAMP,
+            error_message TEXT,
+            UNIQUE (video_id, segment_idx)
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_video_segments_video_id ON video_segments(video_id)",
+        "CREATE INDEX IF NOT EXISTS ix_video_segments_status ON video_segments(status)",
     ]
     with engine.begin() as conn:
         for stmt in stmts:

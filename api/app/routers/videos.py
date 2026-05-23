@@ -6,8 +6,8 @@ from sqlalchemy.orm import Session
 from typing import List
 
 from ..db import get_db
-from ..models import Project, Video
-from ..schemas import VideoOut, AnalyzeResponse
+from ..models import Project, Video, VideoSegment
+from ..schemas import VideoOut, AnalyzeResponse, VideoSegmentOut
 from ..services.storage import (
     get_storage, key_video, key_frame, key_scene_frame, key_trajectories, key_heatmap,
 )
@@ -75,6 +75,41 @@ def get_video(video_id: str, db: Session = Depends(get_db)):
     if not v:
         raise HTTPException(404, "video not found")
     return v
+
+
+@router.get("/videos/{video_id}/segments", response_model=List[VideoSegmentOut])
+def get_video_segments(video_id: str, db: Session = Depends(get_db)):
+    """Return per-hour processing segments for a video, ordered by segment index."""
+    if not db.get(Video, video_id):
+        raise HTTPException(404, "video not found")
+    segs = (
+        db.query(VideoSegment)
+        .filter(VideoSegment.video_id == video_id)
+        .order_by(VideoSegment.segment_idx)
+        .all()
+    )
+    result = []
+    for s in segs:
+        wall_s = None
+        if s.completed_at and s.started_at:
+            wall_s = (s.completed_at - s.started_at).total_seconds()
+        result.append(VideoSegmentOut(
+            id=str(s.id),
+            video_id=str(s.video_id),
+            segment_idx=s.segment_idx,
+            status=s.status,
+            start_frame=s.start_frame,
+            end_frame=s.end_frame,
+            start_time_s=s.start_time_s,
+            end_time_s=s.end_time_s,
+            num_tracks=s.num_tracks,
+            error_message=s.error_message,
+            started_at=s.started_at,
+            completed_at=s.completed_at,
+            last_heartbeat_at=s.last_heartbeat_at,
+            wall_clock_s=wall_s,
+        ))
+    return result
 
 
 @router.post("/videos/{video_id}/analyze", response_model=AnalyzeResponse)

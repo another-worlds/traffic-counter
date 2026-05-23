@@ -24,7 +24,7 @@ from typing import List, Optional
 
 from ..config import settings
 from ..db import SessionLocal
-from ..models import CountingLine, Project, Video
+from ..models import CountingLine, Project, Video, VideoSegment
 from .tracks import load_tracks_for_video
 from .xlsx_export import build_xlsx_for_video
 
@@ -127,11 +127,32 @@ def run_export_job(
                 for ln in lines
             ]
             tracks_df = load_tracks_for_video(project_id, video_id)
+
+            # Collect per-hour segment metadata (if any) for the xlsx builder.
+            segments = (
+                db.query(VideoSegment)
+                .filter(
+                    VideoSegment.video_id == video_id,
+                    VideoSegment.status == "done",
+                )
+                .order_by(VideoSegment.segment_idx)
+                .all()
+            )
+            segments_dict = [
+                {
+                    "segment_idx": s.segment_idx,
+                    "start_time_s": s.start_time_s,
+                    "end_time_s": s.end_time_s,
+                }
+                for s in segments
+            ] if segments else None
+
             data = build_xlsx_for_video(
                 project_name=project_name,
                 video_filename=video_filename,
                 tracks_df=tracks_df,
                 lines=lines_dict,
+                segments=segments_dict,
             )
 
             # Persist alongside other artifacts.

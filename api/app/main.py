@@ -9,7 +9,7 @@ from pathlib import Path
 from .config import settings
 from .db import SessionLocal, init_db
 from .routers import projects, videos, lines, analysis, worker, upload_tus, local_folder
-from .services.reaper import reap_stale_claims
+from .services.reaper import reap_stale_claims, reap_stale_segment_claims
 from .services import sources as sources_svc
 from .services import xlsx_jobs
 
@@ -20,7 +20,10 @@ log = logging.getLogger("api.reaper")
 
 def _reap_once() -> list[str]:
     with SessionLocal() as db:
-        return reap_stale_claims(db, settings.stale_claim_threshold_seconds)
+        video_ids = reap_stale_claims(db, settings.stale_claim_threshold_seconds)
+    with SessionLocal() as db:
+        seg_ids = reap_stale_segment_claims(db, settings.stale_claim_threshold_seconds)
+    return video_ids
 
 
 def create_app() -> FastAPI:
@@ -91,6 +94,8 @@ def create_app() -> FastAPI:
         try:
             with SessionLocal() as db:
                 reaped = reap_stale_claims(db, settings.stale_claim_threshold_seconds)
+            with SessionLocal() as db:
+                reap_stale_segment_claims(db, settings.stale_claim_threshold_seconds)
             if reaped:
                 log.info("startup reaper: flipped %d stale video(s) to error", len(reaped))
         except Exception:

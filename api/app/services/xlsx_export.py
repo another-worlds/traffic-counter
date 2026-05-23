@@ -2,10 +2,12 @@
 xlsx export. One workbook per export request, with:
   - "Summary" sheet: every line × video pair, plus totals.
   - One sheet per video, with the same breakdown for that video alone.
+  - When a video has per-hour segments, each hour gets its own sheet
+    showing line counts for that hour only.
 """
 from __future__ import annotations
 import io
-from typing import List, Dict
+from typing import List, Dict, Optional
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
@@ -139,11 +141,14 @@ def build_xlsx_for_video(
     video_filename: str,
     tracks_df,
     lines: List[Dict],
+    segments: Optional[List[Dict]] = None,
 ) -> bytes:
     """One-video workbook: Summary header + a single details sheet.
+    When ``segments`` is provided (list of dicts with start_time_s, end_time_s,
+    segment_idx), one additional sheet per hour is appended showing line
+    counts for that hour only.
 
-    Used by the per-video export job. Skips the multi-video aggregation
-    in :func:`build_xlsx` since the per-video model has only one scope.
+    Used by the per-video export job.
     """
     wb = Workbook()
     ws = wb.active
@@ -175,7 +180,71 @@ def build_xlsx_for_video(
     ws.cell(row=r, column=3, value=counts["total_unique_tracks"]).font = Font(bold=True)
     _autosize(ws)
 
+    # Per-hour sheets when segment metadata is available.
+    if segments:
+        _add_hourly_sheets(wb, tracks_df, lines, headers, segments)
+
     buf = io.BytesIO()
     wb.save(buf)
     buf.seek(0)
     return buf.getvalue()
+
+
+def _add_hourly_sheets(
+    wb: Workbook,
+    tracks_df,
+    lines: List[Dict],
+    headers: List[str],
+    segments: List[Dict],
+) -> None:
+    """Append one sheet per segment to *wb*, filtering *tracks_df* by time range."""
+    import pandas as _pd
+    from .counting import materialize_tracks as _mat
+
+    is_df = isinstance(tracks_df, _pd.DataFrame)
+
+    for seg in sorted(segments, key=lambda s: s["segment_idx"]):
+        idx = seg["segment_idx"]
+        t0 = float(seg.get("start_time_s", 0))
+        t1 = float(seg.get("end_time_s", t0 + 3600))
+
+        # Format label: "Hour 0 (0:00–1:00)"
+        def _fmt(secs: float) -> str:
+            h = int(secs // 3600)
+            m = int((secs % 3600) // 60)
+            return f"{h}:{m:02d}"
+
+        label = f"Hour {idx} ({_fmt(t0)}–{_fmt(t1)})"
+        safe = "".join(c for c in label if c not in r'/\?*[]:').strip()
+        base = safe[:31]
+        i = 1
+        while base in wb.sheetnames:
+            i += 1
+            base = f"{safe[:28]}_{i}"
+
+        wsv = wb.create_sheet(title=base)
+        wsv.cell(row=1, column=1, value=label).font = Font(bold=True, size=12)
+        _write_header(wsv, headers, row=3)
+
+        # Slice the full DataFrame to this hour's time window.
+        if is_df and not tracks_df.empty:
+            # t_seconds in the merged df is absolute; filter to [t0, t1).
+            mask = (tracks_df["t_seconds"] >= t0) & (tracks_df["t_seconds"] < t1)
+            seg_df = tracks_df[mask]
+        else:
+            seg_df = _pd.DataFrame(columns=tracks_df.columns if is_df else [
+                "frame_idx", "t_seconds", "track_id", "class_id", "conf",
+                "cx", "cy", "w", "h",
+            ])
+
+        seg_mt = _mat(seg_df)
+        per = compute_counts_for_lines(seg_mt, lines)
+
+        rr = 4
+        for row in _line_rows(per, scope=label):
+            for j, val in enumerate(row, start=1):
+                wsv.cell(row=rr, column=j, value=val)
+            rr += 1
+        wsv.cell(row=rr, column=2, value="UNIQUE TRACKS IN HOUR").font = Font(bold=True)
+        wsv.cell(row=rr, column=3, value=per["total_unique_tracks"]).font = Font(bold=True)
+        _autosize(wsv)

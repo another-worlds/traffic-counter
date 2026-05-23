@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
@@ -10,6 +12,11 @@ from ..services.storage import (
     get_storage, key_video, key_frame, key_scene_frame, key_trajectories, key_heatmap,
 )
 from ..services.jobs import get_job_runner
+
+# A claim whose heartbeat is fresher than this is treated as owned by a
+# live worker — the heartbeat thread writes every ~10 s, so 60 s without
+# one means the worker is gone and a manual re-analyze should requeue.
+_ANALYZE_LIVENESS_GRACE_S = 60
 
 router = APIRouter(tags=["videos"])
 
@@ -75,11 +82,25 @@ def analyze_video(video_id: str, db: Session = Depends(get_db)):
     v = db.get(Video, video_id)
     if not v:
         raise HTTPException(404, "video not found")
-    if v.status in ("queued", "analyzing"):
-        return AnalyzeResponse(video_id=video_id, status=v.status)
+    if v.status == "queued":
+        return AnalyzeResponse(video_id=video_id, status="queued")
+    if v.status == "analyzing":
+        # Only treat it as in-progress if a worker is actually alive on it.
+        # An orphaned claim (container restart, crash) has a stale heartbeat
+        # and must be requeueable, or the user is stuck until the reaper runs.
+        hb = v.last_heartbeat_at
+        fresh = hb is not None and hb > datetime.utcnow() - timedelta(
+            seconds=_ANALYZE_LIVENESS_GRACE_S
+        )
+        if fresh:
+            return AnalyzeResponse(video_id=video_id, status="analyzing")
+        # Stale claim — fall through and requeue.
 
     v.status = "queued"
     v.error_message = None
+    v.started_analyzing_at = None
+    v.last_heartbeat_at = None
+    v.progress_pct = None
     db.commit()
 
     get_job_runner().enqueue(video_id=video_id, project_id=v.project_id)

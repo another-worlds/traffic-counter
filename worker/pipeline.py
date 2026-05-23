@@ -137,6 +137,18 @@ def _frame_generator(
     cap.release()
 
 
+def _chunked(iterable, size: int) -> Generator:
+    """Group an iterable into lists of at most ``size`` items."""
+    chunk: list = []
+    for item in iterable:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
 def process_video_segment(
     project_id: str,
     video_id: str,
@@ -165,49 +177,54 @@ def process_video_segment(
     frames_done = 0
     last_reported = 0
 
-    results_iter = model.track(
-        source=_frame_generator(video_path, start_frame, end_frame, FRAME_STRIDE),
-        stream=True,
-        persist=True,
-        classes=VEHICLE_CLASSES,
-        tracker=TRACKER,
-        half=HALF,
-        device=DEVICE,
-        batch=BATCH_SIZE,
-        verbose=False,
-    )
+    # Ultralytics does not accept a Python generator as ``source`` (it raises
+    # "Unsupported image type"). Feed frames as fixed-size lists instead: a
+    # list source is supported, keeps peak memory bounded to BATCH_SIZE frames,
+    # and — with persist=True — ByteTrack state carries across chunks since the
+    # tracker is reset only between segments (model.predictor=None above).
+    frames = _frame_generator(video_path, start_frame, end_frame, FRAME_STRIDE)
 
     # Frame index within the ORIGINAL video (absolute).
     abs_frame = start_frame
-    for r in results_iter:
-        frame_idx = abs_frame
-        abs_frame += FRAME_STRIDE
-        frames_done += 1
+    for batch_frames in _chunked(frames, BATCH_SIZE):
+        results = model.track(
+            source=batch_frames,
+            persist=True,
+            classes=VEHICLE_CLASSES,
+            tracker=TRACKER,
+            half=HALF,
+            device=DEVICE,
+            verbose=False,
+        )
+        for r in results:
+            frame_idx = abs_frame
+            abs_frame += FRAME_STRIDE
+            frames_done += 1
 
-        if on_progress and frames_done - last_reported >= 50:
-            pct = min(frames_done / total_seg_frames, 0.99)
-            on_progress(pct)
-            last_reported = frames_done
+            if on_progress and frames_done - last_reported >= 50:
+                pct = min(frames_done / total_seg_frames, 0.99)
+                on_progress(pct)
+                last_reported = frames_done
 
-        if r.boxes is None or r.boxes.id is None:
-            continue
-        xywh = r.boxes.xywh.cpu().numpy()
-        ids = r.boxes.id.cpu().numpy().astype(np.int32)
-        cls = r.boxes.cls.cpu().numpy().astype(np.int16)
-        conf = r.boxes.conf.cpu().numpy().astype(np.float32)
+            if r.boxes is None or r.boxes.id is None:
+                continue
+            xywh = r.boxes.xywh.cpu().numpy()
+            ids = r.boxes.id.cpu().numpy().astype(np.int32)
+            cls = r.boxes.cls.cpu().numpy().astype(np.int16)
+            conf = r.boxes.conf.cpu().numpy().astype(np.float32)
 
-        for k in range(len(ids)):
-            rows.append({
-                "frame_idx": frame_idx,
-                "t_seconds": frame_idx / fps if fps > 0 else 0.0,
-                "track_id": int(ids[k]),
-                "class_id": int(cls[k]),
-                "conf": float(conf[k]),
-                "cx": float(xywh[k][0]),
-                "cy": float(xywh[k][1]),
-                "w": float(xywh[k][2]),
-                "h": float(xywh[k][3]),
-            })
+            for k in range(len(ids)):
+                rows.append({
+                    "frame_idx": frame_idx,
+                    "t_seconds": frame_idx / fps if fps > 0 else 0.0,
+                    "track_id": int(ids[k]),
+                    "class_id": int(cls[k]),
+                    "conf": float(conf[k]),
+                    "cx": float(xywh[k][0]),
+                    "cy": float(xywh[k][1]),
+                    "w": float(xywh[k][2]),
+                    "h": float(xywh[k][3]),
+                })
 
     df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
         "frame_idx", "t_seconds", "track_id", "class_id", "conf",

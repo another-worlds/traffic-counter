@@ -71,6 +71,12 @@ services:
     build:
       context: ./worker
     runtime: nvidia
+    # Default to a single worker. On one GPU that is the throughput
+    # optimum — extra replicas serialise on the same CUDA streams and
+    # finish slower. `docker compose up -d --scale worker=N` still
+    # overrides this for multi-GPU hosts.
+    deploy:
+      replicas: 1
     environment:
       DATABASE_URL: postgresql+psycopg://traffic:traffic@db:5432/traffic
       STORAGE_BACKEND: local
@@ -79,6 +85,9 @@ services:
       MODEL_NAME: /models/yolov8m.pt
       DEVICE: cuda:0
       HALF: "true"
+      # Frames per GPU forward pass. Higher = better single-GPU
+      # utilisation until VRAM fills; tune with ./scripts/gpu_probe.sh.
+      BATCH_SIZE: "16"
       # Cap on how many scene-keyframes the worker emits per video.
       # Long CCTV recordings can otherwise produce 200+ JPEGs which
       # bloat /data and overwhelm the Count & Export page.

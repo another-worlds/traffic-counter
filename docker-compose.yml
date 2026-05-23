@@ -29,6 +29,11 @@ services:
       # avoids baking the deploy host into a static list; the API holds no
       # cookies, so the "*" + credentials trade-off doesn't apply.
       CORS_ORIGINS: "*"
+      # Make glibc return freed pages to the kernel more eagerly so Docker's
+      # RSS-based mem_limit doesn't gradually creep past the budget after
+      # transient parquet/sort allocations. Default is 128 KiB; the glibc
+      # default of 128 MiB lets the heap baloon for the life of the process.
+      MALLOC_TRIM_THRESHOLD_: "131072"
     ports: ["8000:8000"]
     # Cap RAM so a runaway trajectory load fails as a clean Docker stop
     # (uvicorn's lifespan shutdown closes DB connections gracefully)

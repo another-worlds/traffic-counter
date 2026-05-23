@@ -11,6 +11,8 @@ MaterializedTracks (sort + groupby + modal-class precomputed) so the
 counting code never re-does that work either.
 """
 from __future__ import annotations
+import ctypes
+import gc
 import io
 import os
 import threading
@@ -32,9 +34,65 @@ _EMPTY_COLS = [
     "cx", "cy", "w", "h",
 ]
 
+# Tight compact dtype set used after every parquet load. Pyarrow → pandas
+# can upcast int/float columns depending on version; pinning these keeps
+# the cached DataFrame compact regardless of pyarrow's defaults.
+_DTYPES = {
+    "frame_idx": "int32",
+    "t_seconds": "float32",
+    "track_id":  "int32",
+    "class_id":  "int8",
+    "conf":      "float32",
+    "cx":        "float32",
+    "cy":        "float32",
+    "w":         "float32",
+    "h":         "float32",
+}
+
+# 512 MiB default — sized to fit ~6-8 long videos cached at once inside the
+# 4 GiB Docker mem_limit while leaving headroom for transient working
+# memory during sorts/groupbys.
 _CACHE_MAX_BYTES = int(os.environ.get(
-    "TRACKS_CACHE_MAX_BYTES", str(1 * 1024 * 1024 * 1024)
-))  # 1 GiB default
+    "TRACKS_CACHE_MAX_BYTES", str(512 * 1024 * 1024)
+))
+
+
+# glibc malloc holds freed pages indefinitely; Docker measures RSS, not the
+# live working set, so a transient parquet load can leave the container's
+# memory footprint elevated for the rest of its life. Calling malloc_trim
+# after evictions and big allocations returns pages to the kernel
+# explicitly. Skip silently on non-glibc systems.
+try:
+    _libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    _malloc_trim = _libc.malloc_trim
+    _malloc_trim.argtypes = [ctypes.c_size_t]
+    _malloc_trim.restype = ctypes.c_int
+except (OSError, AttributeError):
+    _malloc_trim = None
+
+
+def _release_pages() -> None:
+    gc.collect()
+    if _malloc_trim is not None:
+        _malloc_trim(0)
+
+
+def _normalise_dtypes(df: pd.DataFrame) -> pd.DataFrame:
+    for col, dt in _DTYPES.items():
+        if col in df.columns and str(df[col].dtype) != dt:
+            df[col] = df[col].astype(dt, copy=False)
+    return df
+
+
+def _read_parquet(storage, key: str) -> pd.DataFrame:
+    """Prefer on-disk path on backends that support it (LocalStorage); fall
+    back to a bytes buffer for GCS-style backends. The path-based read lets
+    pyarrow mmap the file and skips a hundred-MB transient bytes copy."""
+    local = getattr(storage, "local_path", lambda _k: None)(key)
+    if local is not None:
+        return pd.read_parquet(local)
+    with storage.open_read(key) as fp:
+        return pd.read_parquet(io.BytesIO(fp.read()))
 
 
 class _Entry:
@@ -68,12 +126,15 @@ def _cache_get(ck: tuple) -> Optional[_Entry]:
         return hit
 
 
-def _evict_locked() -> None:
-    """Caller already holds _cache_lock."""
+def _evict_locked() -> bool:
+    """Caller already holds _cache_lock. Returns True if anything was evicted."""
     global _cache_bytes
+    evicted = False
     while _cache_bytes > _CACHE_MAX_BYTES and len(_cache) > 1:
         _, ev = _cache.popitem(last=False)
         _cache_bytes -= ev.total_bytes
+        evicted = True
+    return evicted
 
 
 def _cache_put_df(ck: tuple, df: pd.DataFrame) -> _Entry:
@@ -83,12 +144,18 @@ def _cache_put_df(ck: tuple, df: pd.DataFrame) -> _Entry:
     with _cache_lock:
         # Drop any stale entry for the same (project, video) so the cache
         # never holds two generations of the same parquet at once.
+        stale_dropped = False
         for stale in [k for k in list(_cache) if k[0:2] == ck[0:2] and k != ck]:
             ev = _cache.pop(stale)
             _cache_bytes -= ev.total_bytes
+            stale_dropped = True
         _cache[ck] = entry
         _cache_bytes += entry.total_bytes
-        _evict_locked()
+        evicted = _evict_locked()
+    # Release pages outside the lock — malloc_trim can take a few ms on big
+    # heaps and we don't want to block concurrent cache reads.
+    if stale_dropped or evicted:
+        _release_pages()
     return entry
 
 
@@ -118,8 +185,7 @@ def load_tracks_for_video(project_id: str, video_id: str) -> pd.DataFrame:
     if entry is not None:
         return entry.df
     storage = get_storage()
-    with storage.open_read(key_tracks(project_id, video_id)) as fp:
-        df = pd.read_parquet(io.BytesIO(fp.read()))
+    df = _normalise_dtypes(_read_parquet(storage, key_tracks(project_id, video_id)))
     _cache_put_df(ck, df)
     return df
 
@@ -136,8 +202,7 @@ def load_materialized_tracks(project_id: str, video_id: str) -> MaterializedTrac
     entry = _cache_get(ck)
     if entry is None:
         storage = get_storage()
-        with storage.open_read(key_tracks(project_id, video_id)) as fp:
-            df = pd.read_parquet(io.BytesIO(fp.read()))
+        df = _normalise_dtypes(_read_parquet(storage, key_tracks(project_id, video_id)))
         entry = _cache_put_df(ck, df)
     if entry.mt is not None:
         return entry.mt

@@ -24,6 +24,7 @@ class Storage:
     def download_to(self, key: str, local_path: str) -> None: ...
     def exists(self, key: str) -> bool: ...
     def stat(self, key: str) -> dict: ...
+    def local_path(self, key: str) -> str | None: ...
     def public_url(self, key: str) -> str: ...
     def signed_url(self, key: str, expires_minutes: int = 60) -> str: ...
     def open_read(self, key: str) -> BinaryIO: ...
@@ -79,6 +80,12 @@ class LocalStorage(Storage):
         st = self._path(key).stat()
         return {"size": int(st.st_size), "mtime": float(st.st_mtime)}
 
+    def local_path(self, key):
+        # Lets readers (pyarrow.parquet, ffmpeg, …) consume the file in
+        # place instead of via an in-memory bytes buffer, which doubles
+        # peak RSS during loads of hundred-MB parquets.
+        return str(self._path(key))
+
     def public_url(self, key):
         # Served by API's /files endpoint in dev
         return f"/files/{key}"
@@ -123,6 +130,10 @@ class GCSStorage(Storage):
             "size": int(blob.size or 0),
             "mtime": (blob.updated.timestamp() if blob.updated else 0.0),
         }
+
+    def local_path(self, key):
+        # No on-disk path in GCS — callers fall back to open_read().
+        return None
 
     def public_url(self, key):
         return f"https://storage.googleapis.com/{self.bucket_name}/{key}"

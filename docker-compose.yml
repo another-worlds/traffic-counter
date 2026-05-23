@@ -30,6 +30,12 @@ services:
       # cookies, so the "*" + credentials trade-off doesn't apply.
       CORS_ORIGINS: "*"
     ports: ["8000:8000"]
+    # Cap RAM so a runaway trajectory load fails as a clean Docker stop
+    # (uvicorn's lifespan shutdown closes DB connections gracefully)
+    # instead of a kernel SIGKILL that leaves Postgres transactions
+    # mid-flight — that was the failure mode behind the "Child process
+    # died" + "unexpected EOF on client connection" crash pattern.
+    mem_limit: 4g
     volumes:
       - storage:/data
       - ./api:/app

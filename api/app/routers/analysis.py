@@ -1,3 +1,6 @@
+import asyncio
+from collections import defaultdict
+
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
@@ -46,23 +49,32 @@ def _load_lines_for_video(db: Session, video_id: str, line_ids: List[str]) -> Li
     return lines
 
 
+# One asyncio lock per video. When a user draws lines quickly, the
+# frontend coalesces /counts requests but two clients (or a stale
+# in-flight request that hasn't aborted yet) can still race. The lock
+# keeps N concurrent requests for the same video from each loading the
+# parquet on a cold cache and doubling peak memory.
+_recompute_locks: "dict[str, asyncio.Lock]" = defaultdict(asyncio.Lock)
+
+
 @router.post("/videos/{video_id}/counts", response_model=CountResponse)
-def counts(video_id: str, body: CountRequest, db: Session = Depends(get_db)):
-    v = db.get(Video, video_id)
-    if not v:
-        raise HTTPException(404, "video not found")
-    if v.status != "analyzed":
-        raise HTTPException(409, "video must be analyzed first")
+async def counts(video_id: str, body: CountRequest, db: Session = Depends(get_db)):
+    async with _recompute_locks[video_id]:
+        v = db.get(Video, video_id)
+        if not v:
+            raise HTTPException(404, "video not found")
+        if v.status != "analyzed":
+            raise HTTPException(409, "video must be analyzed first")
 
-    lines = _load_lines_for_video(db, video_id, body.line_ids)
-    tracks = load_tracks_for_video(v.project_id, video_id)
-    result = compute_counts_for_lines(tracks, _lines_to_dict(lines))
+        lines = _load_lines_for_video(db, video_id, body.line_ids)
+        tracks = load_tracks_for_video(v.project_id, video_id)
+        result = compute_counts_for_lines(tracks, _lines_to_dict(lines))
 
-    return CountResponse(
-        total_unique_tracks=result["total_unique_tracks"],
-        sum_across_lines=result["sum_across_lines"],
-        per_line=[LineCountResult(**r) for r in result["per_line"]],
-    )
+        return CountResponse(
+            total_unique_tracks=result["total_unique_tracks"],
+            sum_across_lines=result["sum_across_lines"],
+            per_line=[LineCountResult(**r) for r in result["per_line"]],
+        )
 
 
 @router.post("/videos/{video_id}/export", status_code=202)

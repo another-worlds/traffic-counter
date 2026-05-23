@@ -40,7 +40,12 @@ type AppProps = {
 
 const DEFAULT_VIDEO_SIZE: VideoSize = { width: 1920, height: 1080 };
 const PATCH_DEBOUNCE_MS = 250;
-const COUNTS_DEBOUNCE_MS = 300;
+// 750 ms lets a burst of line-drawing (commit, drag-to-resize, immediately
+// draw another line) coalesce into a single /counts request. The existing
+// AbortController logic in scheduleCountsRefresh cancels the in-flight call
+// when a new one is scheduled, so the API only ever processes one recompute
+// per burst — important because /counts loads the full trajectory parquet.
+const COUNTS_DEBOUNCE_MS = 750;
 const CREATE_RETRY_MS = 2000;
 
 function describeFetchErr(err: unknown): string {

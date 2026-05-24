@@ -53,7 +53,24 @@ VEHICLE_CLASSES = [1, 2, 3, 5, 7]  # bicycle, car, motorcycle, bus, truck
 # Consumers merge all segment parquets into one DataFrame.  Offset each
 # segment's track_ids by this multiplier so IDs from different hours
 # never collide when grouping or drawing trajectories.
+# CONTRACT: must equal api/app/services/tracks.py:_TRACK_ID_SEGMENT_OFFSET.
 TRACK_ID_SEGMENT_OFFSET = 1_000_000
+
+# Canonical on-disk schema for tracks_segment_*.parquet. The producer pins
+# these dtypes before writing so the API reader, counting, and export all see
+# exactly this contract.
+# CONTRACT: must equal api/app/services/tracks.py:_DTYPES.
+TRACKS_PARQUET_DTYPES = {
+    "frame_idx": "int32",
+    "t_seconds": "float32",
+    "track_id":  "int32",
+    "class_id":  "int8",
+    "conf":      "float32",
+    "cx":        "float32",
+    "cy":        "float32",
+    "w":         "float32",
+    "h":         "float32",
+}
 
 try:
     from scenedetect import open_video as _sd_open_video, SceneManager as _SceneManager
@@ -73,10 +90,18 @@ BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "16"))
 # the queue full so inference never waits on cv2 decode. Peak RAM is bounded to
 # ~(FRAME_PREFETCH_BATCHES + 1) * BATCH_SIZE frames.
 FRAME_PREFETCH_BATCHES = int(os.environ.get("FRAME_PREFETCH_BATCHES", "3"))
+# How many GPU result batches may queue for the post-process thread. Keeps the
+# GPU launching the next batch while the previous one's detections are copied to
+# CPU and turned into rows. Bounded small so retained tensors don't grow VRAM.
+RESULT_QUEUE_DEPTH = int(os.environ.get("RESULT_QUEUE_DEPTH", "3"))
 # Cap on scene-keyframes emitted per video.
 MAX_SCENE_FRAMES = int(os.environ.get("MAX_SCENE_FRAMES", "30"))
 # Default segment length in seconds (1 hour).
 SEGMENT_DURATION_S = float(os.environ.get("SEGMENT_DURATION_S", "3600"))
+
+
+_MODEL: Optional[YOLO] = None
+_MODEL_LOCK = threading.Lock()
 
 
 def _load_model() -> YOLO:
@@ -86,6 +111,22 @@ def _load_model() -> YOLO:
     except Exception:
         pass
     return model
+
+
+def _get_model() -> YOLO:
+    """Return the process-wide YOLO instance, loading it once.
+
+    The model is loaded a single time per worker process instead of once per
+    segment: reloading the weights every hour-segment wasted ~0.5s and forced
+    cuDNN to re-autotune on the first batch of each segment. ByteTrack state is
+    still reset per segment by the caller (model.predictor = None).
+    """
+    global _MODEL
+    if _MODEL is None:
+        with _MODEL_LOCK:
+            if _MODEL is None:
+                _MODEL = _load_model()
+    return _MODEL
 
 
 def video_meta(path: str) -> Dict:
@@ -237,74 +278,117 @@ def process_video_segment(
     Track IDs are local to the segment (ByteTrack state resets each call).
     """
     storage = get_storage()
-    model = _load_model()
+    model = _get_model()
 
     # Reset any cached predictor so ByteTrack starts fresh for this segment.
-    if hasattr(model, "predictor") and model.predictor is not None:
+    if getattr(model, "predictor", None) is not None:
         model.predictor = None
 
     rows: List[dict] = []
     total_seg_frames = max(1, (end_frame - start_frame + FRAME_STRIDE - 1) // FRAME_STRIDE)
-    frames_done = 0
-    last_reported = 0
+    # Mutable progress counters, owned by the post-process consumer thread.
+    prog = {"done": 0, "reported": 0}
 
-    # Ultralytics does not accept a Python generator as ``source`` (it raises
-    # "Unsupported image type"). Feed frames as fixed-size lists instead: a
-    # list source is supported, keeps peak memory bounded, and — with
-    # persist=True — ByteTrack state carries across chunks since the tracker is
-    # reset only between segments (model.predictor=None above). Batches are
-    # decoded on a background thread so the GPU never waits on cv2 decode.
+    # Three-stage pipeline so the GPU never idles:
+    #   1. a decode thread (_iter_frame_batches) keeps frame batches ready;
+    #   2. THIS thread runs model.track(batch) and immediately hands the GPU
+    #      results to a queue, then launches the next batch;
+    #   3. a post-process thread copies detections to CPU and builds rows.
+    # Ultralytics rejects a generator source ("Unsupported image type"), so we
+    # pass fixed-size frame lists; persist=True carries ByteTrack state across
+    # batches (reset only between segments via model.predictor=None above).
     batches = _iter_frame_batches(
         video_path, start_frame, end_frame, FRAME_STRIDE,
         BATCH_SIZE, FRAME_PREFETCH_BATCHES,
     )
 
+    results_q: "queue.Queue" = queue.Queue(maxsize=max(1, RESULT_QUEUE_DEPTH))
+    stop = threading.Event()
+    consumer_err: dict = {}
+
+    def _consume() -> None:
+        try:
+            while True:
+                item = results_q.get()
+                if item is _BATCH_SENTINEL:
+                    return
+                start_abs, results = item
+                frame_idx = start_abs
+                for r in results:
+                    cur = frame_idx
+                    frame_idx += FRAME_STRIDE
+                    prog["done"] += 1
+                    if on_progress and prog["done"] - prog["reported"] >= 50:
+                        on_progress(min(prog["done"] / total_seg_frames, 0.99))
+                        prog["reported"] = prog["done"]
+
+                    if r.boxes is None or r.boxes.id is None:
+                        continue
+                    xywh = r.boxes.xywh.cpu().numpy()
+                    ids = r.boxes.id.cpu().numpy().astype(np.int32)
+                    cls = r.boxes.cls.cpu().numpy().astype(np.int16)
+                    conf = r.boxes.conf.cpu().numpy().astype(np.float32)
+                    for k in range(len(ids)):
+                        rows.append({
+                            "frame_idx": cur,
+                            "t_seconds": cur / fps if fps > 0 else 0.0,
+                            "track_id": int(ids[k]),
+                            "class_id": int(cls[k]),
+                            "conf": float(conf[k]),
+                            "cx": float(xywh[k][0]),
+                            "cy": float(xywh[k][1]),
+                            "w": float(xywh[k][2]),
+                            "h": float(xywh[k][3]),
+                        })
+        except Exception as exc:  # surface to the main thread; unblock producer
+            consumer_err["exc"] = exc
+            stop.set()
+            try:
+                while True:
+                    results_q.get_nowait()
+            except queue.Empty:
+                pass
+
+    consumer = threading.Thread(target=_consume, name="result-postprocess", daemon=True)
+    consumer.start()
+
     # Frame index within the ORIGINAL video (absolute).
     abs_frame = start_frame
-    for batch_frames in batches:
-        results = model.track(
-            source=batch_frames,
-            persist=True,
-            classes=VEHICLE_CLASSES,
-            tracker=TRACKER,
-            half=HALF,
-            device=DEVICE,
-            verbose=False,
-        )
-        for r in results:
-            frame_idx = abs_frame
-            abs_frame += FRAME_STRIDE
-            frames_done += 1
+    try:
+        for batch_frames in batches:
+            if stop.is_set():
+                break
+            results = model.track(
+                source=batch_frames,
+                persist=True,
+                classes=VEHICLE_CLASSES,
+                tracker=TRACKER,
+                half=HALF,
+                device=DEVICE,
+                verbose=False,
+            )
+            # Hand the GPU results off; main thread loops on to the next batch.
+            while not stop.is_set():
+                try:
+                    results_q.put((abs_frame, results), timeout=0.5)
+                    break
+                except queue.Full:
+                    continue
+            abs_frame += FRAME_STRIDE * len(results)
+    finally:
+        try:
+            results_q.put(_BATCH_SENTINEL, timeout=0.5)
+        except queue.Full:
+            pass
+        consumer.join(timeout=60)
 
-            if on_progress and frames_done - last_reported >= 50:
-                pct = min(frames_done / total_seg_frames, 0.99)
-                on_progress(pct)
-                last_reported = frames_done
+    if consumer_err.get("exc") is not None:
+        raise consumer_err["exc"]
 
-            if r.boxes is None or r.boxes.id is None:
-                continue
-            xywh = r.boxes.xywh.cpu().numpy()
-            ids = r.boxes.id.cpu().numpy().astype(np.int32)
-            cls = r.boxes.cls.cpu().numpy().astype(np.int16)
-            conf = r.boxes.conf.cpu().numpy().astype(np.float32)
-
-            for k in range(len(ids)):
-                rows.append({
-                    "frame_idx": frame_idx,
-                    "t_seconds": frame_idx / fps if fps > 0 else 0.0,
-                    "track_id": int(ids[k]),
-                    "class_id": int(cls[k]),
-                    "conf": float(conf[k]),
-                    "cx": float(xywh[k][0]),
-                    "cy": float(xywh[k][1]),
-                    "w": float(xywh[k][2]),
-                    "h": float(xywh[k][3]),
-                })
-
-    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=[
-        "frame_idx", "t_seconds", "track_id", "class_id", "conf",
-        "cx", "cy", "w", "h",
-    ])
+    if rows:
+        df = pd.DataFrame(rows).astype(TRACKS_PARQUET_DTYPES)
+    else:
+        df = pd.DataFrame({c: pd.Series(dtype=t) for c, t in TRACKS_PARQUET_DTYPES.items()})
     num_tracks = int(df["track_id"].nunique()) if not df.empty else 0
 
     with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tf:

@@ -37,6 +37,7 @@ _EMPTY_COLS = [
 # Tight compact dtype set used after every parquet load. Pyarrow → pandas
 # can upcast int/float columns depending on version; pinning these keeps
 # the cached DataFrame compact regardless of pyarrow's defaults.
+# CONTRACT: must equal worker/pipeline.py:TRACKS_PARQUET_DTYPES (the producer).
 _DTYPES = {
     "frame_idx": "int32",
     "t_seconds": "float32",
@@ -84,15 +85,30 @@ def _normalise_dtypes(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _require_columns(df: pd.DataFrame, key: str) -> pd.DataFrame:
+    """Fail fast with a clear message if a parquet violates the schema contract.
+
+    Without this, a malformed/old parquet surfaces as an opaque KeyError deep in
+    counting/export. Names the offending file and the missing columns instead.
+    """
+    missing = [c for c in _EMPTY_COLS if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"tracks parquet {key!r} is missing required column(s) {missing}; "
+            f"expected schema {_EMPTY_COLS}"
+        )
+    return df
+
+
 def _read_parquet(storage, key: str) -> pd.DataFrame:
     """Prefer on-disk path on backends that support it (LocalStorage); fall
     back to a bytes buffer for GCS-style backends. The path-based read lets
     pyarrow mmap the file and skips a hundred-MB transient bytes copy."""
     local = getattr(storage, "local_path", lambda _k: None)(key)
     if local is not None:
-        return pd.read_parquet(local)
+        return _require_columns(pd.read_parquet(local), key)
     with storage.open_read(key) as fp:
-        return pd.read_parquet(io.BytesIO(fp.read()))
+        return _require_columns(pd.read_parquet(io.BytesIO(fp.read())), key)
 
 
 class _Entry:
@@ -182,6 +198,7 @@ _MAX_SEGMENTS = 100
 
 # Offset applied to track_ids from each segment so IDs from different
 # hours never collide when the full DataFrame is assembled.
+# CONTRACT: must equal worker/pipeline.py:TRACK_ID_SEGMENT_OFFSET (the producer).
 _TRACK_ID_SEGMENT_OFFSET = 1_000_000
 
 
@@ -216,6 +233,14 @@ def _load_segments_df(project_id: str, video_id: str) -> Optional[pd.DataFrame]:
             break
         df = _normalise_dtypes(_read_parquet(storage, key))
         if not df.empty:
+            local_max = int(df["track_id"].max())
+            if local_max >= _TRACK_ID_SEGMENT_OFFSET:
+                raise ValueError(
+                    f"segment {seg_idx} of video {video_id} has local track_id "
+                    f"{local_max} >= offset {_TRACK_ID_SEGMENT_OFFSET}; IDs would "
+                    f"collide across hours. Raise _TRACK_ID_SEGMENT_OFFSET "
+                    f"(and the worker's TRACK_ID_SEGMENT_OFFSET) to match."
+                )
             df = df.copy()
             df["track_id"] = df["track_id"] + seg_idx * _TRACK_ID_SEGMENT_OFFSET
         seg_dfs.append(df)

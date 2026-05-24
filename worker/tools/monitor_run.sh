@@ -93,7 +93,9 @@ sample() {
     run "nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits"
   fi
 
-  cids="$(container_ids)"
+  # Space-separate the IDs: they reach docker stats/inspect via eval, where
+  # embedded newlines would otherwise be parsed as separate commands.
+  cids="$(container_ids | tr '\n' ' ')"
   log "-- DOCKER COMPOSE PS --"
   if [ ${#DC[@]} -gt 0 ]; then run "${DC[*]} ps"; else log "  (no compose command found)"; fi
 
@@ -114,7 +116,7 @@ sample() {
   if have nvidia-smi; then
     gpuline="gpu $(nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ' | awk -F, '{printf "%s%% %s/%sMB", $1, $2, $3}')"
   else gpuline="gpu n/a"; fi
-  ncont="$(printf '%s' "$cids" | grep -c . )"
+  ncont="$(printf '%s' "$cids" | wc -w)"
   printf '[%s +%ss] mem %s | %s | containers %s -> %s\n' \
     "$n" "$elapsed" "$memline" "$gpuline" "$ncont" "$OUTFILE"
 }

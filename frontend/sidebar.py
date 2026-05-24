@@ -166,7 +166,9 @@ def render_sidebar() -> Optional[dict]:
                     dur = _fmt_duration(v.get("duration_s"))
                     st.write(f"{badge} **{v['filename']}** — {dur}")
                     if v["status"] == "analyzing" and v.get("progress_pct") is not None:
-                        st.progress(v["progress_pct"])
+                        segs = v.get("total_segments")
+                        seg_label = f"of {segs} segments" if segs else None
+                        st.progress(v["progress_pct"], text=seg_label)
 
         st.divider()
         # Per-video exports live on the Count & Export page now — the

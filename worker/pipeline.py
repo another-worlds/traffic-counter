@@ -94,6 +94,11 @@ FRAME_PREFETCH_BATCHES = int(os.environ.get("FRAME_PREFETCH_BATCHES", "3"))
 # GPU launching the next batch while the previous one's detections are copied to
 # CPU and turned into rows. Bounded small so retained tensors don't grow VRAM.
 RESULT_QUEUE_DEPTH = int(os.environ.get("RESULT_QUEUE_DEPTH", "3"))
+# Seconds without a decoded frame before the decode thread is considered stalled.
+# 120 s is safe: cv2 decodes a 16-frame 2560×1440 HEVC batch in < 2 s even under
+# heavy error-concealment. A truly stalled cap.read() (corrupt keyframe, HEVC POC
+# error that never resolves) would never recover without this timeout.
+DECODE_STALL_TIMEOUT_S = int(os.environ.get("DECODE_STALL_TIMEOUT_S", "120"))
 # Cap on scene-keyframes emitted per video.
 MAX_SCENE_FRAMES = int(os.environ.get("MAX_SCENE_FRAMES", "30"))
 # Default segment length in seconds (1 hour).
@@ -167,7 +172,7 @@ def plan_video_segments(
 
 def _frame_generator(
     video_path: str, start_frame: int, end_frame: int, stride: int = 1,
-    read_to_eof: bool = False,
+    read_to_eof: bool = False, fps: float = 25.0,
 ) -> Generator:
     """Yield BGR frames from [start_frame, end_frame) with optional stride.
 
@@ -177,7 +182,15 @@ def _frame_generator(
     """
     cap = cv2.VideoCapture(video_path)
     if start_frame > 0:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        # MSEC seek lands on the nearest keyframe (fast on long-GOP HEVC/H.264).
+        # cap.grab() advances to the exact target frame without full decode.
+        start_ms = start_frame / fps * 1000.0 if fps > 0 else 0.0
+        cap.set(cv2.CAP_PROP_POS_MSEC, start_ms)
+        pos = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        while pos < start_frame:
+            if not cap.grab():
+                break
+            pos += 1
     current = start_frame
     while read_to_eof or current < end_frame:
         ok, frame = cap.read()
@@ -201,6 +214,7 @@ def _iter_frame_batches(
     batch_size: int,
     max_prefetch: int,
     read_to_eof: bool = False,
+    fps: float = 25.0,
 ) -> Generator:
     """Yield BATCH_SIZE-sized frame lists, decoded on a background thread.
 
@@ -216,7 +230,7 @@ def _iter_frame_batches(
     def _produce() -> None:
         try:
             batch: list = []
-            for frame in _frame_generator(video_path, start_frame, end_frame, stride, read_to_eof):
+            for frame in _frame_generator(video_path, start_frame, end_frame, stride, read_to_eof, fps):
                 if stop.is_set():
                     return
                 batch.append(frame)
@@ -242,16 +256,29 @@ def _iter_frame_batches(
             except queue.Full:
                 pass
         finally:
-            try:
-                q.put(_BATCH_SENTINEL, timeout=0.5)
-            except queue.Full:
-                pass
+            # Retry until the GPU consumer drains enough space. A single-attempt
+            # put with queue.Full silently drops the sentinel and leaves the GPU
+            # loop blocked on q.get() forever (Bug A fix).
+            while not stop.is_set():
+                try:
+                    q.put(_BATCH_SENTINEL, timeout=0.5)
+                    break
+                except queue.Full:
+                    continue
 
     thread = threading.Thread(target=_produce, name="frame-prefetch", daemon=True)
     thread.start()
     try:
         while True:
-            item = q.get()
+            try:
+                item = q.get(timeout=DECODE_STALL_TIMEOUT_S)
+            except queue.Empty:
+                stop.set()
+                raise RuntimeError(
+                    f"Frame decode stalled: no batch produced in "
+                    f"{DECODE_STALL_TIMEOUT_S}s — cv2 likely hung on a "
+                    f"corrupted frame"
+                )
             if item is _BATCH_SENTINEL:
                 break
             if isinstance(item, Exception):
@@ -314,7 +341,7 @@ def process_video_segment(
     # batches (reset only between segments via model.predictor=None above).
     batches = _iter_frame_batches(
         video_path, start_frame, end_frame, FRAME_STRIDE,
-        BATCH_SIZE, FRAME_PREFETCH_BATCHES, read_to_eof,
+        BATCH_SIZE, FRAME_PREFETCH_BATCHES, read_to_eof, fps,
     )
 
     results_q: "queue.Queue" = queue.Queue(maxsize=max(1, RESULT_QUEUE_DEPTH))
@@ -391,10 +418,16 @@ def process_video_segment(
                     continue
             abs_frame += FRAME_STRIDE * len(results)
     finally:
-        try:
-            results_q.put(_BATCH_SENTINEL, timeout=0.5)
-        except queue.Full:
-            pass
+        # Retry until the consumer drains a slot. A single-attempt put with
+        # queue.Full silently drops the sentinel, leaving the consumer blocked
+        # on results_q.get() for the full consumer.join(timeout=60) window
+        # at the end of every segment (Bug B fix).
+        while not stop.is_set():
+            try:
+                results_q.put(_BATCH_SENTINEL, timeout=0.5)
+                break
+            except queue.Full:
+                continue
         consumer.join(timeout=60)
 
     if consumer_err.get("exc") is not None:

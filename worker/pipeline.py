@@ -23,7 +23,9 @@ to avoid collisions.
 """
 from __future__ import annotations
 import os
+import queue
 import tempfile
+import threading
 from pathlib import Path
 from typing import Callable, Dict, Generator, List, Optional, Tuple
 
@@ -67,6 +69,10 @@ TRACKER = os.environ.get("TRACKER", "bytetrack.yaml")
 FRAME_STRIDE = int(os.environ.get("FRAME_STRIDE", "1"))  # process every Nth frame (1=all)
 # Frames fed to the GPU per forward pass. Higher = better GPU utilisation.
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "16"))
+# How many frame batches to decode ahead of the GPU. A background thread keeps
+# the queue full so inference never waits on cv2 decode. Peak RAM is bounded to
+# ~(FRAME_PREFETCH_BATCHES + 1) * BATCH_SIZE frames.
+FRAME_PREFETCH_BATCHES = int(os.environ.get("FRAME_PREFETCH_BATCHES", "3"))
 # Cap on scene-keyframes emitted per video.
 MAX_SCENE_FRAMES = int(os.environ.get("MAX_SCENE_FRAMES", "30"))
 # Default segment length in seconds (1 hour).
@@ -137,16 +143,81 @@ def _frame_generator(
     cap.release()
 
 
-def _chunked(iterable, size: int) -> Generator:
-    """Group an iterable into lists of at most ``size`` items."""
-    chunk: list = []
-    for item in iterable:
-        chunk.append(item)
-        if len(chunk) >= size:
-            yield chunk
-            chunk = []
-    if chunk:
-        yield chunk
+_BATCH_SENTINEL = object()
+
+
+def _iter_frame_batches(
+    video_path: str,
+    start_frame: int,
+    end_frame: int,
+    stride: int,
+    batch_size: int,
+    max_prefetch: int,
+) -> Generator:
+    """Yield BATCH_SIZE-sized frame lists, decoded on a background thread.
+
+    A daemon producer thread runs cv2 decode and fills a bounded queue while the
+    caller (the GPU inference loop) drains it, so the GPU never waits on frame
+    decode. Memory is bounded to ~(max_prefetch + 1) * batch_size frames.
+    Producer-side exceptions are re-raised in the consumer; the producer is
+    stopped and joined when the consumer exits early (break or exception).
+    """
+    q: "queue.Queue" = queue.Queue(maxsize=max(1, max_prefetch))
+    stop = threading.Event()
+
+    def _produce() -> None:
+        try:
+            batch: list = []
+            for frame in _frame_generator(video_path, start_frame, end_frame, stride):
+                if stop.is_set():
+                    return
+                batch.append(frame)
+                if len(batch) >= batch_size:
+                    # Timeout loop so a stopped consumer can't deadlock the put.
+                    while not stop.is_set():
+                        try:
+                            q.put(batch, timeout=0.5)
+                            break
+                        except queue.Full:
+                            continue
+                    batch = []
+            if batch and not stop.is_set():
+                while not stop.is_set():
+                    try:
+                        q.put(batch, timeout=0.5)
+                        break
+                    except queue.Full:
+                        continue
+        except Exception as exc:  # surface decode errors to the consumer
+            try:
+                q.put(exc, timeout=0.5)
+            except queue.Full:
+                pass
+        finally:
+            try:
+                q.put(_BATCH_SENTINEL, timeout=0.5)
+            except queue.Full:
+                pass
+
+    thread = threading.Thread(target=_produce, name="frame-prefetch", daemon=True)
+    thread.start()
+    try:
+        while True:
+            item = q.get()
+            if item is _BATCH_SENTINEL:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield item
+    finally:
+        stop.set()
+        # Drain so a producer blocked on put() can observe the stop flag.
+        try:
+            while True:
+                q.get_nowait()
+        except queue.Empty:
+            pass
+        thread.join(timeout=5)
 
 
 def process_video_segment(
@@ -179,14 +250,18 @@ def process_video_segment(
 
     # Ultralytics does not accept a Python generator as ``source`` (it raises
     # "Unsupported image type"). Feed frames as fixed-size lists instead: a
-    # list source is supported, keeps peak memory bounded to BATCH_SIZE frames,
-    # and — with persist=True — ByteTrack state carries across chunks since the
-    # tracker is reset only between segments (model.predictor=None above).
-    frames = _frame_generator(video_path, start_frame, end_frame, FRAME_STRIDE)
+    # list source is supported, keeps peak memory bounded, and — with
+    # persist=True — ByteTrack state carries across chunks since the tracker is
+    # reset only between segments (model.predictor=None above). Batches are
+    # decoded on a background thread so the GPU never waits on cv2 decode.
+    batches = _iter_frame_batches(
+        video_path, start_frame, end_frame, FRAME_STRIDE,
+        BATCH_SIZE, FRAME_PREFETCH_BATCHES,
+    )
 
     # Frame index within the ORIGINAL video (absolute).
     abs_frame = start_frame
-    for batch_frames in _chunked(frames, BATCH_SIZE):
+    for batch_frames in batches:
         results = model.track(
             source=batch_frames,
             persist=True,

@@ -197,11 +197,14 @@ def plan_segments(video_id: str, fps: float, num_frames: int, segment_duration_s
                 "start_time_s": seg["start_time_s"],
                 "end_time_s": seg["end_time_s"],
             })
-        # Reset any segment that a dead worker left in 'analyzing'.
+        # Reset segments left 'analyzing' by a dead worker, and retry any
+        # 'error' segments from a previous run so a re-analyze re-attempts
+        # failed hours instead of silently skipping them.
         conn.execute(text("""
             UPDATE video_segments
-            SET status='pending', started_at=NULL, last_heartbeat_at=NULL
-            WHERE video_id=:video_id AND status='analyzing'
+            SET status='pending', started_at=NULL,
+                last_heartbeat_at=NULL, error_message=NULL
+            WHERE video_id=:video_id AND status IN ('analyzing', 'error')
         """), {"video_id": video_id})
         # Record total segment count on the video row.
         conn.execute(text("""
@@ -263,6 +266,17 @@ def update_segment_heartbeat(segment_id: str):
         conn.execute(text(
             "UPDATE video_segments SET last_heartbeat_at=:ts WHERE id=:id"
         ), {"id": segment_id, "ts": datetime.utcnow()})
+
+
+def unfinished_segments(video_id: str) -> list[int]:
+    """Return the segment indexes for this video that are not yet 'done'."""
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT segment_idx FROM video_segments
+            WHERE video_id=:video_id AND status<>'done'
+            ORDER BY segment_idx
+        """), {"video_id": video_id}).all()
+    return [r.segment_idx for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -415,6 +429,17 @@ def handle(video: dict):
 
             seg_done += 1
             seg_context = ""
+
+        # Never finalise with missing hours: if any segment failed to reach
+        # 'done', fail the whole video loudly rather than aggregating a partial
+        # result. A re-analyze resets these segments to 'pending' and retries.
+        pending_or_failed = unfinished_segments(video["id"])
+        if pending_or_failed:
+            raise RuntimeError(
+                f"{len(pending_or_failed)} of {total_segs} hour-segment(s) did not "
+                f"complete (segment idx {pending_or_failed}); not finalizing. "
+                f"Re-analyze to retry the failed hour(s)."
+            )
 
         # All segments done — finalise (scenes, trajectory PNG, status update).
         seg_context = "Finalizing"

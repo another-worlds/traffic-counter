@@ -251,6 +251,21 @@ def mark_segment_done(segment_id: str, num_tracks: int):
         """), {"id": segment_id, "n": num_tracks, "ts": datetime.utcnow()})
 
 
+def update_segment_end_frame(segment_id: str, end_frame: int, end_time_s: float):
+    """Persist the real end of a segment after read-to-EOF decoding.
+
+    Keeps the per-hour export's [start_frame, end_frame) ranges aligned with the
+    frames actually written to parquet when the planned end (a frame-count
+    estimate) differed from the true decodable tail.
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE video_segments
+            SET end_frame=:end_frame, end_time_s=:end_time_s
+            WHERE id=:id
+        """), {"id": segment_id, "end_frame": int(end_frame), "end_time_s": end_time_s})
+
+
 def mark_segment_error(segment_id: str, err: Exception):
     msg = f"{type(err).__name__}: {err}\n\n{traceback.format_exc()[-2000:]}"
     with engine.begin() as conn:
@@ -403,9 +418,13 @@ def handle(video: dict):
                 seg["start_frame"], seg["end_frame"],
             )
 
+            # The final segment reads to true EOF rather than stopping at the
+            # CAP_PROP_FRAME_COUNT estimate, so a too-low estimate can't silently
+            # drop the video tail. Its real frame range is persisted afterwards.
+            is_last = seg["segment_idx"] == total_segs - 1
             with Heartbeat(video["id"], seg["id"]) as hb:
                 try:
-                    num_tracks = process_video_segment(
+                    num_tracks, actual_end = process_video_segment(
                         project_id=video["project_id"],
                         video_id=video["id"],
                         segment_idx=seg["segment_idx"],
@@ -416,7 +435,21 @@ def handle(video: dict):
                         on_progress=lambda pct, _hb=hb, _seg=seg, _done=seg_done, _total=total_segs: (
                             _hb.set_progress((_done + pct) / _total)
                         ),
+                        read_to_eof=is_last,
                     )
+                    if is_last and actual_end != seg["end_frame"]:
+                        if actual_end > seg["end_frame"]:
+                            log.warning(
+                                "video %s: last segment recovered %d frame(s) "
+                                "(%.1fs) past the CAP_PROP_FRAME_COUNT estimate %d",
+                                video["id"], actual_end - seg["end_frame"],
+                                (actual_end - seg["end_frame"]) / fps if fps > 0 else 0.0,
+                                seg["end_frame"],
+                            )
+                        update_segment_end_frame(
+                            seg["id"], actual_end,
+                            round(actual_end / fps, 3) if fps > 0 else seg["end_time_s"],
+                        )
                     mark_segment_done(seg["id"], num_tracks)
                     log.info(
                         "video %s: segment %d done (%d tracks)",

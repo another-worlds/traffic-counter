@@ -166,20 +166,26 @@ def plan_video_segments(
 
 
 def _frame_generator(
-    video_path: str, start_frame: int, end_frame: int, stride: int = 1
+    video_path: str, start_frame: int, end_frame: int, stride: int = 1,
+    read_to_eof: bool = False,
 ) -> Generator:
-    """Yield BGR frames from [start_frame, end_frame) with optional stride."""
+    """Yield BGR frames from [start_frame, end_frame) with optional stride.
+
+    When read_to_eof is True the end_frame bound is ignored and frames are
+    yielded until the decoder reports EOF. Used for the final segment so a
+    too-low CAP_PROP_FRAME_COUNT estimate can't silently drop the video tail.
+    """
     cap = cv2.VideoCapture(video_path)
     if start_frame > 0:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     current = start_frame
-    while current < end_frame:
+    while read_to_eof or current < end_frame:
         ok, frame = cap.read()
         if not ok:
             break
         yield frame
         current += stride
-        if stride > 1 and current < end_frame:
+        if stride > 1 and (read_to_eof or current < end_frame):
             cap.set(cv2.CAP_PROP_POS_FRAMES, current)
     cap.release()
 
@@ -194,6 +200,7 @@ def _iter_frame_batches(
     stride: int,
     batch_size: int,
     max_prefetch: int,
+    read_to_eof: bool = False,
 ) -> Generator:
     """Yield BATCH_SIZE-sized frame lists, decoded on a background thread.
 
@@ -209,7 +216,7 @@ def _iter_frame_batches(
     def _produce() -> None:
         try:
             batch: list = []
-            for frame in _frame_generator(video_path, start_frame, end_frame, stride):
+            for frame in _frame_generator(video_path, start_frame, end_frame, stride, read_to_eof):
                 if stop.is_set():
                     return
                 batch.append(frame)
@@ -270,12 +277,20 @@ def process_video_segment(
     end_frame: int,
     fps: float,
     on_progress: Optional[Callable[[float], None]] = None,
-) -> int:
+    read_to_eof: bool = False,
+) -> tuple[int, int]:
     """Run YOLO+ByteTrack on one segment of the video.
 
-    Writes ``tracks_segment_{segment_idx:04d}.parquet`` to storage and
-    returns the number of unique track IDs found in this segment.
-    Track IDs are local to the segment (ByteTrack state resets each call).
+    Writes ``tracks_segment_{segment_idx:04d}.parquet`` to storage and returns
+    ``(num_tracks, actual_end_frame)``: the number of unique track IDs found in
+    this segment, and the exclusive absolute frame index one past the last frame
+    actually decoded. Track IDs are local to the segment (ByteTrack state resets
+    each call).
+
+    When read_to_eof is True the end_frame bound is treated only as a progress
+    estimate and decoding continues to the true EOF, so the final segment cannot
+    silently drop frames past a too-low CAP_PROP_FRAME_COUNT estimate. The
+    returned actual_end_frame lets the caller persist the real range.
     """
     storage = get_storage()
     model = _get_model()
@@ -299,7 +314,7 @@ def process_video_segment(
     # batches (reset only between segments via model.predictor=None above).
     batches = _iter_frame_batches(
         video_path, start_frame, end_frame, FRAME_STRIDE,
-        BATCH_SIZE, FRAME_PREFETCH_BATCHES,
+        BATCH_SIZE, FRAME_PREFETCH_BATCHES, read_to_eof,
     )
 
     results_q: "queue.Queue" = queue.Queue(maxsize=max(1, RESULT_QUEUE_DEPTH))
@@ -401,7 +416,9 @@ def process_video_segment(
 
     if on_progress:
         on_progress(1.0)
-    return num_tracks
+    # abs_frame has advanced by FRAME_STRIDE per decoded frame, so it is the
+    # exclusive absolute index one past the last frame processed — the true end.
+    return num_tracks, abs_frame
 
 
 def _grab_frame(video_path: str, frame_idx: int, out_path: str) -> bool:

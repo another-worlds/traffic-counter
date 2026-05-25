@@ -20,10 +20,13 @@ retrying.
 from __future__ import annotations
 
 import argparse
+import glob
 import json
+import os
 import time
 from collections import deque
 
+import _health
 import _probe
 from _probe import ApiUnavailable
 
@@ -46,7 +49,30 @@ EVENT_STYLE = {
     "segment_done": "green", "video_analyzed": "bold green",
     "segment_error": "red", "video_error": "bold red", "api_unavailable": "red",
     "stall_suspected": "bold yellow", "segment_started": "cyan",
+    "health_change": "bold magenta",
 }
+# Severity -> rich style for health statuses.
+HEALTH_STYLE = {
+    "idle": "dim", "optimal": "green", "healthy": "green",
+    "underutilized": "yellow", "degraded": "yellow", "at_risk": "yellow",
+    "slow": "red", "saturated": "red", "stalled": "bold red", "error": "bold red",
+}
+
+
+def _resolve_events(flag_value):
+    """Auto-discover the logger's JSONL. Precedence: --events, $PIPELINE_EVENTS,
+    ./logs/pipeline_events.jsonl, newest ./pipeline_events_*.jsonl."""
+    if flag_value:
+        return flag_value
+    env = os.environ.get("PIPELINE_EVENTS")
+    if env and os.path.exists(env):
+        return env
+    default = os.path.join("logs", "pipeline_events.jsonl")
+    if os.path.exists(default):
+        return default
+    candidates = sorted(glob.glob("pipeline_events_*.jsonl"),
+                        key=os.path.getmtime, reverse=True)
+    return candidates[0] if candidates else None
 
 
 def _parse_args(argv=None):
@@ -57,7 +83,10 @@ def _parse_args(argv=None):
     p.add_argument("-i", "--interval", type=float, default=2.0,
                    help="seconds between refreshes (default 2)")
     p.add_argument("--events", default=None,
-                   help="pipeline_logger.py JSONL file to tail for a recent-events panel")
+                   help="pipeline_logger.py JSONL to tail for events/health history. "
+                        "If omitted, auto-discovers $PIPELINE_EVENTS, "
+                        "./logs/pipeline_events.jsonl, or the newest "
+                        "./pipeline_events_*.jsonl")
     p.add_argument("--no-telemetry", action="store_true",
                    help="skip nvidia-smi/docker/free sampling")
     return p.parse_args(argv)
@@ -231,6 +260,24 @@ def _stats_panel(stats: dict, videos: list) -> Panel:
     return Panel(Group(*rows), title="Rolling 5-min stats", border_style="yellow")
 
 
+def _health_panel(health: dict) -> Panel:
+    overall = health["overall"]["status"]
+    border = HEALTH_STYLE.get(overall, "white")
+    rows = [Text.assemble(("PIPELINE  ", "bold"),
+                          (overall.upper(), HEALTH_STYLE.get(overall, "white")))]
+    for cluster in ("throughput", "resources", "liveness"):
+        c = health[cluster]
+        st = c["status"]
+        rows.append(Text.assemble(
+            (f"{cluster:<11}", "bold"),
+            (f"{st:<13}", HEALTH_STYLE.get(st, "white")),
+        ))
+        rows.append(Text(f"  {c['description']}", style="dim"))
+        if st not in ("idle", "optimal", "healthy"):
+            rows.append(Text(f"  → {c['recommendation']}", style=HEALTH_STYLE.get(st, "white")))
+    return Panel(Group(*rows), title="Health", border_style=border)
+
+
 def _read_tail(path, n=8) -> deque:
     events = deque(maxlen=n)
     try:
@@ -251,7 +298,7 @@ class Dashboard:
     def __init__(self, args):
         self.api = args.api
         self.interval = args.interval
-        self.events_file = args.events
+        self.events_file = _resolve_events(args.events)
         self.telemetry = not args.no_telemetry
         self.console = Console()
         self.stall_track: dict[str, dict] = {}
@@ -293,6 +340,8 @@ class Dashboard:
                     "speed": v.get("speed_ratio"),
                     "done": v.get("completed_segments") or 0,
                     "total": v.get("total_segments") or 0,
+                    "seg": v.get("current_segment_idx"),
+                    "progress": v.get("progress_pct") or 0.0,
                 }
                 for v in videos if v.get("status") == "analyzing"
             },
@@ -363,6 +412,8 @@ class Dashboard:
 
         stalled = self._track_stalls(videos)
         self._record_sample(videos, gpu)
+        health = _health.classify(videos, tel, list(self._history),
+                                  now_epoch=_probe.now_epoch())
         stats = self._rolling_stats(videos)
 
         layout = Layout()
@@ -374,6 +425,7 @@ class Dashboard:
         layout["left"].update(_pipeline_panel(videos, segs_by_video, stalled))
 
         right_items = [
+            _health_panel(health),
             _gpu_panel(gpu, tel.get("gpu_procs", [])) if self.telemetry
             else Panel(Text("telemetry disabled", style="dim"), title="GPU"),
             _host_panel(tel.get("host"), tel.get("containers", [])) if self.telemetry

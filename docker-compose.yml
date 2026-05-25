@@ -102,6 +102,30 @@ services:
       db:
         condition: service_healthy
 
+  monitor:
+    # Auto-launched pipeline logger. Reuses the worker image (already has the
+    # tools in worker/tools/ + nvidia-smi via the nvidia runtime), polls the API
+    # and GPU, and writes a structured JSONL to the host-readable ./logs dir so
+    # the dashboard CLI can attach: `cd worker/tools && python pipeline_dashboard.py`.
+    #
+    # Captures pipeline events + GPU telemetry + health classification. Per-
+    # container CPU/mem is NOT captured here (the image has no docker CLI); the
+    # host-run dashboard fills that in live. _probe degrades gracefully when a
+    # telemetry source is unavailable.
+    build:
+      context: ./worker
+    runtime: nvidia
+    working_dir: /app/tools          # so the tools' bare `import _probe`/`import _health` resolve
+    command: python pipeline_logger.py --api http://api:8000 -o /logs/pipeline_events.jsonl -i 5
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+    volumes:
+      - ./worker:/app                # match `worker`: run the live tools, not a stale image copy
+      - ./logs:/logs                 # host bind-mount: a named volume would not be host-readable
+    depends_on:
+      - api
+    restart: unless-stopped
+
   watcher:
     build:
       context: ./watcher

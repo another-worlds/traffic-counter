@@ -280,6 +280,53 @@ def _print_recent_eta(info: dict | None):
                else "  No videos currently analyzing.")
 
 
+# --------------------------------------------------------------------------- Section 4
+
+def _health_summary(records: list):
+    """Time spent in each overall health status + the health_change timeline."""
+    samples = [r for r in records if r.get("kind") == "sample" and r.get("health")]
+    time_in: dict[str, float] = defaultdict(float)
+    for a, b in zip(samples, samples[1:]):
+        st = a["health"].get("overall", {}).get("status", "?")
+        dt = (b.get("epoch") or 0) - (a.get("epoch") or 0)
+        if 0 <= dt < 3600:  # ignore long gaps (logger restarts, rotation)
+            time_in[st] += dt
+    changes = [r for r in records
+               if r.get("kind") == "event" and r.get("type") == "health_change"]
+    return time_in, changes
+
+
+def _print_health_summary(records: list):
+    time_in, changes = _health_summary(records)
+    if not time_in and not changes:
+        return
+    if HAS_RICH:
+        from rich.table import Table as _T
+        t = _T(title="Health: time-in-status", title_style="bold", border_style="magenta")
+        t.add_column("overall status")
+        t.add_column("time", justify="right")
+        t.add_column("share", justify="right")
+        total = sum(time_in.values()) or 1
+        for st, secs in sorted(time_in.items(), key=lambda kv: -kv[1]):
+            t.add_row(st, _fmt_eta(secs), f"{100*secs/total:.0f}%")
+        _console.print(t)
+    else:
+        print("\nHealth: time-in-status")
+        total = sum(time_in.values()) or 1
+        for st, secs in sorted(time_in.items(), key=lambda kv: -kv[1]):
+            print(f"  {st:<14} {_fmt_eta(secs):>10}  {100*secs/total:.0f}%")
+
+    if changes:
+        _print()
+        _print("[bold]Health changes[/bold]" if HAS_RICH else "Health changes")
+        for c in changes:
+            ts = (c.get("ts") or "")[11:19]
+            _print(f"  {ts}  {c.get('from_status')} → {c.get('to_status')}  "
+                   f"[dim]{c.get('description','')}[/dim]" if HAS_RICH
+                   else f"  {ts}  {c.get('from_status')} -> {c.get('to_status')}  "
+                        f"{c.get('description','')}")
+
+
 # --------------------------------------------------------------------------- main
 
 def main(argv=None):
@@ -306,6 +353,8 @@ def main(argv=None):
     _print_bucket_table(_bucket_rows(records))
     _print()
     _print_recent_eta(_recent_eta(records))
+    _print()
+    _print_health_summary(records)
     _print()
 
 

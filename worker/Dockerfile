@@ -18,7 +18,7 @@ COPY requirements.txt .
 # ultralytics depends on opencv-python (GUI variant) by name; the system libs
 # libgl1 and libglib2.0-0 are already installed above so cv2 imports fine on
 # a headless server.  No swap needed — clean cache, simple build.
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install -r requirements.txt
 
 COPY . .
 

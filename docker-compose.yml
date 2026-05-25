@@ -87,7 +87,7 @@ services:
       HALF: "true"
       # Frames per GPU forward pass. Higher = better single-GPU
       # utilisation until VRAM fills; tune with ./scripts/gpu_probe.sh.
-      BATCH_SIZE: "16"
+      BATCH_SIZE: "192"
       # Cap on how many scene-keyframes the worker emits per video.
       # Long CCTV recordings can otherwise produce 200+ JPEGs which
       # bloat /data and overwhelm the Count & Export page.

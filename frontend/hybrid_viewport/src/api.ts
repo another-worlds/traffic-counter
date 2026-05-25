@@ -138,6 +138,31 @@ export function requestSuggestions(
   );
 }
 
+export function startExport(
+  cfg: ApiBaseConfig,
+  videoId: string,
+  lineIds: string[],
+): Promise<{ job_id: string; status: string }> {
+  return request(cfg, `/videos/${encodeURIComponent(videoId)}/export`, {
+    method: 'POST',
+    body: JSON.stringify({ line_ids: lineIds }),
+  });
+}
+
+export function getExportStatus(
+  cfg: ApiBaseConfig,
+  jobId: string,
+): Promise<{ status: string; filename?: string; error?: string }> {
+  return request(cfg, `/export-jobs/${encodeURIComponent(jobId)}`);
+}
+
+export async function downloadExportBlob(cfg: ApiBaseConfig, jobId: string): Promise<Blob> {
+  const url = `${cfg.baseUrl.replace(/\/$/, '')}/export-jobs/${encodeURIComponent(jobId)}/file`;
+  const res = await fetch(url);
+  if (!res.ok) throw new ApiError(`GET /export-jobs/${jobId}/file → ${res.status}`, res.status, null);
+  return res.blob();
+}
+
 export function countsApiToBundle(resp: CountsApiResponse): CountsBundle {
   const perLine: Record<string, LineCount> = {};
   for (const row of resp.per_line || []) {

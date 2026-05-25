@@ -135,16 +135,16 @@ def _print_entity_table(entities: list):
         for i, v in enumerate(entities, 1):
             speeds = v.get("speeds", [])
             avg_spd = f"{sum(speeds)/len(speeds):.1f}×" if speeds else "—"
-            started = v.get("started_at", "—")
-            if started and isinstance(started, str):
+            started = v.get("started_at") or "—"
+            if started and started != "—" and isinstance(started, str):
                 started = started[11:19]  # extract HH:MM:SS from ISO timestamp
-            finished = v.get("finished_at", "—")
-            if finished and isinstance(finished, str):
+            finished = v.get("finished_at") or "—"
+            if finished and finished != "—" and isinstance(finished, str):
                 finished = finished[11:19]
             style = "bold" if i == 1 else ""
             t.add_row(str(i), v["filename"], str(v["segs"]),
                       _fmt_hm(v["wall_s"]), str(v["tracks"]), avg_spd,
-                      started, finished, style=style)
+                      str(started), str(finished), style=style)
         _console.print(t)
     else:
         print(f"\n{'#':>3}  {'filename':<32}  {'segs':>4}  {'wall-clock':>10}"
@@ -153,14 +153,14 @@ def _print_entity_table(entities: list):
         for i, v in enumerate(entities, 1):
             speeds = v.get("speeds", [])
             avg_spd = f"{sum(speeds)/len(speeds):.1f}x" if speeds else "—"
-            started = v.get("started_at", "—")
-            if started and isinstance(started, str):
+            started = v.get("started_at") or "—"
+            if started and started != "—" and isinstance(started, str):
                 started = started[11:19]
-            finished = v.get("finished_at", "—")
-            if finished and isinstance(finished, str):
+            finished = v.get("finished_at") or "—"
+            if finished and finished != "—" and isinstance(finished, str):
                 finished = finished[11:19]
             print(f"{i:>3}  {v['filename']:<32}  {v['segs']:>4}  {_fmt_hm(v['wall_s']):>10}"
-                  f"  {v['tracks']:>6}  {avg_spd:<9}  {started:<8}  {finished}")
+                  f"  {v['tracks']:>6}  {avg_spd:<9}  {str(started):<8}  {str(finished)}")
 
 
 # --------------------------------------------------------------------------- Section 2

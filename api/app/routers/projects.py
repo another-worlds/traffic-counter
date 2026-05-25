@@ -11,8 +11,14 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 
 
 @router.get("", response_model=List[ProjectOut])
-def list_projects(db: Session = Depends(get_db)):
-    return db.query(Project).order_by(Project.created_at.desc()).all()
+def list_projects(limit: int = 200, offset: int = 0, db: Session = Depends(get_db)):
+    return (
+        db.query(Project)
+        .order_by(Project.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
 
 
 @router.post("", response_model=ProjectOut, status_code=201)
@@ -55,7 +61,8 @@ def workspace_summary(project_id: str, db: Session = Depends(get_db)):
 
     lines_count = (
         db.query(func.count(CountingLine.id))
-        .filter(CountingLine.project_id == project_id)
+        .join(Video, CountingLine.video_id == Video.id)
+        .filter(Video.project_id == project_id)
         .scalar()
     )
 

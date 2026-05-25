@@ -1,5 +1,4 @@
 import os
-import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -433,5 +432,4 @@ for v in folder_videos:
                 st.code(v["error_message"], language=None)
 
 if auto_refresh and in_queue > 0:
-    time.sleep(3)
     st.rerun()

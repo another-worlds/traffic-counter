@@ -22,13 +22,20 @@ router = APIRouter(tags=["videos"])
 
 
 @router.get("/projects/{project_id}/videos", response_model=List[VideoOut])
-def list_videos(project_id: str, db: Session = Depends(get_db)):
+def list_videos(
+    project_id: str,
+    limit: int = 200,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
     if not db.get(Project, project_id):
         raise HTTPException(404, "project not found")
     return (
         db.query(Video)
         .filter(Video.project_id == project_id)
         .order_by(Video.created_at.desc())
+        .limit(limit)
+        .offset(offset)
         .all()
     )
 

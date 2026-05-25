@@ -174,14 +174,15 @@ def render_page() -> None:
     # MAX_SCENE_FRAMES=30; the browser loads them lazily while scrubbing and
     # degrades silently if PUBLIC_API_URL isn't configured).
     try:
-        raw_frames = api.list_video_frames(preview_video["id"])
-        frames_for_bootstrap = []
-        for i, f in enumerate(raw_frames):
-            if i == 0 and f.get("url"):
-                url = _fetch_asset_data_url(f["url"]) or api.file_url(f["url"])
-            else:
-                url = api.file_url(f["url"]) if f.get("url") else None
-            frames_for_bootstrap.append({**f, "url": url})
+        with st.spinner("Loading preview…"):
+            raw_frames = api.list_video_frames(preview_video["id"])
+            frames_for_bootstrap = []
+            for i, f in enumerate(raw_frames):
+                if i == 0 and f.get("url"):
+                    url = _fetch_asset_data_url(f["url"]) or api.file_url(f["url"])
+                else:
+                    url = api.file_url(f["url"]) if f.get("url") else None
+                frames_for_bootstrap.append({**f, "url": url})
     except Exception:
         frames_for_bootstrap = []
 

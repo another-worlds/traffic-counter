@@ -603,15 +603,26 @@ def finalize_video_post_processing(
         if on_progress:
             on_progress(0.92)
 
+        grabbed_scenes = []
         for scene in scenes:
             local_sf = str(td / f"frame_{scene['index']}.jpg")
-            _grab_frame(video_path, scene["frame_index_in_video"], local_sf)
+            if not _grab_frame(video_path, scene["frame_index_in_video"], local_sf):
+                logging.getLogger(__name__).warning(
+                    "video %s: failed to grab scene frame %d (frame_idx=%d) — skipping",
+                    video_id, scene["index"], scene["frame_index_in_video"],
+                )
+                continue
             storage.upload_file(
                 key_scene_frame(project_id, video_id, scene["index"]),
                 local_sf,
             )
+            grabbed_scenes.append(scene)
             if on_progress:
                 on_progress(0.93)
+
+        # Only keep scenes whose frame was successfully grabbed; avoids the API
+        # returning broken image URLs for frames that couldn't be extracted.
+        scenes = grabbed_scenes
 
         if scenes:
             storage.upload_file(
@@ -619,9 +630,15 @@ def finalize_video_post_processing(
                 str(td / f"frame_{scenes[0]['index']}.jpg"),
             )
 
-        local_traj = str(td / "trajectories.png")
-        _render_trajectories(all_tracks, w, h, local_traj)
-        storage.upload_file(key_trajectories(project_id, video_id), local_traj)
+        try:
+            local_traj = str(td / "trajectories.png")
+            _render_trajectories(all_tracks, w, h, local_traj)
+            storage.upload_file(key_trajectories(project_id, video_id), local_traj)
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "video %s: trajectory render failed — continuing without overlay",
+                video_id,
+            )
 
     if on_progress:
         on_progress(1.0)

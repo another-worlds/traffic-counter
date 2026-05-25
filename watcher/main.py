@@ -20,6 +20,7 @@ import logging
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -211,15 +212,18 @@ class Registrar:
     def full_scan(self) -> None:
         """Walk every configured workspace root and register fresh videos."""
         scanned = 0
-        for root in self._cfg.roots:
-            if not root.abs_path.exists():
-                log.warning("workspace root missing on disk: %s (workspace=%s)",
-                            root.abs_path, root.workspace)
-                continue
-            for p in root.abs_path.rglob("*"):
-                if is_video(p):
-                    scanned += 1
-                    threading.Thread(target=self.register, args=(p,), daemon=True).start()
+        # Bounded pool prevents a thundering herd of concurrent API register
+        # calls when the folder contains thousands of videos (e.g. on restart).
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for root in self._cfg.roots:
+                if not root.abs_path.exists():
+                    log.warning("workspace root missing on disk: %s (workspace=%s)",
+                                root.abs_path, root.workspace)
+                    continue
+                for p in root.abs_path.rglob("*"):
+                    if is_video(p):
+                        scanned += 1
+                        pool.submit(self.register, p)
         log.info("scan complete — found %d video file(s) across %d workspace(s)",
                  scanned, len(self._cfg.roots))
 

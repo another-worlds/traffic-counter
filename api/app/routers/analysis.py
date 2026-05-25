@@ -70,7 +70,7 @@ async def counts(video_id: str, body: CountRequest, db: Session = Depends(get_db
         # MaterializedTracks: sort + groupby + modal-class precomputed once per
         # video, shared across every line in this request and every subsequent
         # request for the same video until re-analysis bumps the cache key.
-        mt = load_materialized_tracks(v.project_id, video_id)
+        mt = await asyncio.to_thread(load_materialized_tracks, v.project_id, video_id)
         result = compute_counts_for_lines(mt, _lines_to_dict(lines))
 
         return CountResponse(

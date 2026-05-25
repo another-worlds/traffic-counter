@@ -1,9 +1,8 @@
-import time
 from datetime import datetime
 
 import streamlit as st
 import api_client as api
-from sidebar import render_sidebar, _workspace_status, _fmt_duration, _fmt_size
+from sidebar import render_sidebar, _workspace_status, _fmt_duration, _fmt_size, _cached_workspace_summary
 
 st.set_page_config(page_title="Traffic Counter", page_icon="🚗", layout="wide")
 
@@ -14,17 +13,22 @@ st.title("🚗 Traffic Counter")
 # =============================================================================
 # Section A — Worker Activity
 # =============================================================================
-st.subheader("⚙️ Worker activity")
 
-try:
-    active_jobs = api.worker_status()
-except Exception as e:
-    st.warning(f"Could not reach worker status: {e}")
-    active_jobs = []
+# Fragment auto-refreshes only this section every 3 s, leaving the rest of
+# the page (workspace cards, buttons) fully interactive during analysis.
+@st.fragment(run_every=3)
+def _worker_activity() -> None:
+    st.subheader("⚙️ Worker activity")
+    try:
+        active_jobs = api.worker_status()
+    except Exception as e:
+        st.warning(f"Could not reach worker status: {e}")
+        return
 
-if not active_jobs:
-    st.success("Worker is idle — no videos currently queued or analyzing.")
-else:
+    if not active_jobs:
+        st.success("Worker is idle — no videos currently queued or analyzing.")
+        return
+
     now = datetime.utcnow()
     total_jobs = len(active_jobs)
     overall_pct = sum(j.get("progress_pct", 0) for j in active_jobs) / total_jobs
@@ -35,7 +39,6 @@ else:
         filename = job["filename"]
         ws_name = job["project_name"]
 
-        # Use the segment-averaged ETA from the API (more accurate than elapsed/pct).
         eta_str = ""
         eta_s = job.get("eta_seconds")
         if eta_s and eta_s > 0:
@@ -53,9 +56,8 @@ else:
 
     st.caption(f"{total_jobs} job(s) in progress · overall {overall_pct*100:.0f}% complete")
 
-    # Auto-refresh while jobs are running
-    time.sleep(3)
-    st.rerun()
+
+_worker_activity()
 
 st.divider()
 
@@ -78,7 +80,7 @@ if not workspaces:
 cols = st.columns(3)
 for i, ws in enumerate(workspaces):
     try:
-        summary = api.workspace_summary(ws["id"])
+        summary = _cached_workspace_summary(ws["id"])
     except Exception:
         summary = {}
 

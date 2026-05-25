@@ -20,6 +20,11 @@ import streamlit as st
 import api_client as api
 
 
+@st.cache_data(ttl=5, show_spinner=False)
+def _cached_workspace_summary(ws_id: str) -> dict:
+    return api.workspace_summary(ws_id)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -125,7 +130,7 @@ def render_sidebar() -> Optional[dict]:
 
         # --- summary stats ---
         try:
-            summary = api.workspace_summary(ws["id"])
+            summary = _cached_workspace_summary(ws["id"])
         except Exception:
             summary = {}
 

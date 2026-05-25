@@ -136,11 +136,14 @@ class PipelineLogger:
             if new == "analyzing":
                 self._event("segment_started", v, segment_idx=s["segment_idx"],
                             start_time_s=s.get("start_time_s"),
-                            end_time_s=s.get("end_time_s"))
+                            end_time_s=s.get("end_time_s"),
+                            started_at=s.get("started_at"))
             elif new == "done":
                 self._event("segment_done", v, segment_idx=s["segment_idx"],
                             num_tracks=s.get("num_tracks"),
-                            wall_clock_s=s.get("wall_clock_s"))
+                            wall_clock_s=s.get("wall_clock_s"),
+                            started_at=s.get("started_at"),
+                            completed_at=s.get("completed_at"))
             elif new == "error":
                 self._event("segment_error", v, segment_idx=s["segment_idx"],
                             error_message=s.get("error_message"))
@@ -240,6 +243,8 @@ class PipelineLogger:
                 "total_segments": v.get("total_segments"),
                 "speed_ratio": v.get("speed_ratio"),
                 "eta_seconds": v.get("eta_seconds"),
+                "started_analyzing_at": v.get("started_analyzing_at"),
+                "analyzed_at": v.get("analyzed_at"),
             })
 
         self._detect_disappeared(seen_ids)

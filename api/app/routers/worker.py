@@ -66,6 +66,7 @@ def _build_worker_status(v: Video, project_name: str, segs: list) -> WorkerVideo
         status=v.status,
         progress_pct=v.progress_pct or 0.0,
         started_analyzing_at=v.started_analyzing_at,
+        analyzed_at=v.analyzed_at,
         current_segment_idx=current_seg_idx,
         total_segments=total_segs,
         completed_segments=completed_segs if total_segs else None,

@@ -93,18 +93,26 @@ def _entity_table(records: list) -> list:
         if kind == "event":
             if vid not in vids:
                 vids[vid] = {"filename": r.get("filename", "?"),
-                             "wall_s": 0.0, "tracks": 0, "segs": 0, "speeds": []}
+                             "wall_s": 0.0, "tracks": 0, "segs": 0, "speeds": [],
+                             "started_at": None, "finished_at": None}
             etype = r.get("type")
             if etype == "segment_done":
                 vids[vid]["segs"] += 1
                 vids[vid]["wall_s"] += r.get("wall_clock_s") or 0
                 vids[vid]["tracks"] += r.get("num_tracks") or 0
+                # Track the last finished_at (from the last segment done)
+                if r.get("completed_at"):
+                    vids[vid]["finished_at"] = r.get("completed_at")
         elif kind == "sample":
             for v in r.get("videos", []):
                 sv = v.get("video_id")
                 spd = v.get("speed_ratio")
-                if sv and sv in vids and spd:
-                    vids[sv]["speeds"].append(spd)
+                if sv and sv in vids:
+                    if spd:
+                        vids[sv]["speeds"].append(spd)
+                    # Capture started_at from the first time we see it
+                    if not vids[sv]["started_at"] and v.get("started_analyzing_at"):
+                        vids[sv]["started_at"] = v.get("started_analyzing_at")
 
     return sorted(vids.values(), key=lambda v: -v["wall_s"])
 
@@ -122,22 +130,37 @@ def _print_entity_table(entities: list):
         t.add_column("wall-clock", justify="right")
         t.add_column("tracks", justify="right")
         t.add_column("avg speed", justify="right")
+        t.add_column("started", justify="right", style="dim")
+        t.add_column("finished", justify="right", style="dim")
         for i, v in enumerate(entities, 1):
             speeds = v.get("speeds", [])
             avg_spd = f"{sum(speeds)/len(speeds):.1f}×" if speeds else "—"
+            started = v.get("started_at") or "—"
+            if started and started != "—" and isinstance(started, str):
+                started = started[11:19]  # extract HH:MM:SS from ISO timestamp
+            finished = v.get("finished_at") or "—"
+            if finished and finished != "—" and isinstance(finished, str):
+                finished = finished[11:19]
             style = "bold" if i == 1 else ""
             t.add_row(str(i), v["filename"], str(v["segs"]),
-                      _fmt_hm(v["wall_s"]), str(v["tracks"]), avg_spd, style=style)
+                      _fmt_hm(v["wall_s"]), str(v["tracks"]), avg_spd,
+                      str(started), str(finished), style=style)
         _console.print(t)
     else:
         print(f"\n{'#':>3}  {'filename':<32}  {'segs':>4}  {'wall-clock':>10}"
-              f"  {'tracks':>6}  avg speed")
-        print("-" * 75)
+              f"  {'tracks':>6}  avg speed  started     finished")
+        print("-" * 95)
         for i, v in enumerate(entities, 1):
             speeds = v.get("speeds", [])
             avg_spd = f"{sum(speeds)/len(speeds):.1f}x" if speeds else "—"
+            started = v.get("started_at") or "—"
+            if started and started != "—" and isinstance(started, str):
+                started = started[11:19]
+            finished = v.get("finished_at") or "—"
+            if finished and finished != "—" and isinstance(finished, str):
+                finished = finished[11:19]
             print(f"{i:>3}  {v['filename']:<32}  {v['segs']:>4}  {_fmt_hm(v['wall_s']):>10}"
-                  f"  {v['tracks']:>6}  {avg_spd}")
+                  f"  {v['tracks']:>6}  {avg_spd:<9}  {str(started):<8}  {str(finished)}")
 
 
 # --------------------------------------------------------------------------- Section 2

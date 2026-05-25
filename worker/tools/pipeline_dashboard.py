@@ -102,6 +102,15 @@ def _fmt_eta(seconds) -> str:
     return f"{m}m {seconds % 60:02d}s"
 
 
+def _fmt_timestamp(ts) -> str:
+    """Format a datetime timestamp as HH:MM:SS."""
+    if ts is None:
+        return "—"
+    if isinstance(ts, str):
+        return ts[11:19]  # ISO format: take HH:MM:SS
+    return ts.strftime("%H:%M:%S")
+
+
 def _bar(used, total, width=20) -> Text:
     if not total:
         return Text("n/a", style="dim")
@@ -192,8 +201,11 @@ def _pipeline_panel(videos, segs_by_video, stalled_ids) -> Panel:
         meta = v.get("worker_status_text") or ""
         spd = v.get("speed_ratio")
         spd_s = f"{spd:.1f}×" if spd else "—"
-        blocks.append(Text(f"  {meta}   speed {spd_s}   ETA {_fmt_eta(v.get('eta_seconds'))}",
-                           style="dim"))
+        status_line = f"  {meta}   speed {spd_s}   ETA {_fmt_eta(v.get('eta_seconds'))}"
+        started = v.get("started_analyzing_at")
+        if started:
+            status_line += f"   started {_fmt_timestamp(started)}"
+        blocks.append(Text(status_line, style="dim"))
         segs = segs_by_video.get(vid)
         if segs:
             blocks.append(Text("  ").append_text(_seg_strip(segs)))

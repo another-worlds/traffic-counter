@@ -121,6 +121,7 @@ class WorkerVideoStatus(BaseModel):
     status: str
     progress_pct: float
     started_analyzing_at: Optional[datetime]
+    analyzed_at: Optional[datetime]  # when analysis completed (status=analyzed)
     # Segment-aware progress fields (populated for segmented videos)
     current_segment_idx: Optional[int] = None
     total_segments: Optional[int] = None

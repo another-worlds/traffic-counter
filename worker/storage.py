@@ -34,7 +34,13 @@ class LocalStorage(Storage):
         shutil.copy(self._path(key), local_path)
 
     def exists(self, key):
-        return self._path(key).exists()
+        return (self.root / key).exists()
+
+    def local_path(self, key: str) -> str:
+        return str(self.root / key)
+
+    def open_read(self, key: str) -> BinaryIO:
+        return open(self.root / key, "rb")
 
 
 class GCSStorage(Storage):
@@ -52,6 +58,9 @@ class GCSStorage(Storage):
 
     def exists(self, key):
         return self.bucket.blob(key).exists(self.client)
+
+    def open_read(self, key: str) -> BinaryIO:
+        return io.BytesIO(self.bucket.blob(key).download_as_bytes())
 
 
 def get_storage() -> Storage:

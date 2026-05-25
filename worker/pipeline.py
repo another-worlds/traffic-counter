@@ -22,6 +22,8 @@ Consumers that merge segments must offset them by segment_idx * TRACK_ID_SEGMENT
 to avoid collisions.
 """
 from __future__ import annotations
+import concurrent.futures
+import logging
 import os
 import queue
 import tempfile
@@ -101,6 +103,11 @@ RESULT_QUEUE_DEPTH = int(os.environ.get("RESULT_QUEUE_DEPTH", "3"))
 DECODE_STALL_TIMEOUT_S = int(os.environ.get("DECODE_STALL_TIMEOUT_S", "120"))
 # Cap on scene-keyframes emitted per video.
 MAX_SCENE_FRAMES = int(os.environ.get("MAX_SCENE_FRAMES", "30"))
+# Process every (N+1)th frame during scene detection — frame_skip=4 means every
+# 5th frame (~5× faster) with negligible loss for major angle/cut detection.
+SCENE_DETECT_FRAME_SKIP = int(os.environ.get("SCENE_DETECT_FRAME_SKIP", "4"))
+# Hard wall-clock timeout for scene detection; fall back to midpoint if exceeded.
+SCENE_DETECT_TIMEOUT_S = int(os.environ.get("SCENE_DETECT_TIMEOUT_S", "120"))
 # Default segment length in seconds (1 hour).
 SEGMENT_DURATION_S = float(os.environ.get("SEGMENT_DURATION_S", "3600"))
 
@@ -478,7 +485,7 @@ def _detect_scenes(video_path: str, fps: float, num_frames: int) -> list:
         video = _sd_open_video(video_path)
         sm = _SceneManager()
         sm.add_detector(_ContentDetector(threshold=27.0))
-        sm.detect_scenes(video, show_progress=False)
+        sm.detect_scenes(video, show_progress=False, frame_skip=SCENE_DETECT_FRAME_SKIP)
         scenes = sm.get_scene_list()
         if not scenes:
             return fallback
@@ -575,7 +582,21 @@ def finalize_video_post_processing(
     if on_progress:
         on_progress(0.9)
 
-    scenes = _detect_scenes(video_path, fps, num_frames)
+    _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    _fut = _pool.submit(_detect_scenes, video_path, fps, num_frames)
+    try:
+        scenes = _fut.result(timeout=SCENE_DETECT_TIMEOUT_S)
+    except concurrent.futures.TimeoutError:
+        logging.getLogger(__name__).warning(
+            "scene detection timed out after %ds, using fallback midpoint",
+            SCENE_DETECT_TIMEOUT_S,
+        )
+        _fallback_idx = max(0, num_frames // 2)
+        scenes = [{"index": 0,
+                   "frame_index_in_video": _fallback_idx,
+                   "time_s": round(_fallback_idx / fps, 2) if fps > 0 else 0.0}]
+    finally:
+        _pool.shutdown(wait=False)
 
     with tempfile.TemporaryDirectory() as td:
         td = Path(td)

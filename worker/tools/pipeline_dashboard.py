@@ -192,6 +192,45 @@ def _events_panel(events: deque) -> Panel:
     return Panel(Group(*rows), title="Recent events", border_style="magenta")
 
 
+def _stats_panel(stats: dict, videos: list) -> Panel:
+    if not stats:
+        return Panel(Text("gathering 5-min window…", style="dim"),
+                     title="Rolling 5-min stats", border_style="yellow")
+    rows = []
+    ws = stats.get("window_s", 0)
+    rows.append(Text(f"window {ws:.0f}s  ({stats.get('n', 0)} samples)", style="dim"))
+    gpu = stats.get("avg_gpu")
+    spd = stats.get("avg_speed")
+    gpu_style = "green" if (gpu is not None and gpu > 5) else "yellow"
+    rows.append(Text.assemble(
+        ("GPU util  ", "bold"),
+        (f"{gpu:.0f}%" if gpu is not None else "—", gpu_style),
+        "   speed  ",
+        (f"{spd:.1f}×" if spd is not None else "—", "white"),
+    ))
+    etas = stats.get("etas", {})
+    for v in videos:
+        if v.get("status") != "analyzing":
+            continue
+        vid = v["video_id"]
+        api_eta = v.get("eta_seconds")
+        recent_eta = etas.get(vid)
+        rows.append(Text(f"{(v.get('filename') or '?')[:24]}", style="bold"))
+        rows.append(Text(f"  API ETA    {_fmt_eta(api_eta)}", style="dim"))
+        if recent_eta is not None:
+            diff = (recent_eta or 0) - (api_eta or recent_eta or 0)
+            suffix = ""
+            if api_eta and abs(diff) > 120:
+                suffix = f"  ({'+' if diff>0 else ''}{_fmt_eta(abs(int(diff)))} {'slower' if diff>0 else 'faster'})"
+            style = "cyan" if abs(diff) <= 600 else ("yellow" if diff > 0 else "green")
+            rows.append(Text(f"  recent ETA {_fmt_eta(recent_eta)}{suffix}", style=style))
+        else:
+            rows.append(Text("  recent ETA — (building window)", style="dim"))
+    if not any(v.get("status") == "analyzing" for v in videos):
+        rows.append(Text("  no active analysis", style="dim"))
+    return Panel(Group(*rows), title="Rolling 5-min stats", border_style="yellow")
+
+
 def _read_tail(path, n=8) -> deque:
     events = deque(maxlen=n)
     try:
@@ -216,6 +255,7 @@ class Dashboard:
         self.telemetry = not args.no_telemetry
         self.console = Console()
         self.stall_track: dict[str, dict] = {}
+        self._history: deque = deque()  # (epoch, gpu_util, per-video state)
 
     def _header(self, healthy: bool) -> Panel:
         dot = Text("● API up", style="green") if healthy else Text("● API DOWN", style="bold red")
@@ -244,6 +284,58 @@ class Dashboard:
                 del self.stall_track[vid]
         return stalled
 
+    def _record_sample(self, videos: list, gpu: dict | None):
+        entry = {
+            "epoch": _probe.now_epoch(),
+            "gpu_util": (gpu or {}).get("util_pct"),
+            "vids": {
+                v["video_id"]: {
+                    "speed": v.get("speed_ratio"),
+                    "done": v.get("completed_segments") or 0,
+                    "total": v.get("total_segments") or 0,
+                }
+                for v in videos if v.get("status") == "analyzing"
+            },
+        }
+        self._history.append(entry)
+        cutoff = entry["epoch"] - 600
+        while self._history and self._history[0]["epoch"] < cutoff:
+            self._history.popleft()
+
+    def _rolling_stats(self, videos: list) -> dict:
+        """5-min rolling averages of GPU util, speed, and per-video recent-pace ETA."""
+        now = _probe.now_epoch()
+        window = [e for e in self._history if e["epoch"] >= now - 300]
+        if not window:
+            return {}
+        gpu_vals = [e["gpu_util"] for e in window if e["gpu_util"] is not None]
+        speed_vals = [v["speed"] for e in window
+                      for v in e["vids"].values() if v.get("speed")]
+        result = {
+            "n": len(window),
+            "window_s": now - window[0]["epoch"],
+            "avg_gpu": sum(gpu_vals) / len(gpu_vals) if gpu_vals else None,
+            "avg_speed": sum(speed_vals) / len(speed_vals) if speed_vals else None,
+            "etas": {},
+        }
+        for v in videos:
+            if v.get("status") != "analyzing":
+                continue
+            vid = v["video_id"]
+            remaining = (v.get("total_segments") or 0) - (v.get("completed_segments") or 0)
+            if remaining <= 0:
+                result["etas"][vid] = 0.0
+                continue
+            with_vid = [e for e in window if vid in e["vids"]]
+            if len(with_vid) < 2:
+                continue
+            oldest, newest = with_vid[0], with_vid[-1]
+            delta_done = newest["vids"][vid]["done"] - oldest["vids"][vid]["done"]
+            delta_t = newest["epoch"] - oldest["epoch"]
+            if delta_done > 0 and delta_t > 0:
+                result["etas"][vid] = remaining / (delta_done / delta_t)
+        return result
+
     def render(self) -> Layout:
         healthy = True
         videos, segs_by_video = [], {}
@@ -260,7 +352,18 @@ class Dashboard:
             healthy = False
 
         tel = _probe.telemetry_sample(self.telemetry)
+        gpu = tel.get("gpu") if tel else None
+
+        # Sort: analyzing before queued, then by GPU time consumed (completed segs) desc.
+        videos.sort(key=lambda v: (
+            0 if v.get("status") == "analyzing" else 1,
+            -(v.get("completed_segments") or 0),
+            -(v.get("progress_pct") or 0.0),
+        ))
+
         stalled = self._track_stalls(videos)
+        self._record_sample(videos, gpu)
+        stats = self._rolling_stats(videos)
 
         layout = Layout()
         layout.split_column(
@@ -271,10 +374,11 @@ class Dashboard:
         layout["left"].update(_pipeline_panel(videos, segs_by_video, stalled))
 
         right_items = [
-            _gpu_panel(tel.get("gpu"), tel.get("gpu_procs", [])) if self.telemetry
+            _gpu_panel(gpu, tel.get("gpu_procs", [])) if self.telemetry
             else Panel(Text("telemetry disabled", style="dim"), title="GPU"),
             _host_panel(tel.get("host"), tel.get("containers", [])) if self.telemetry
             else Panel(Text("telemetry disabled", style="dim"), title="Host"),
+            _stats_panel(stats, videos),
         ]
         if self.events_file:
             right_items.append(_events_panel(_read_tail(self.events_file)))

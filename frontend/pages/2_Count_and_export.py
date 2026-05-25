@@ -176,10 +176,17 @@ def _export_block(selected_video_id: str, line_ids_for_export: List[str]) -> Non
             help="Compute counts and prepare an Excel workbook for download.",
         ):
             try:
-                resp = api.start_export(selected_video_id, line_ids_for_export)
-                st.session_state[job_key] = resp["job_id"]
-                st.session_state.pop(file_key, None)
-                _rerun()
+                # Re-fetch lines at click time — the React iframe adds/deletes lines
+                # directly via FastAPI without triggering a Streamlit page rerun, so
+                # line_ids_for_export (built at render time) may be stale.
+                live_ids = [str(l["id"]) for l in api.list_lines(selected_video_id)]
+                if not live_ids:
+                    st.warning("No counting lines on this video — draw lines in the editor first.")
+                else:
+                    resp = api.start_export(selected_video_id, live_ids)
+                    st.session_state[job_key] = resp["job_id"]
+                    st.session_state.pop(file_key, None)
+                    _rerun()
             except api.APIError as exc:
                 st.error(str(exc))
 

@@ -1,7 +1,10 @@
+# syntax=docker/dockerfile:1
 FROM node:22-slim AS vite-builder
 WORKDIR /build
 COPY hybrid_viewport/package.json hybrid_viewport/package-lock.json ./
-RUN npm ci
+# BuildKit cache mount persists the npm download cache across rebuilds.
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
 COPY hybrid_viewport/ ./
 RUN npm run build
 
@@ -14,7 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# BuildKit cache mount persists pip's wheel cache across rebuilds.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
 
 COPY . .
 

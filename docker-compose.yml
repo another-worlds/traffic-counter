@@ -70,6 +70,9 @@ services:
     # have a specific reason.
     build:
       context: ./worker
+    # Shared tag so the identical `monitor` build resolves to this same image
+    # instead of storing/rebuilding a second copy of the multi-GB worker image.
+    image: traffic-counter-worker
     runtime: nvidia
     # Default to a single worker. On one GPU that is the throughput
     # optimum — extra replicas serialise on the same CUDA streams and
@@ -114,6 +117,9 @@ services:
     # telemetry source is unavailable.
     build:
       context: ./worker
+    # Same tag as `worker` — compose builds the worker image once and both
+    # services reuse it (no second build, no duplicate image on disk).
+    image: traffic-counter-worker
     runtime: nvidia
     working_dir: /app/tools          # so the tools' bare `import _probe`/`import _health` resolve
     command: python pipeline_logger.py --api http://api:8000 -o /logs/pipeline_events.jsonl -i 5

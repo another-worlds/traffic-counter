@@ -14,6 +14,7 @@ class Storage:
     def upload_file(self, key: str, local_path: str) -> None: ...
     def download_to(self, key: str, local_path: str) -> None: ...
     def exists(self, key: str) -> bool: ...
+    def open_read(self, key: str) -> BinaryIO: ...
 
 
 class LocalStorage(Storage):
@@ -36,6 +37,9 @@ class LocalStorage(Storage):
     def exists(self, key):
         return self._path(key).exists()
 
+    def open_read(self, key: str) -> BinaryIO:
+        return open(self._path(key), "rb")
+
 
 class GCSStorage(Storage):
     def __init__(self, bucket_name: str):
@@ -52,6 +56,10 @@ class GCSStorage(Storage):
 
     def exists(self, key):
         return self.bucket.blob(key).exists(self.client)
+
+    def open_read(self, key: str) -> BinaryIO:
+        data = self.bucket.blob(key).download_as_bytes()
+        return io.BytesIO(data)
 
 
 def get_storage() -> Storage:

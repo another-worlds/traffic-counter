@@ -1,0 +1,7 @@
+# Host-side dependencies for the traffic-counter diagnostic tools.
+# These are NOT container deps — install them where you run the tools:
+#   pip install -r worker/tools/requirements-tools.txt
+#
+# pipeline_dashboard.py needs rich for the live TUI.
+# pipeline_logger.py and _probe.py use only the standard library.
+rich>=13

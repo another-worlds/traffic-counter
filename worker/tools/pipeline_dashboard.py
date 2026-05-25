@@ -1,0 +1,300 @@
+#!/usr/bin/env python3
+"""Live terminal dashboard for the traffic-counter analysis pipeline.
+
+A `rich` TUI that auto-refreshes (~2s) and shows, in one screen:
+  * API health + clock
+  * GPU util / VRAM / temp / power and compute processes (nvidia-smi)
+  * Host RAM and per-container CPU/mem (free -m / docker stats)
+  * Per-video pipeline progress: bar, "Segment N of M", speed (×realtime), ETA,
+    and a segment strip (🟩 done / 🟧 analyzing / ⬜ pending)
+  * Optionally, a tail of recent events from a pipeline_logger.py JSONL file
+
+Usage:
+  python worker/tools/pipeline_dashboard.py [--api URL] [-i SECONDS]
+         [--events FILE] [--no-telemetry]
+
+Requires `rich` (pip install -r worker/tools/requirements-tools.txt).
+Ctrl-C to exit. If the API is down the screen shows a red banner and keeps
+retrying.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import time
+from collections import deque
+
+import _probe
+from _probe import ApiUnavailable
+
+try:
+    from rich.console import Console, Group
+    from rich.layout import Layout
+    from rich.live import Live
+    from rich.panel import Panel
+    from rich.progress import BarColumn, Progress, TextColumn
+    from rich.table import Table
+    from rich.text import Text
+except ImportError:
+    raise SystemExit(
+        "rich is required: pip install -r worker/tools/requirements-tools.txt"
+    )
+
+
+SEG_GLYPH = {"done": "🟩", "analyzing": "🟧", "error": "🟥"}
+EVENT_STYLE = {
+    "segment_done": "green", "video_analyzed": "bold green",
+    "segment_error": "red", "video_error": "bold red", "api_unavailable": "red",
+    "stall_suspected": "bold yellow", "segment_started": "cyan",
+}
+
+
+def _parse_args(argv=None):
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--api", default=_probe.DEFAULT_API,
+                   help=f"API base URL (default {_probe.DEFAULT_API})")
+    p.add_argument("-i", "--interval", type=float, default=2.0,
+                   help="seconds between refreshes (default 2)")
+    p.add_argument("--events", default=None,
+                   help="pipeline_logger.py JSONL file to tail for a recent-events panel")
+    p.add_argument("--no-telemetry", action="store_true",
+                   help="skip nvidia-smi/docker/free sampling")
+    return p.parse_args(argv)
+
+
+def _fmt_eta(seconds) -> str:
+    if seconds is None:
+        return "—"
+    seconds = int(seconds)
+    h, m = seconds // 3600, (seconds % 3600) // 60
+    if h:
+        return f"{h}h {m:02d}m"
+    return f"{m}m {seconds % 60:02d}s"
+
+
+def _bar(used, total, width=20) -> Text:
+    if not total:
+        return Text("n/a", style="dim")
+    frac = max(0.0, min(1.0, (used or 0) / total))
+    filled = int(round(frac * width))
+    style = "green" if frac < 0.75 else ("yellow" if frac < 0.9 else "red")
+    t = Text()
+    t.append("█" * filled, style=style)
+    t.append("░" * (width - filled), style="dim")
+    t.append(f" {used:.0f}/{total:.0f}MB ({frac*100:.0f}%)")
+    return t
+
+
+def _gpu_panel(gpu, procs) -> Panel:
+    if gpu is None:
+        return Panel(Text("nvidia-smi unavailable", style="dim"), title="GPU",
+                     border_style="dim")
+    rows = []
+    util = gpu.get("util_pct") or 0
+    util_style = "green" if util > 5 else "yellow"
+    rows.append(Text.assemble(("util  ", "bold"),
+                              (f"{util:>3.0f}%", util_style),
+                              f"   temp {gpu.get('temp_c') or '—'}°C   "
+                              f"pwr {gpu.get('power_w') or '—'}/{gpu.get('power_limit_w') or '—'}W"))
+    rows.append(Text.assemble(("vram  ", "bold"),
+                              _bar(gpu.get("mem_used_mb"), gpu.get("mem_total_mb"))))
+    if procs:
+        for pr in procs[:4]:
+            rows.append(Text(f"  pid {pr['pid']:<7} {pr['name'][:24]:<24} "
+                             f"{pr['vram_mb'] or 0:.0f}MB", style="dim"))
+    return Panel(Group(*rows), title="GPU", border_style="cyan")
+
+
+def _host_panel(host, containers) -> Panel:
+    rows = []
+    if host:
+        rows.append(Text.assemble(("ram   ", "bold"),
+                                  _bar(host.get("used_mb"), host.get("total_mb"))))
+    else:
+        rows.append(Text("free -m unavailable", style="dim"))
+    if containers:
+        t = Table(box=None, pad_edge=False, expand=True)
+        t.add_column("container", style="white", overflow="ellipsis")
+        t.add_column("cpu%", justify="right")
+        t.add_column("mem%", justify="right")
+        t.add_column("mem", justify="right", style="dim")
+        for c in containers:
+            t.add_row(c["name"], f"{c['cpu_pct'] or 0:.0f}",
+                      f"{c['mem_pct'] or 0:.0f}", c["mem_used"])
+        rows.append(t)
+    return Panel(Group(*rows), title="Host / Containers", border_style="cyan")
+
+
+def _seg_strip(segs, width=40) -> Text:
+    """Render a video's segments as colored glyphs, truncated to `width`."""
+    t = Text()
+    shown = segs[:width]
+    for s in shown:
+        t.append(SEG_GLYPH.get(s["status"], "⬜"))
+    if len(segs) > width:
+        t.append(f" +{len(segs) - width}")
+    return t
+
+
+def _pipeline_panel(videos, segs_by_video, stalled_ids) -> Panel:
+    if not videos:
+        return Panel(Text("no videos queued or analyzing", style="dim"),
+                     title="Pipeline", border_style="green")
+    blocks = []
+    for v in videos:
+        vid = v["video_id"]
+        stalled = vid in stalled_ids
+        name = Text(v.get("filename") or vid, style="bold")
+        status = v.get("status")
+        badge = "🟧 analyzing" if status == "analyzing" else "🟨 queued"
+        if stalled:
+            badge = "⚠ STALLED?"
+        head = Text.assemble(name, "  ", (badge, "bold yellow" if stalled else "white"))
+        blocks.append(head)
+
+        pct = (v.get("progress_pct") or 0.0) * 100
+        prog = Progress(BarColumn(bar_width=40),
+                        TextColumn("{task.percentage:>3.0f}%"),
+                        expand=False)
+        prog.add_task("", total=100, completed=pct)
+        blocks.append(prog)
+
+        meta = v.get("worker_status_text") or ""
+        spd = v.get("speed_ratio")
+        spd_s = f"{spd:.1f}×" if spd else "—"
+        blocks.append(Text(f"  {meta}   speed {spd_s}   ETA {_fmt_eta(v.get('eta_seconds'))}",
+                           style="dim"))
+        segs = segs_by_video.get(vid)
+        if segs:
+            blocks.append(Text("  ").append_text(_seg_strip(segs)))
+        blocks.append(Text(""))
+    return Panel(Group(*blocks), title="Pipeline", border_style="green")
+
+
+def _events_panel(events: deque) -> Panel:
+    if not events:
+        return Panel(Text("(no events yet)", style="dim"), title="Recent events",
+                     border_style="magenta")
+    rows = []
+    for ev in events:
+        etype = ev.get("type", "?")
+        style = EVENT_STYLE.get(etype, "white")
+        ts = (ev.get("ts") or "")[11:19]
+        extra = ""
+        if "segment_idx" in ev:
+            extra += f" seg{ev['segment_idx']}"
+        if ev.get("num_tracks") is not None:
+            extra += f" tracks={ev['num_tracks']}"
+        if etype == "stall_suspected":
+            extra += f" flat={ev.get('flat_for_s')}s"
+        rows.append(Text(f"{ts} {etype:<16} {ev.get('filename','')}{extra}", style=style))
+    return Panel(Group(*rows), title="Recent events", border_style="magenta")
+
+
+def _read_tail(path, n=8) -> deque:
+    events = deque(maxlen=n)
+    try:
+        with open(path) as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("kind") == "event":
+                    events.append(rec)
+    except OSError:
+        pass
+    return events
+
+
+class Dashboard:
+    def __init__(self, args):
+        self.api = args.api
+        self.interval = args.interval
+        self.events_file = args.events
+        self.telemetry = not args.no_telemetry
+        self.console = Console()
+        self.stall_track: dict[str, dict] = {}
+
+    def _header(self, healthy: bool) -> Panel:
+        dot = Text("● API up", style="green") if healthy else Text("● API DOWN", style="bold red")
+        line = Text.assemble("traffic-counter pipeline   ", dot,
+                             f"   {_probe.now_iso()}   refresh {self.interval}s")
+        return Panel(line, border_style="green" if healthy else "red")
+
+    def _track_stalls(self, videos):
+        """Lightweight client-side stall flag (no GPU dep) for visual emphasis."""
+        stalled = set()
+        seen = set()
+        for v in videos:
+            if v.get("status") != "analyzing":
+                continue
+            vid = v["video_id"]
+            seen.add(vid)
+            key = (v.get("completed_segments"), v.get("current_segment_idx"),
+                   round(v.get("progress_pct") or 0.0, 4))
+            st = self.stall_track.get(vid)
+            if st is None or st["key"] != key:
+                self.stall_track[vid] = {"key": key, "since": time.monotonic()}
+            elif time.monotonic() - st["since"] > 180:
+                stalled.add(vid)
+        for vid in list(self.stall_track):
+            if vid not in seen:
+                del self.stall_track[vid]
+        return stalled
+
+    def render(self) -> Layout:
+        healthy = True
+        videos, segs_by_video = [], {}
+        try:
+            videos = _probe.worker_status(self.api)
+            for v in videos:
+                if v["status"] == "analyzing" and v.get("total_segments"):
+                    try:
+                        segs_by_video[v["video_id"]] = _probe.video_segments(
+                            self.api, v["video_id"])
+                    except ApiUnavailable:
+                        pass
+        except ApiUnavailable:
+            healthy = False
+
+        tel = _probe.telemetry_sample(self.telemetry)
+        stalled = self._track_stalls(videos)
+
+        layout = Layout()
+        layout.split_column(
+            Layout(self._header(healthy), size=3, name="header"),
+            Layout(name="body"),
+        )
+        layout["body"].split_row(Layout(name="left", ratio=2), Layout(name="right"))
+        layout["left"].update(_pipeline_panel(videos, segs_by_video, stalled))
+
+        right_items = [
+            _gpu_panel(tel.get("gpu"), tel.get("gpu_procs", [])) if self.telemetry
+            else Panel(Text("telemetry disabled", style="dim"), title="GPU"),
+            _host_panel(tel.get("host"), tel.get("containers", [])) if self.telemetry
+            else Panel(Text("telemetry disabled", style="dim"), title="Host"),
+        ]
+        if self.events_file:
+            right_items.append(_events_panel(_read_tail(self.events_file)))
+        layout["right"].update(Group(*right_items))
+        return layout
+
+    def run(self):
+        with Live(self.render(), console=self.console, screen=True,
+                  refresh_per_second=4) as live:
+            try:
+                while True:
+                    time.sleep(self.interval)
+                    live.update(self.render())
+            except KeyboardInterrupt:
+                pass
+
+
+def main(argv=None):
+    Dashboard(_parse_args(argv)).run()
+
+
+if __name__ == "__main__":
+    main()

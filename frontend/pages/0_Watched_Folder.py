@@ -119,6 +119,40 @@ total_processing_time_s = sum(_processing_time_s(v, now_utc) for v in videos)
 running = [v for v in videos if v["status"] == "analyzing" and v.get("progress_pct") is not None]
 queue_avg_progress = (sum(v["progress_pct"] for v in running) / len(running)) if running else 0.0
 
+# --- Throughput & batch ETA ---
+# avg_speed: video-seconds per wall-clock-second, per worker.
+# Primary source: fully-analyzed videos with both timestamps.
+analyzed_timed = [
+    v for v in videos
+    if v["status"] == "analyzed"
+    and _duration_s(v) > 0
+    and _processing_time_s(v, now_utc) > 0
+]
+if analyzed_timed:
+    speeds = [_duration_s(v) / _processing_time_s(v, now_utc) for v in analyzed_timed]
+    avg_speed = sum(speeds) / len(speeds)
+else:
+    # Fallback: use speed_ratio from currently-analyzing queue items.
+    live_speeds = [q["speed_ratio"] for q in queue if q.get("speed_ratio")]
+    avg_speed = sum(live_speeds) / len(live_speeds) if live_speeds else 0.0
+
+# Remaining video content (uploaded + queued = full duration; analyzing = partial).
+remaining_video_s = sum(_duration_s(v) for v in videos if v["status"] in ("uploaded", "queued"))
+remaining_video_s += sum(
+    _duration_s(v) * (1.0 - float(v.get("progress_pct") or 0.0))
+    for v in videos if v["status"] == "analyzing"
+)
+
+# Batch ETA: divide remaining content by (speed × simultaneous workers).
+# _processing_time_s sums per-video elapsed time so avg_speed is per-worker;
+# multiplying by n_concurrent converts to effective batch throughput.
+n_concurrent = max(1, len([v for v in videos if v["status"] == "analyzing"]))
+batch_eta_s = (
+    remaining_video_s / (avg_speed * n_concurrent)
+    if avg_speed > 0 and remaining_video_s > 0
+    else None
+)
+
 st.subheader("Processing Dashboard")
 mc1, mc2, mc3, mc4 = st.columns(4)
 mc1.metric("Total videos", total)
@@ -131,6 +165,20 @@ mc5.metric("Yandex folder hours", f"{all_duration_s/3600:.1f}h")
 mc6.metric("Processed hours", f"{analyzed_duration_s/3600:.1f}h")
 mc7.metric("Avg running progress", f"{queue_avg_progress*100:.0f}%")
 mc8.metric("Processing time spent", f"{total_processing_time_s/3600:.1f}h")
+
+mc9, mc10, mc11, mc12 = st.columns(4)
+mc9.metric(
+    "Throughput",
+    f"{avg_speed:.1f}× speed" if avg_speed else "—",
+    "video-hr / worker-hr" if avg_speed else "need ≥1 completed video",
+)
+mc10.metric(
+    "Batch ETA",
+    _fmt_eta(batch_eta_s) if batch_eta_s else "—",
+    f"{n_concurrent} worker{'s' if n_concurrent != 1 else ''}" if batch_eta_s else None,
+)
+mc11.metric("Remaining content", f"{remaining_video_s / 3600:.1f}h")
+mc12.metric("Videos remaining", unstarted + in_queue)
 
 st.progress(analyzed / max(1, total), text=f"Overall completion: {analyzed}/{total} videos")
 

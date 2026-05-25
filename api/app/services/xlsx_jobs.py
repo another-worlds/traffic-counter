@@ -141,6 +141,8 @@ def run_export_job(
             segments_dict = [
                 {
                     "segment_idx": s.segment_idx,
+                    "start_frame": s.start_frame,
+                    "end_frame": s.end_frame,
                     "start_time_s": s.start_time_s,
                     "end_time_s": s.end_time_s,
                 }

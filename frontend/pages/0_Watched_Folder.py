@@ -227,6 +227,10 @@ with right:
             st.write(f"**{item['filename']}**")
             st.caption(f"{item['project_name']} · {item['status']}")
             if item["status"] == "analyzing":
+                cs = item.get("completed_segments")
+                ts = item.get("total_segments")
+                if cs is not None and ts:
+                    st.caption("🟩" * cs + "⬜" * (ts - cs))
                 status_txt = item.get("worker_status_text") or f"{pct*100:.0f}%"
                 st.progress(pct, text=status_txt)
                 meta_parts = []

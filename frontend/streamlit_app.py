@@ -35,26 +35,21 @@ else:
         filename = job["filename"]
         ws_name = job["project_name"]
 
-        started_raw = job.get("started_analyzing_at")
+        # Use the segment-averaged ETA from the API (more accurate than elapsed/pct).
         eta_str = ""
-        if started_raw and pct > 0.05:
-            try:
-                started = datetime.fromisoformat(started_raw.replace("Z", ""))
-                elapsed_s = (now - started).total_seconds()
-                remaining_s = elapsed_s / pct * (1.0 - pct)
-                mins = int(remaining_s // 60)
-                secs = int(remaining_s % 60)
-                eta_str = f" · ~{mins}m {secs:02d}s left" if mins else f" · ~{secs}s left"
-            except Exception:
-                pass
+        eta_s = job.get("eta_seconds")
+        if eta_s and eta_s > 0:
+            mins, secs = divmod(int(eta_s), 60)
+            eta_str = f" · ~{mins}m {secs:02d}s left" if mins else f" · ~{secs}s left"
 
         label = f"**{filename}** — {ws_name}"
         if status == "queued":
             st.write(f"🟨 {label} — *queued*")
         else:
+            seg_text = job.get("worker_status_text") or f"{pct*100:.0f}%"
             with st.container():
                 st.write(f"🟧 {label}{eta_str}")
-                st.progress(pct, text=f"{pct*100:.0f}%")
+                st.progress(pct, text=seg_text)
 
     st.caption(f"{total_jobs} job(s) in progress · overall {overall_pct*100:.0f}% complete")
 

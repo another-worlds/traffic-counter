@@ -76,8 +76,8 @@ def _safe_add_columns():
         )""",
         # Per-segment checkpoint table for 8-24h video processing.
         """CREATE TABLE IF NOT EXISTS video_segments (
-            id VARCHAR PRIMARY KEY,
-            video_id VARCHAR NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+            video_id UUID NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
             segment_idx INTEGER NOT NULL,
             status VARCHAR(32) NOT NULL DEFAULT 'pending',
             start_frame INTEGER NOT NULL,

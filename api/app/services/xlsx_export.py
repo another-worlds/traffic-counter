@@ -226,10 +226,16 @@ def _add_hourly_sheets(
         wsv.cell(row=1, column=1, value=label).font = Font(bold=True, size=12)
         _write_header(wsv, headers, row=3)
 
-        # Slice the full DataFrame to this hour's time window.
+        # Slice the full DataFrame to this hour. Prefer the exact frame_idx
+        # range from the segment (integers — no float-boundary ambiguity);
+        # fall back to the absolute t_seconds window for old metadata.
         if is_df and not tracks_df.empty:
-            # t_seconds in the merged df is absolute; filter to [t0, t1).
-            mask = (tracks_df["t_seconds"] >= t0) & (tracks_df["t_seconds"] < t1)
+            if "start_frame" in seg and "end_frame" in seg:
+                f0 = int(seg["start_frame"])
+                f1 = int(seg["end_frame"])
+                mask = (tracks_df["frame_idx"] >= f0) & (tracks_df["frame_idx"] < f1)
+            else:
+                mask = (tracks_df["t_seconds"] >= t0) & (tracks_df["t_seconds"] < t1)
             seg_df = tracks_df[mask]
         else:
             seg_df = _pd.DataFrame(columns=tracks_df.columns if is_df else [

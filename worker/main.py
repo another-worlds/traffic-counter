@@ -186,7 +186,7 @@ def plan_segments(video_id: str, fps: float, num_frames: int, segment_duration_s
                     (id, video_id, segment_idx, status,
                      start_frame, end_frame, start_time_s, end_time_s)
                 VALUES
-                    (gen_random_uuid()::text, :video_id, :seg_idx, 'pending',
+                    (gen_random_uuid(), :video_id, :seg_idx, 'pending',
                      :start_frame, :end_frame, :start_time_s, :end_time_s)
                 ON CONFLICT (video_id, segment_idx) DO NOTHING
             """), {
@@ -197,11 +197,14 @@ def plan_segments(video_id: str, fps: float, num_frames: int, segment_duration_s
                 "start_time_s": seg["start_time_s"],
                 "end_time_s": seg["end_time_s"],
             })
-        # Reset any segment that a dead worker left in 'analyzing'.
+        # Reset segments left 'analyzing' by a dead worker, and retry any
+        # 'error' segments from a previous run so a re-analyze re-attempts
+        # failed hours instead of silently skipping them.
         conn.execute(text("""
             UPDATE video_segments
-            SET status='pending', started_at=NULL, last_heartbeat_at=NULL
-            WHERE video_id=:video_id AND status='analyzing'
+            SET status='pending', started_at=NULL,
+                last_heartbeat_at=NULL, error_message=NULL
+            WHERE video_id=:video_id AND status IN ('analyzing', 'error')
         """), {"video_id": video_id})
         # Record total segment count on the video row.
         conn.execute(text("""
@@ -248,6 +251,21 @@ def mark_segment_done(segment_id: str, num_tracks: int):
         """), {"id": segment_id, "n": num_tracks, "ts": datetime.utcnow()})
 
 
+def update_segment_end_frame(segment_id: str, end_frame: int, end_time_s: float):
+    """Persist the real end of a segment after read-to-EOF decoding.
+
+    Keeps the per-hour export's [start_frame, end_frame) ranges aligned with the
+    frames actually written to parquet when the planned end (a frame-count
+    estimate) differed from the true decodable tail.
+    """
+    with engine.begin() as conn:
+        conn.execute(text("""
+            UPDATE video_segments
+            SET end_frame=:end_frame, end_time_s=:end_time_s
+            WHERE id=:id
+        """), {"id": segment_id, "end_frame": int(end_frame), "end_time_s": end_time_s})
+
+
 def mark_segment_error(segment_id: str, err: Exception):
     msg = f"{type(err).__name__}: {err}\n\n{traceback.format_exc()[-2000:]}"
     with engine.begin() as conn:
@@ -263,6 +281,17 @@ def update_segment_heartbeat(segment_id: str):
         conn.execute(text(
             "UPDATE video_segments SET last_heartbeat_at=:ts WHERE id=:id"
         ), {"id": segment_id, "ts": datetime.utcnow()})
+
+
+def unfinished_segments(video_id: str) -> list[int]:
+    """Return the segment indexes for this video that are not yet 'done'."""
+    with engine.begin() as conn:
+        rows = conn.execute(text("""
+            SELECT segment_idx FROM video_segments
+            WHERE video_id=:video_id AND status<>'done'
+            ORDER BY segment_idx
+        """), {"video_id": video_id}).all()
+    return [r.segment_idx for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -389,9 +418,13 @@ def handle(video: dict):
                 seg["start_frame"], seg["end_frame"],
             )
 
+            # The final segment reads to true EOF rather than stopping at the
+            # CAP_PROP_FRAME_COUNT estimate, so a too-low estimate can't silently
+            # drop the video tail. Its real frame range is persisted afterwards.
+            is_last = seg["segment_idx"] == total_segs - 1
             with Heartbeat(video["id"], seg["id"]) as hb:
                 try:
-                    num_tracks = process_video_segment(
+                    num_tracks, actual_end = process_video_segment(
                         project_id=video["project_id"],
                         video_id=video["id"],
                         segment_idx=seg["segment_idx"],
@@ -402,7 +435,21 @@ def handle(video: dict):
                         on_progress=lambda pct, _hb=hb, _seg=seg, _done=seg_done, _total=total_segs: (
                             _hb.set_progress((_done + pct) / _total)
                         ),
+                        read_to_eof=is_last,
                     )
+                    if is_last and actual_end != seg["end_frame"]:
+                        if actual_end > seg["end_frame"]:
+                            log.warning(
+                                "video %s: last segment recovered %d frame(s) "
+                                "(%.1fs) past the CAP_PROP_FRAME_COUNT estimate %d",
+                                video["id"], actual_end - seg["end_frame"],
+                                (actual_end - seg["end_frame"]) / fps if fps > 0 else 0.0,
+                                seg["end_frame"],
+                            )
+                        update_segment_end_frame(
+                            seg["id"], actual_end,
+                            round(actual_end / fps, 3) if fps > 0 else seg["end_time_s"],
+                        )
                     mark_segment_done(seg["id"], num_tracks)
                     log.info(
                         "video %s: segment %d done (%d tracks)",
@@ -415,6 +462,17 @@ def handle(video: dict):
 
             seg_done += 1
             seg_context = ""
+
+        # Never finalise with missing hours: if any segment failed to reach
+        # 'done', fail the whole video loudly rather than aggregating a partial
+        # result. A re-analyze resets these segments to 'pending' and retries.
+        pending_or_failed = unfinished_segments(video["id"])
+        if pending_or_failed:
+            raise RuntimeError(
+                f"{len(pending_or_failed)} of {total_segs} hour-segment(s) did not "
+                f"complete (segment idx {pending_or_failed}); not finalizing. "
+                f"Re-analyze to retry the failed hour(s)."
+            )
 
         # All segments done — finalise (scenes, trajectory PNG, status update).
         seg_context = "Finalizing"

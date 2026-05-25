@@ -22,6 +22,7 @@ Consumers that merge segments must offset them by segment_idx * TRACK_ID_SEGMENT
 to avoid collisions.
 """
 from __future__ import annotations
+import logging
 import os
 import queue
 import tempfile
@@ -101,6 +102,12 @@ RESULT_QUEUE_DEPTH = int(os.environ.get("RESULT_QUEUE_DEPTH", "3"))
 DECODE_STALL_TIMEOUT_S = int(os.environ.get("DECODE_STALL_TIMEOUT_S", "120"))
 # Cap on scene-keyframes emitted per video.
 MAX_SCENE_FRAMES = int(os.environ.get("MAX_SCENE_FRAMES", "30"))
+# Process every (N+1)th frame during scene detection — frame_skip=4 means every
+# 5th frame (~5× faster) with negligible loss for major angle/cut detection.
+SCENE_DETECT_FRAME_SKIP = int(os.environ.get("SCENE_DETECT_FRAME_SKIP", "4"))
+# Skip scene detection for videos longer than this — full-frame CPU decode of
+# multi-hour CCTV is effectively unbounded. Such videos get one fallback keyframe.
+SCENE_DETECT_MAX_DURATION_S = float(os.environ.get("SCENE_DETECT_MAX_DURATION_S", "1200"))
 # Default segment length in seconds (1 hour).
 SEGMENT_DURATION_S = float(os.environ.get("SEGMENT_DURATION_S", "3600"))
 
@@ -474,11 +481,19 @@ def _detect_scenes(video_path: str, fps: float, num_frames: int) -> list:
     if not _SCENEDETECT_AVAILABLE:
         return fallback
 
+    duration_s = num_frames / fps if fps > 0 else 0.0
+    if duration_s > SCENE_DETECT_MAX_DURATION_S:
+        logging.getLogger(__name__).info(
+            "video duration %.0fs exceeds scene-detection limit %.0fs; "
+            "using single fallback keyframe", duration_s, SCENE_DETECT_MAX_DURATION_S,
+        )
+        return fallback
+
     try:
         video = _sd_open_video(video_path)
         sm = _SceneManager()
         sm.add_detector(_ContentDetector(threshold=27.0))
-        sm.detect_scenes(video, show_progress=False)
+        sm.detect_scenes(video, show_progress=False, frame_skip=SCENE_DETECT_FRAME_SKIP)
         scenes = sm.get_scene_list()
         if not scenes:
             return fallback

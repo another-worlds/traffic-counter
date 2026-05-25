@@ -40,6 +40,13 @@ type AppProps = {
 
 const DEFAULT_VIDEO_SIZE: VideoSize = { width: 1920, height: 1080 };
 const PATCH_DEBOUNCE_MS = 250;
+
+const CLASS_PRESETS = [
+  { label: 'Class A', color: '#2dd4bf' },
+  { label: 'Class B', color: '#fbbf24' },
+  { label: 'Class C', color: '#a78bfa' },
+  { label: 'Class D', color: '#a3e635' },
+] as const;
 // 750 ms lets a burst of line-drawing (commit, drag-to-resize, immediately
 // draw another line) coalesce into a single /counts request. The existing
 // AbortController logic in scheduleCountsRefresh cancels the in-flight call
@@ -474,6 +481,40 @@ export default function App({ bootstrap }: AppProps) {
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
           />
+
+          {/* Class preset overlay — top-right of viewport */}
+          <div className="class-preset-strip">
+            {CLASS_PRESETS.map((p) => {
+              const selectedLine = model.selectedLineId
+                ? model.lines.find((l) => l.id === model.selectedLineId)
+                : null;
+              const isActive = selectedLine?.color === p.color;
+              return (
+                <button
+                  key={p.label}
+                  type="button"
+                  className={`class-preset-btn${isActive ? ' active' : ''}`}
+                  style={{ '--preset-color': p.color } as React.CSSProperties}
+                  title={model.selectedLineId ? `Apply ${p.label}` : `Set drawing color to ${p.label}`}
+                  onClick={() => {
+                    if (model.selectedLineId) {
+                      const base = (selectedLine?.name ?? '').replace(/ · Class [A-D]$/, '').trim();
+                      dispatch({
+                        type: 'update-line',
+                        lineId: model.selectedLineId,
+                        patch: { name: `${base || 'line'} · ${p.label}`, color: p.color },
+                      });
+                    } else {
+                      dispatch({ type: 'set-drawing-color', color: p.color });
+                    }
+                  }}
+                >
+                  <span className="class-preset-swatch" />
+                  <span className="class-preset-label">{p.label}</span>
+                </button>
+              );
+            })}
+          </div>
 
           {model.spec.frameCount > 1 ? (
             <input

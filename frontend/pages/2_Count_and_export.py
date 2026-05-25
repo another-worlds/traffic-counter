@@ -176,10 +176,17 @@ def _export_block(selected_video_id: str, line_ids_for_export: List[str]) -> Non
             help="Compute counts and prepare an Excel workbook for download.",
         ):
             try:
-                resp = api.start_export(selected_video_id, line_ids_for_export)
-                st.session_state[job_key] = resp["job_id"]
-                st.session_state.pop(file_key, None)
-                _rerun()
+                # Re-fetch lines at click time — the React iframe adds/deletes lines
+                # directly via FastAPI without triggering a Streamlit page rerun, so
+                # line_ids_for_export (built at render time) may be stale.
+                live_ids = [str(l["id"]) for l in api.list_lines(selected_video_id)]
+                if not live_ids:
+                    st.warning("No counting lines on this video — draw lines in the editor first.")
+                else:
+                    resp = api.start_export(selected_video_id, live_ids)
+                    st.session_state[job_key] = resp["job_id"]
+                    st.session_state.pop(file_key, None)
+                    _rerun()
             except api.APIError as exc:
                 st.error(str(exc))
 
@@ -250,19 +257,21 @@ def render_page() -> None:
     lines = api.list_lines(selected_video_id)
     spec = build_viewport_spec(ws, preview_video, lines)
 
-    # Fetch scene-based keyframes. The browser loads the JPEGs directly from
-    # `PUBLIC_API_URL` (via `api.file_url`) as the user scrubs — we used to
-    # pre-inline every frame as a base64 data URI but that synchronously
-    # fetched N images at render time and, for long videos with hundreds of
-    # scene cuts, OOM-killed the frontend container. Overlay PNGs
-    # (trajectories, heatmap) stay inlined below since they're one-each and
-    # avoid one round-trip when the iframe boots.
+    # Fetch scene-based keyframes. Frame[0] is inlined as a base64 data URI
+    # (same approach as trajectories/heatmap) so the background always renders
+    # even when PUBLIC_API_URL is unset and the browser can't reach the internal
+    # Docker hostname. Remaining scrubber frames stay as direct URLs (capped at
+    # MAX_SCENE_FRAMES=30; the browser loads them lazily while scrubbing and
+    # degrades silently if PUBLIC_API_URL isn't configured).
     try:
         raw_frames = api.list_video_frames(preview_video["id"])
-        frames_for_bootstrap = [
-            {**f, "url": api.file_url(f["url"]) if f.get("url") else None}
-            for f in raw_frames
-        ]
+        frames_for_bootstrap = []
+        for i, f in enumerate(raw_frames):
+            if i == 0 and f.get("url"):
+                url = _fetch_asset_data_url(f["url"]) or api.file_url(f["url"])
+            else:
+                url = api.file_url(f["url"]) if f.get("url") else None
+            frames_for_bootstrap.append({**f, "url": url})
     except Exception:
         frames_for_bootstrap = []
 

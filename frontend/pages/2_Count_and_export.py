@@ -3,17 +3,16 @@
 Semantic Contract Ref: counting_line_overlay/contract v0.1
 
 The Streamlit shell hosts an embedded React/Vite viewport that owns the live
-line editor, frame display, overlay toggles, counts table, auto-suggest, and
-direction rose. The React iframe talks to the FastAPI directly for all line
-CRUD, counts, and suggestion calls — Streamlit only builds the initial
-bootstrap and renders the export download.
+line editor, frame display, overlay toggles, counts table, auto-suggest,
+direction rose, and XLSX export. The React iframe talks to the FastAPI directly
+for all line CRUD, counts, suggestion, and export calls — Streamlit only builds
+the initial bootstrap.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 import base64
 import os
-import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -136,95 +135,6 @@ def _render_video_selector(ws_id: str, videos: List[Dict[str, Any]]) -> str:
     return st.session_state[sel_key]
 
 
-# Fragment-scoped reruns keep the export poll out of the full-page
-# rerun cycle. The decorator is only available on Streamlit ≥ 1.33;
-# on older versions we degrade to a plain function call and a
-# whole-page rerun (the previous behaviour).
-_fragment = getattr(st, "fragment", None) or getattr(st, "experimental_fragment", None)
-if _fragment is not None:
-    _export_block_decorator = _fragment
-else:
-    def _export_block_decorator(fn):
-        return fn
-
-
-@_export_block_decorator
-def _export_block(selected_video_id: str, line_ids_for_export: List[str]) -> None:
-    """Render the XLSX-export button + status + download.
-
-    On Streamlit ≥ 1.33 this is a fragment, so polling reruns affect
-    only this widget — the iframe and its frame URLs are not rebuilt.
-    """
-    job_key = f"hybrid_export_job_{selected_video_id}"
-    file_key = f"hybrid_xlsx_{selected_video_id}"
-    name_key = f"hybrid_xlsx_name_{selected_video_id}"
-
-    def _rerun() -> None:
-        # st.rerun(scope="fragment") was added alongside st.fragment;
-        # try the scoped form first, fall back to whole-page rerun.
-        try:
-            st.rerun(scope="fragment")
-        except TypeError:
-            st.rerun()
-
-    col_btn, col_status = st.columns([2, 3])
-    with col_btn:
-        can_export = bool(selected_video_id and line_ids_for_export)
-        if st.button(
-            "Prepare XLSX Export",
-            disabled=not can_export,
-            help="Compute counts and prepare an Excel workbook for download.",
-        ):
-            try:
-                # Re-fetch lines at click time — the React iframe adds/deletes lines
-                # directly via FastAPI without triggering a Streamlit page rerun, so
-                # line_ids_for_export (built at render time) may be stale.
-                live_ids = [str(l["id"]) for l in api.list_lines(selected_video_id)]
-                if not live_ids:
-                    st.warning("No counting lines on this video — draw lines in the editor first.")
-                else:
-                    resp = api.start_export(selected_video_id, live_ids)
-                    st.session_state[job_key] = resp["job_id"]
-                    st.session_state.pop(file_key, None)
-                    _rerun()
-            except api.APIError as exc:
-                st.error(str(exc))
-
-    with col_status:
-        job_id = st.session_state.get(job_key)
-        if job_id and not st.session_state.get(file_key):
-            try:
-                status = api.get_export_status(job_id)
-            except api.APIError as exc:
-                st.error(str(exc))
-                st.session_state.pop(job_key, None)
-            else:
-                if status["status"] in ("pending", "running"):
-                    st.info(f"Preparing… ({status['status']})")
-                    time.sleep(1.5)
-                    _rerun()
-                elif status["status"] == "error":
-                    st.error(f"Export failed: {status.get('error') or 'unknown error'}")
-                    st.session_state.pop(job_key, None)
-                elif status["status"] == "done":
-                    try:
-                        st.session_state[file_key] = api.download_export(job_id)
-                        st.session_state[name_key] = status.get("filename", "counts.xlsx")
-                    except api.APIError as exc:
-                        st.error(str(exc))
-                    else:
-                        st.success("Ready.")
-
-        xlsx_bytes = st.session_state.get(file_key)
-        if xlsx_bytes:
-            st.download_button(
-                "📥 Download XLSX",
-                data=xlsx_bytes,
-                file_name=st.session_state.get(name_key) or "counts.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-
-
 def render_page() -> None:
     """Render the hybrid count-and-export page."""
     st.set_page_config(page_title="Count & Export (Hybrid)", page_icon="📏", layout="wide")
@@ -330,19 +240,6 @@ def render_page() -> None:
     # workspace/video selection or the XLSX export button below.
     render_hybrid_viewport(bootstrap=bootstrap, key=hybrid_key)
 
-    # Export — async job + fragment-scoped poll. The previous version
-    # used a full-page `st.rerun()` every 1.5 s while a job was active,
-    # which re-ran the iframe-bootstrap-building code (including the
-    # per-frame fetch loop above) on every poll. Wrapping the poll in
-    # `st.fragment` confines reruns to the export widget so the rest of
-    # the page stays still; it also stops cleanly when the websocket
-    # disconnects, so closing the tab no longer leaves a background
-    # poll loop hammering the API. Older Streamlit (<1.33) without
-    # `st.fragment` falls back to a no-op decorator.
-    st.divider()
-    st.subheader("Export")
-    line_ids_for_export = [str(l["id"]) for l in lines]
-    _export_block(selected_video_id, line_ids_for_export)
 
 
 render_page()

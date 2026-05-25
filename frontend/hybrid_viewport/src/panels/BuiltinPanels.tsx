@@ -1,5 +1,11 @@
 import React from 'react';
 import RoseDiagram from '../RoseDiagram';
+import {
+  resolveApiBaseUrl,
+  startExport,
+  getExportStatus,
+  downloadExportBlob,
+} from '../api';
 import type { PanelSection, PanelSectionProps } from './types';
 
 // ── Summary ─────────────────────────────────────────────────────────────────
@@ -186,8 +192,13 @@ function SuggestPanel({
 
 // ── Import / Export ──────────────────────────────────────────────────────────
 
-function ImportExportPanel({ model, dispatch }: PanelSectionProps) {
+function ImportExportPanel({ model, bootstrap, dispatch }: PanelSectionProps) {
   const fileRef = React.useRef<HTMLInputElement>(null);
+  const [xlsxState, setXlsxState] = React.useState<'idle' | 'pending' | 'running' | 'error'>('idle');
+  const [xlsxError, setXlsxError] = React.useState<string | null>(null);
+  const pollRef = React.useRef<ReturnType<typeof setInterval> | null>(null);
+
+  React.useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
 
   function handleExport() {
     const data = model.lines.map((l) => ({
@@ -238,6 +249,59 @@ function ImportExportPanel({ model, dispatch }: PanelSectionProps) {
     e.target.value = '';
   }
 
+  async function handleXlsxExport() {
+    const videoId = bootstrap?.spec?.videoId;
+    if (!videoId || model.lines.length === 0) return;
+    if (pollRef.current) clearInterval(pollRef.current);
+
+    const cfg = { baseUrl: resolveApiBaseUrl(bootstrap?.apiBaseUrl) };
+    setXlsxState('pending');
+    setXlsxError(null);
+
+    let jobId: string;
+    try {
+      const resp = await startExport(cfg, videoId, model.lines.map((l) => l.id));
+      jobId = resp.job_id;
+    } catch (err) {
+      setXlsxState('error');
+      setXlsxError(err instanceof Error ? err.message : String(err));
+      return;
+    }
+
+    pollRef.current = setInterval(async () => {
+      try {
+        const status = await getExportStatus(cfg, jobId);
+        if (status.status === 'running') {
+          setXlsxState('running');
+        } else if (status.status === 'done') {
+          clearInterval(pollRef.current!);
+          const blob = await downloadExportBlob(cfg, jobId);
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = status.filename ?? 'counts.xlsx';
+          a.click();
+          URL.revokeObjectURL(url);
+          setXlsxState('idle');
+        } else if (status.status === 'error') {
+          clearInterval(pollRef.current!);
+          setXlsxState('error');
+          setXlsxError(status.error ?? 'Export failed');
+        }
+      } catch (err) {
+        clearInterval(pollRef.current!);
+        setXlsxState('error');
+        setXlsxError(err instanceof Error ? err.message : String(err));
+      }
+    }, 1000);
+  }
+
+  const xlsxBusy = xlsxState === 'pending' || xlsxState === 'running';
+  const xlsxLabel =
+    xlsxState === 'pending' ? '⏳ Preparing…' :
+    xlsxState === 'running' ? '⏳ Building…' :
+    '📊 Export XLSX';
+
   return (
     <div className="panel-card">
       <h2>Import / Export</h2>
@@ -246,11 +310,24 @@ function ImportExportPanel({ model, dispatch }: PanelSectionProps) {
           disabled={model.lines.length === 0}>
           📤 Export JSON
         </button>
+        <button
+          type="button"
+          className="toolbar-button small"
+          onClick={handleXlsxExport}
+          disabled={xlsxBusy || model.lines.length === 0 || !bootstrap?.spec?.videoId}
+        >
+          {xlsxLabel}
+        </button>
         <button type="button" className="toolbar-button small" onClick={() => fileRef.current?.click()}>
           📥 Import JSON
         </button>
         <input ref={fileRef} type="file" accept=".json" style={{ display: 'none' }} onChange={handleImport} />
       </div>
+      {xlsxState === 'error' && xlsxError && (
+        <p style={{ color: 'var(--error, #e24b4a)', fontSize: 11, margin: '6px 0 0' }}>
+          {xlsxError.slice(0, 120)}
+        </p>
+      )}
     </div>
   );
 }

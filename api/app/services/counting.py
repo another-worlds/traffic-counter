@@ -137,10 +137,15 @@ def count_crossings_for_line(
 
     by_class: Dict[str, int] = {}
     by_dir = {"positive": 0, "negative": 0}
+    by_class_dir: Dict[str, Dict[str, int]] = {"positive": {}, "negative": {}}
     crossing_ids: List[int] = []
 
     if mt.track_ids.size == 0:
-        return {"total": 0, "track_ids": [], "by_class": by_class, "by_direction": by_dir}
+        return {
+            "total": 0, "track_ids": [],
+            "by_class": by_class, "by_direction": by_dir,
+            "by_class_direction": by_class_dir,
+        }
 
     for i, pts in enumerate(mt.pts):
         P = pts[:-1]
@@ -159,12 +164,11 @@ def count_crossings_for_line(
         k = int(np.argmax(intersect))
         cls_id = int(mt.modal_class[i])
         cls_name = COCO_VEHICLE_CLASSES.get(cls_id, f"class_{cls_id}")
-        by_class[cls_name] = by_class.get(cls_name, 0) + 1
+        direction = "positive" if _cross_2d(AB, PQ[k]) >= 0 else "negative"
 
-        if _cross_2d(AB, PQ[k]) >= 0:
-            by_dir["positive"] += 1
-        else:
-            by_dir["negative"] += 1
+        by_class[cls_name] = by_class.get(cls_name, 0) + 1
+        by_dir[direction] += 1
+        by_class_dir[direction][cls_name] = by_class_dir[direction].get(cls_name, 0) + 1
 
         crossing_ids.append(int(mt.track_ids[i]))
 
@@ -173,6 +177,7 @@ def count_crossings_for_line(
         "track_ids": crossing_ids,
         "by_class": by_class,
         "by_direction": by_dir,
+        "by_class_direction": by_class_dir,
     }
 
 
@@ -215,6 +220,7 @@ def compute_counts_for_lines(
             "total": r["total"],
             "by_class": r["by_class"],
             "by_direction": r["by_direction"],
+            "by_class_direction": r["by_class_direction"],
             "percent_of_video_total": round(pct_video, 2),
             "percent_of_drawn_lines": round(pct_drawn, 2),
         })

@@ -15,7 +15,6 @@ from openpyxl.utils import get_column_letter
 import pandas as pd
 
 from .counting import (
-    count_crossings_for_line,
     materialize_tracks,
     compute_counts_for_lines,
     COCO_VEHICLE_CLASSES,
@@ -109,28 +108,30 @@ def _write_direction_block(
     return r
 
 
-def _build_segment_rows(
+def _build_seg_entries(
     tracks_df,
-    line: Dict,
+    lines: List[Dict],
     segments: Optional[List[Dict]],
-    direction: str,
-) -> List[Dict]:
-    """Return per-segment (or full-video) counting rows for one direction."""
+    full_counts_per_line: List[Dict],
+) -> List[Tuple[str, Dict]]:
+    """Build (label, {line_id: by_class_direction}) entries with O(S) materializations.
+
+    Materializes each segment slice ONCE and computes all lines + both directions
+    in a single compute_counts_for_lines call — matching the cost of the old
+    per-hour export regardless of line count.
+
+    When no segments are provided, returns a single "Всё видео" entry derived
+    from the already-computed full-video counts (zero extra work).
+    """
     import pandas as _pd
 
     is_df = isinstance(tracks_df, _pd.DataFrame)
 
-    def _count_slice(df_slice) -> Dict:
-        mt = materialize_tracks(df_slice) if is_df else df_slice
-        r = count_crossings_for_line(mt, tuple(line["a"]), tuple(line["b"]))
-        return r["by_class_direction"].get(direction, {})
-
     if not segments:
-        counts = _count_slice(tracks_df)
-        total = sum(counts.values())
-        return [{"label": "Всё видео", "total": total, "counts": counts}]
+        line_map = {ln["line_id"]: ln["by_class_direction"] for ln in full_counts_per_line}
+        return [("Всё видео", line_map)]
 
-    rows = []
+    entries = []
     for seg in sorted(segments, key=lambda s: s["segment_idx"]):
         t0 = float(seg.get("start_time_s", 0))
         t1 = float(seg.get("end_time_s", t0 + 3600))
@@ -148,10 +149,12 @@ def _build_segment_rows(
                 "frame_idx", "t_seconds", "track_id", "class_id", "conf", "cx", "cy", "w", "h",
             ])
 
-        counts = _count_slice(seg_df)
-        total = sum(counts.values())
-        rows.append({"label": label, "total": total, "counts": counts})
-    return rows
+        seg_mt = materialize_tracks(seg_df)
+        seg_counts = compute_counts_for_lines(seg_mt, lines)
+        line_map = {ln["line_id"]: ln["by_class_direction"] for ln in seg_counts["per_line"]}
+        entries.append((label, line_map))
+
+    return entries
 
 
 def build_xlsx_for_video(
@@ -200,7 +203,10 @@ def build_xlsx_for_video(
     ws.cell(row=r, column=2, value=full_counts["total_unique_tracks"]).font = Font(bold=True)
     _autosize(ws)
 
-    # ── Sheets per line ───────────────────────────────────────────────────────
+    # Pre-pass: 1 materialization per segment (O(S) total, independent of line count).
+    seg_entries = _build_seg_entries(tracks_df, lines, segments, full_counts["per_line"])
+
+    # ── Sheets per line — no materialization in this loop ────────────────────
     existing_titles: set = {ws.title}
     for line in lines:
         title = _safe_sheet_title(line.get("name", "Линия"), existing_titles)
@@ -211,7 +217,14 @@ def build_xlsx_for_video(
 
         next_row = 3
         for direction in ("positive", "negative"):
-            seg_rows = _build_segment_rows(tracks_df, line, segments, direction)
+            seg_rows = [
+                {
+                    "label": label,
+                    "counts": line_map.get(line["id"], {}).get(direction, {}),
+                    "total": sum(line_map.get(line["id"], {}).get(direction, {}).values()),
+                }
+                for label, line_map in seg_entries
+            ]
             next_row = _write_direction_block(wsv, next_row, direction, seg_rows)
             next_row += 1  # blank separator between blocks
 

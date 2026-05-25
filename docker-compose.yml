@@ -93,6 +93,19 @@ services:
       # bloat /data and overwhelm the Count & Export page.
       MAX_SCENE_FRAMES: "30"
       NVIDIA_VISIBLE_DEVICES: all
+      # Tell OpenCV's FFMPEG backend to use 8 threads for HEVC/H.264 slice
+      # decode. Reduces the single-core decode bottleneck that starves the GPU
+      # on 2560x1440 long-GOP HEVC footage. Silently ignored by older OpenCV
+      # builds that don't support the key.
+      OPENCV_FFMPEG_CAPTURE_OPTIONS: "threads;8"
+      # Prevent BLAS/MKL/OpenMP thread pools from spawning one thread per core
+      # and competing with the FFMPEG decode thread and ByteTrack CPU work.
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      NUMEXPR_NUM_THREADS: "4"
+      # Give the decode thread more runway to absorb tracker latency spikes
+      # before the GPU stalls. Default is 3; 6 adds ~3 batches of buffer.
+      FRAME_PREFETCH_BATCHES: "6"
     volumes:
       - storage:/data
       - ./worker:/app

@@ -43,6 +43,10 @@ from ultralytics import YOLO
 # once and reuses them — a free single-GPU throughput win for our workload.
 torch.backends.cudnn.benchmark = True
 
+# Keep OpenCV's internal thread pool small — the default spawns one thread
+# per core and contends with the FFMPEG decode thread and ByteTrack.
+cv2.setNumThreads(int(os.environ.get("CV2_NUM_THREADS", "2")))
+
 from storage import (
     get_storage, key_video, key_tracks, key_tracks_segment,
     key_frame, key_scene_frame, key_trajectories,
@@ -333,7 +337,9 @@ def process_video_segment(
     if getattr(model, "predictor", None) is not None:
         model.predictor = None
 
-    rows: List[dict] = []
+    # Column-oriented accumulator: avoids per-detection Python dict allocation
+    # and lets pd.DataFrame() build from pre-typed arrays in one pass.
+    cols: Dict[str, list] = {c: [] for c in TRACKS_PARQUET_DTYPES}
     total_seg_frames = max(1, (end_frame - start_frame + FRAME_STRIDE - 1) // FRAME_STRIDE)
     # Mutable progress counters, owned by the post-process consumer thread.
     prog = {"done": 0, "reported": 0}
@@ -373,22 +379,21 @@ def process_video_segment(
 
                     if r.boxes is None or r.boxes.id is None:
                         continue
-                    xywh = r.boxes.xywh.cpu().numpy()
-                    ids = r.boxes.id.cpu().numpy().astype(np.int32)
-                    cls = r.boxes.cls.cpu().numpy().astype(np.int16)
+                    xywh = r.boxes.xywh.cpu().numpy()          # (N, 4) float32
+                    ids  = r.boxes.id.cpu().numpy().astype(np.int32)
+                    cls  = r.boxes.cls.cpu().numpy().astype(np.int16)
                     conf = r.boxes.conf.cpu().numpy().astype(np.float32)
-                    for k in range(len(ids)):
-                        rows.append({
-                            "frame_idx": cur,
-                            "t_seconds": cur / fps if fps > 0 else 0.0,
-                            "track_id": int(ids[k]),
-                            "class_id": int(cls[k]),
-                            "conf": float(conf[k]),
-                            "cx": float(xywh[k][0]),
-                            "cy": float(xywh[k][1]),
-                            "w": float(xywh[k][2]),
-                            "h": float(xywh[k][3]),
-                        })
+                    n = len(ids)
+                    t = cur / fps if fps > 0 else 0.0
+                    cols["frame_idx"].extend([cur] * n)
+                    cols["t_seconds"].extend([t] * n)
+                    cols["track_id"].extend(ids.tolist())
+                    cols["class_id"].extend(cls.tolist())
+                    cols["conf"].extend(conf.tolist())
+                    cols["cx"].extend(xywh[:, 0].tolist())
+                    cols["cy"].extend(xywh[:, 1].tolist())
+                    cols["w"].extend(xywh[:, 2].tolist())
+                    cols["h"].extend(xywh[:, 3].tolist())
         except Exception as exc:  # surface to the main thread; unblock producer
             consumer_err["exc"] = exc
             stop.set()
@@ -440,8 +445,8 @@ def process_video_segment(
     if consumer_err.get("exc") is not None:
         raise consumer_err["exc"]
 
-    if rows:
-        df = pd.DataFrame(rows).astype(TRACKS_PARQUET_DTYPES)
+    if cols["frame_idx"]:
+        df = pd.DataFrame(cols).astype(TRACKS_PARQUET_DTYPES)
     else:
         df = pd.DataFrame({c: pd.Series(dtype=t) for c, t in TRACKS_PARQUET_DTYPES.items()})
     num_tracks = int(df["track_id"].nunique()) if not df.empty else 0

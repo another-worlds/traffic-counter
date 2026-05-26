@@ -131,6 +131,9 @@ class _Entry:
 _cache: "OrderedDict[Tuple, _Entry]" = OrderedDict()
 _cache_bytes = 0
 _cache_lock = threading.Lock()
+# Caps concurrent cache-miss parquet loads to prevent concurrent large DataFrame
+# allocations from exhausting the container's memory limit. Cache hits bypass this.
+_LOAD_SEM = threading.Semaphore(2)
 
 
 def _cache_get(ck: tuple) -> Optional[_Entry]:
@@ -256,10 +259,15 @@ def load_tracks_for_video(project_id: str, video_id: str) -> pd.DataFrame:
         entry = _cache_get(seg_ck)
         if entry is not None:
             return entry.df
-        df = _load_segments_df(project_id, video_id)
-        if df is not None:
-            _cache_put_df(seg_ck, df)
-            return df
+        with _LOAD_SEM:
+            # Re-check: another thread may have loaded this while we waited.
+            entry = _cache_get(seg_ck)
+            if entry is not None:
+                return entry.df
+            df = _load_segments_df(project_id, video_id)
+            if df is not None:
+                _cache_put_df(seg_ck, df)
+                return df
 
     # Fall back to the legacy single-parquet path (short videos, old data).
     ck = _resolve_cache_key(project_id, video_id)
@@ -268,10 +276,14 @@ def load_tracks_for_video(project_id: str, video_id: str) -> pd.DataFrame:
     entry = _cache_get(ck)
     if entry is not None:
         return entry.df
-    storage = get_storage()
-    df = _normalise_dtypes(_read_parquet(storage, key_tracks(project_id, video_id)))
-    _cache_put_df(ck, df)
-    return df
+    with _LOAD_SEM:
+        entry = _cache_get(ck)
+        if entry is not None:
+            return entry.df
+        storage = get_storage()
+        df = _normalise_dtypes(_read_parquet(storage, key_tracks(project_id, video_id)))
+        _cache_put_df(ck, df)
+        return df
 
 
 def load_materialized_tracks(project_id: str, video_id: str) -> MaterializedTracks:
@@ -287,12 +299,16 @@ def load_materialized_tracks(project_id: str, video_id: str) -> MaterializedTrac
 
     entry = _cache_get(ck)
     if entry is None:
-        if seg_ck is not None:
-            df = _load_segments_df(project_id, video_id) or pd.DataFrame(columns=_EMPTY_COLS)
-        else:
-            storage = get_storage()
-            df = _normalise_dtypes(_read_parquet(storage, key_tracks(project_id, video_id)))
-        entry = _cache_put_df(ck, df)
+        with _LOAD_SEM:
+            # Re-check: another thread may have loaded this while we waited.
+            entry = _cache_get(ck)
+            if entry is None:
+                if seg_ck is not None:
+                    df = _load_segments_df(project_id, video_id) or pd.DataFrame(columns=_EMPTY_COLS)
+                else:
+                    storage = get_storage()
+                    df = _normalise_dtypes(_read_parquet(storage, key_tracks(project_id, video_id)))
+                entry = _cache_put_df(ck, df)
 
     if entry.mt is not None:
         return entry.mt

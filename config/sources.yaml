@@ -47,8 +47,9 @@ yadisk: /mnt/yandex-videos
 
 workspaces:
   # Workspace name (shown in the sidebar)   →   subfolder under yadisk
-  tashkent-MP:    dop
-  tashkent-ODD:   Сшитые видео
+  tashkent-MP: dop
+  tashkent-ODD: Сшитые видео
+  tashkent-MP2: Сшитые видео 2
   # Add more cameras / sources here, one entry per workspace, e.g.:
   #   samarkand-north:  samarkand/north-cam
   #   archive-2024:     archive/2024

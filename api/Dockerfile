@@ -12,7 +12,7 @@ RUN pip install -r requirements.txt
 COPY app ./app
 COPY start.sh .
 
-RUN chmod +x start.sh
+RUN sed -i 's/\r$//' start.sh && chmod +x start.sh
 
 ENV PYTHONUNBUFFERED=1 \
     PORT=8000

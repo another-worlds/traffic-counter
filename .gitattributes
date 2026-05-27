@@ -1,0 +1,2 @@
+# Ensure shell scripts always use LF line endings (Windows CRLF breaks shebangs in Docker)
+*.sh text eol=lf

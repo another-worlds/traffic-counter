@@ -381,10 +381,13 @@ def _fetch_detector_info():
     if not insp:
         state.detector_info.value = None
         return
+    state.busy.value = True
     try:
         state.detector_info.value = api.detector_video_info(state.scenario_id.value, insp["id"])
     except Exception as e:  # noqa: BLE001
         state.detector_info.value = {"reachable": False, "error": str(e)}
+    finally:
+        state.busy.value = False
 
 
 def _flip_detector_direction():
@@ -1031,6 +1034,7 @@ def ImportPanel():
             except ValueError:
                 state.status.value = "Enter numeric S/W/N/E."
                 return
+            state.busy.value = True
             try:
                 state.status.value = "Importing OSM… (first run downloads map data)"
                 res = api.import_osm(sid, bx["south"], bx["west"], bx["north"], bx["east"])
@@ -1038,6 +1042,8 @@ def ImportPanel():
                 state.status.value = f"OSM import: {res['n_nodes']} nodes, {res['n_links']} links."
             except Exception as e:  # noqa: BLE001
                 state.status.value = f"OSM import failed: {e}"
+            finally:
+                state.busy.value = False
 
         solara.Button("Import OSM (bbox)", on_click=do_osm, block=True)
         solara.InputText("GeoJSON FeatureCollection", value=gj.value, on_value=gj.set)
@@ -1049,12 +1055,15 @@ def ImportPanel():
             except Exception as e:  # noqa: BLE001
                 state.status.value = f"Invalid GeoJSON: {e}"
                 return
+            state.busy.value = True
             try:
                 res = api.import_geojson(sid, fc)
                 actions.refresh_map(); _fit_network()
                 state.status.value = f"GeoJSON import: {res['n_nodes']} nodes, {res['n_links']} links."
             except Exception as e:  # noqa: BLE001
                 state.status.value = f"GeoJSON import failed: {e}"
+            finally:
+                state.busy.value = False
 
         solara.Button("Import GeoJSON", on_click=do_gj, block=True)
 

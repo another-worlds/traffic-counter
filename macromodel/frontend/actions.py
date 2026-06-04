@@ -71,6 +71,7 @@ def select_scenario(sid: str) -> None:
 
 
 def load_demo() -> None:
+    state.busy.value = True
     try:
         sc = api.create_demo()
         refresh_scenarios()
@@ -79,9 +80,12 @@ def load_demo() -> None:
                               f"{sc['n_zones']} zones, {sc['n_counters']} detectors.")
     except Exception as e:  # noqa: BLE001
         state.status.value = f"Demo failed: {e}"
+    finally:
+        state.busy.value = False
 
 
 def create_scenario(name: str) -> None:
+    state.busy.value = True
     try:
         sc = api.create_scenario(name)
         api.load_sample(sc["id"])
@@ -91,6 +95,8 @@ def create_scenario(name: str) -> None:
         state.status.value = "New scenario with sample network + 8 zones."
     except Exception as e:  # noqa: BLE001
         state.status.value = f"Create failed: {e}"
+    finally:
+        state.busy.value = False
 
 
 def create_blank_scenario(name: str = "New scenario") -> None:

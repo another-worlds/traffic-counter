@@ -6,6 +6,8 @@ Widgets are created inside components (never at import) per Solara's rules.
 """
 from __future__ import annotations
 
+import html
+
 import solara
 
 import actions
@@ -13,6 +15,19 @@ import api_client as api
 import state
 import theme
 from sections import demand, lists, matrices, network, procedures
+
+
+def _status_html():
+    msg = state.status.value or ""
+    low = msg.lower()
+    if any(w in low for w in ("fail", "error", "invalid", "offline")):
+        color = "#d7301f"
+    elif any(w in low for w in ("created", "saved", "loaded", "deleted", "split", "moved", "done",
+                                "no issues", "ready", "renamed", "import", "updated", "moved")):
+        color = "#2ca25f"
+    else:
+        color = "#9fb3d4"
+    return f"<span style='color:{color}'>{html.escape(msg)}</span>"
 
 
 def _enable_dark():
@@ -92,7 +107,9 @@ def Page():
             solara.HTML(tag="div", unsafe_innerHTML="🚦 <b class='mm-title'>MacroModel</b>")
             ScenarioBar()
             solara.ToggleButtonsSingle(value=state.section, values=list(SECTIONS))
-        solara.Markdown(state.status.value)
+        if state.busy.value:
+            solara.ProgressLinear(True)
+        solara.HTML(tag="div", unsafe_innerHTML=_status_html())
 
     with solara.Column(style={"padding": "0 6px"}):
         SECTIONS[state.section.value]()

@@ -8,6 +8,7 @@ scenarios = solara.reactive([])          # list of scenario dicts
 scenario_id = solara.reactive("")
 section = solara.reactive("Network")
 status = solara.reactive("Load the demo scenario, or create one, to begin.")
+busy = solara.reactive(False)            # drives the app-bar progress bar during slow calls
 
 # map / network editor
 map_center = solara.reactive((41.305, 69.265))

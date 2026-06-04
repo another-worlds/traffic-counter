@@ -34,6 +34,16 @@ def create_demo() -> Dict:
         return _j(c.post("/scenarios/demo"))
 
 
+def delete_scenario(sid: str) -> None:
+    with _c(30) as c:
+        c.delete(f"/scenarios/{sid}")
+
+
+def rename_scenario(sid: str, name: str) -> Dict:
+    with _c(30) as c:
+        return _j(c.patch(f"/scenarios/{sid}", json={"name": name}))
+
+
 def load_sample(sid: str) -> Dict:
     with _c() as c:
         return _j(c.post(f"/scenarios/{sid}/network/load-sample", json={}))
@@ -48,6 +58,23 @@ def auto_zones(sid: str, n: int = 8) -> Dict:
 def get_map(sid: str) -> Dict:
     with _c() as c:
         return _j(c.get(f"/scenarios/{sid}/map"))
+
+
+def get_network(sid: str) -> Dict:
+    """Topological FC (link from/to ids) — used by client-side network validation."""
+    with _c() as c:
+        return _j(c.get(f"/scenarios/{sid}/network"))
+
+
+def import_osm(sid, south, west, north, east) -> Dict:
+    with _c() as c:
+        return _j(c.post(f"/scenarios/{sid}/network/import-osm",
+                         json={"south": south, "west": west, "north": north, "east": east}))
+
+
+def import_geojson(sid, fc: Dict) -> Dict:
+    with _c() as c:
+        return _j(c.post(f"/scenarios/{sid}/network/import-geojson", json=fc))
 
 
 def link_flows(sid: str) -> Dict:

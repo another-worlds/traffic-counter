@@ -91,3 +91,32 @@ def create_scenario(name: str) -> None:
         state.status.value = "New scenario with sample network + 8 zones."
     except Exception as e:  # noqa: BLE001
         state.status.value = f"Create failed: {e}"
+
+
+def create_blank_scenario(name: str = "New scenario") -> None:
+    """An empty scenario (default classes only) — build a network from zero."""
+    try:
+        sc = api.create_scenario(name)
+        refresh_scenarios()
+        select_scenario(sc["id"])
+        state.status.value = "Blank scenario ready — draw a network, search a place, or import OSM."
+    except Exception as e:  # noqa: BLE001
+        state.status.value = f"Create failed: {e}"
+
+
+def delete_current_scenario() -> None:
+    sid = state.scenario_id.value
+    if not sid:
+        return
+    try:
+        api.delete_scenario(sid)
+        state.scenario_id.value = ""
+        refresh_scenarios()
+        nxt = state.scenarios.value[0]["id"] if state.scenarios.value else ""
+        if nxt:
+            select_scenario(nxt)
+        else:
+            state.map_data.value = None
+        state.status.value = "Scenario deleted."
+    except Exception as e:  # noqa: BLE001
+        state.status.value = f"Delete failed: {e}"

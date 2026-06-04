@@ -901,6 +901,65 @@ def DetectorPanel():
 
 
 @solara.component
+def ImportPanel():
+    """Replace the network from OSM (bbox) or a pasted GeoJSON FeatureCollection."""
+    sid = state.scenario_id.value
+    bbox = solara.use_reactive({"south": "", "west": "", "north": "", "east": ""})
+    gj = solara.use_reactive("")
+    with solara.Details("Import / replace network"):
+        solara.Markdown("*Both **replace** the current network.*")
+
+        def fill_from_view():
+            b = getattr(_MAP["m"], "bounds", None)
+            if b:
+                (s, w), (n, e) = b
+                bbox.set({"south": f"{s:.5f}", "west": f"{w:.5f}", "north": f"{n:.5f}", "east": f"{e:.5f}"})
+            else:
+                state.status.value = "Pan the map first."
+
+        solara.Button("Use current view", text=True, on_click=fill_from_view)
+        with solara.Row():
+            solara.InputText("S", value=bbox.value["south"], on_value=lambda v: bbox.set({**bbox.value, "south": v}))
+            solara.InputText("W", value=bbox.value["west"], on_value=lambda v: bbox.set({**bbox.value, "west": v}))
+        with solara.Row():
+            solara.InputText("N", value=bbox.value["north"], on_value=lambda v: bbox.set({**bbox.value, "north": v}))
+            solara.InputText("E", value=bbox.value["east"], on_value=lambda v: bbox.set({**bbox.value, "east": v}))
+
+        def do_osm():
+            try:
+                bx = {k: float(v) for k, v in bbox.value.items()}
+            except ValueError:
+                state.status.value = "Enter numeric S/W/N/E."
+                return
+            try:
+                state.status.value = "Importing OSM… (first run downloads map data)"
+                res = api.import_osm(sid, bx["south"], bx["west"], bx["north"], bx["east"])
+                actions.refresh_map(); _fit_network()
+                state.status.value = f"OSM import: {res['n_nodes']} nodes, {res['n_links']} links."
+            except Exception as e:  # noqa: BLE001
+                state.status.value = f"OSM import failed: {e}"
+
+        solara.Button("Import OSM (bbox)", on_click=do_osm, block=True)
+        solara.InputText("GeoJSON FeatureCollection", value=gj.value, on_value=gj.set)
+
+        def do_gj():
+            import json
+            try:
+                fc = json.loads(gj.value)
+            except Exception as e:  # noqa: BLE001
+                state.status.value = f"Invalid GeoJSON: {e}"
+                return
+            try:
+                res = api.import_geojson(sid, fc)
+                actions.refresh_map(); _fit_network()
+                state.status.value = f"GeoJSON import: {res['n_nodes']} nodes, {res['n_links']} links."
+            except Exception as e:  # noqa: BLE001
+                state.status.value = f"GeoJSON import failed: {e}"
+
+        solara.Button("Import GeoJSON", on_click=do_gj, block=True)
+
+
+@solara.component
 def Toolbar():
     sid = state.scenario_id.value
     lts = solara.use_memo(lambda: api.list_objects(sid, "link_types") if sid else [], [sid])
@@ -931,6 +990,7 @@ def Toolbar():
             solara.Button("Cancel (Esc)", text=True, on_click=_cancel_pending)
     else:
         solara.Markdown("*Drag a box to multi-select · click selects · right-click inspects*")
+    ImportPanel()
 
 
 @solara.component

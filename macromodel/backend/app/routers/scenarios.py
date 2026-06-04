@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -47,6 +47,17 @@ def list_scenarios(db: Session = Depends(get_db)):
 @router.get("/scenarios/{scenario_id}", response_model=ScenarioOut)
 def get_scenario(scenario_id: str, db: Session = Depends(get_db)):
     return _out(db, get_scenario_or_404(db, scenario_id))
+
+
+@router.patch("/scenarios/{scenario_id}", response_model=ScenarioOut)
+def update_scenario(scenario_id: str, body: dict = Body(default={}), db: Session = Depends(get_db)):
+    sc = get_scenario_or_404(db, scenario_id)
+    if body.get("name"):
+        sc.name = body["name"]
+    if "description" in body:
+        sc.description = body["description"]
+    db.commit()
+    return _out(db, sc)
 
 
 @router.delete("/scenarios/{scenario_id}", status_code=204)

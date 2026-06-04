@@ -810,6 +810,13 @@ def _make_map():
                               url="https://nominatim.openstreetmap.org/search?format=json&q={s}"))
     except Exception:  # noqa: BLE001 — older ipyleaflet / offline: skip gracefully
         pass
+    try:                                            # keyboard shortcuts (optional dependency)
+        from ipyevents import Event as _DomEvent
+        ev = _DomEvent(source=m, watched_events=["keydown"])
+        ev.on_dom_event(_on_key)
+        m._keyevent = ev
+    except Exception:  # noqa: BLE001 — ipyevents not installed: keyboard simply disabled
+        pass
     _MAP["m"] = m
     return m
 
@@ -848,6 +855,31 @@ def _set_tool(t):
     state.split_arm.value = None
     _clear_link_preview()
     _zone.update(centroid=None, verts=[], line=None)
+
+
+_KEY_TOOLS = {"n": "Node", "l": "Link", "z": "Zone", "c": "Connector", "d": "Detector", "p": "Stop"}
+
+
+def _on_key(event):
+    """Map keyboard shortcuts (only fire when the map itself has focus)."""
+    key = (event.get("key") or "").lower()
+    if key == "escape":
+        _cancel_pending()
+        state.grabbed_line.value = None
+        _clear_assign_highlight()
+    elif key in ("delete", "backspace"):
+        if state.selected_many.value:
+            _bulk_delete_all()
+        elif state.selected.value:
+            _delete()
+    elif key == "1":
+        _set_mode("Selection")
+    elif key == "2":
+        _set_mode("Creation")
+    elif key in _KEY_TOOLS:
+        if state.edit_mode.value != "Creation":
+            _set_mode("Creation")
+        _set_tool(_KEY_TOOLS[key])
 
 
 def _set_filter(k, v):
@@ -1075,6 +1107,7 @@ def Toolbar():
     solara.Markdown("**Network**")
     solara.ToggleButtonsSingle(value=state.edit_mode.value, values=["Selection", "Creation"],
                                on_value=_set_mode)
+    solara.Markdown("*Keys (map focused): 1/2 mode · n l z c d p tool · Esc · Del*")
     if state.edit_mode.value == "Creation":
         solara.Markdown("*Insert element*")
         for t in TOOLS[1:]:

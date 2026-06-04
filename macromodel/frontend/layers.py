@@ -7,7 +7,10 @@ context), never at import time.
 """
 from __future__ import annotations
 
+import math
+
 import ipyleaflet as L
+import ipywidgets as W
 
 import theme
 
@@ -146,6 +149,131 @@ def desire_widgets(zones_fc, labels, values, topn=40):
 def selected_ring(lon, lat):
     return L.CircleMarker(location=(lat, lon), radius=13, color="#ff2d2d",
                           fill_color="#ff2d2d", fill_opacity=0.22, weight=3)
+
+
+# --- detector line→link assignment (Visum-style highlight + direction arrow) ------ #
+def assign_highlight(coords, to_end):
+    """Highlight the candidate directed link in red with an arrowhead at its to-end,
+    so the user sees which link + travel direction a grabbed counting line will bind to."""
+    locs = [(lat, lon) for lon, lat in coords]
+    out = [L.Polyline(locations=locs, color="#ff2d2d", weight=6, opacity=0.9, fill=False)]
+    arrow = _arrow_marker(coords, to_end)
+    if arrow is not None:
+        out.append(arrow)
+    return out
+
+
+def _arrow_marker(coords, to_end):
+    """A rotated ➤ DivIcon sitting on the link near its to-end, pointing along travel."""
+    if len(coords) < 2:
+        return None
+    if list(coords[-1]) == list(to_end):
+        a, b = coords[-2], coords[-1]
+    else:
+        a, b = coords[1], coords[0]
+    deg = math.degrees(math.atan2(-(b[1] - a[1]), (b[0] - a[0])))  # screen angle: 0°=east, CW+
+    px, py = a[0] * 0.3 + b[0] * 0.7, a[1] * 0.3 + b[1] * 0.7      # 70% toward the to-end
+    html = (f"<div style='font-size:22px;color:#ff2d2d;line-height:1;"
+            f"transform:rotate({deg:.0f}deg);transform-origin:center'>&#10148;</div>")
+    icon = L.DivIcon(html=html, icon_size=[24, 24], icon_anchor=[12, 12])
+    return L.Marker(location=(py, px), icon=icon, draggable=False, keyboard=False)
+
+
+# --- detector inspection popup (camera frame + counts + analysis status) ---------- #
+def _seg_dot(status):
+    c = {"done": "#2ca25f", "analyzing": "#f4a300", "error": "#d7301f"}.get(status, "#8a8a8a")
+    return (f"<span style='display:inline-block;width:9px;height:9px;border-radius:2px;"
+            f"background:{c};margin:0 1px'></span>")
+
+
+def _detector_stats_html(info):
+    v = info.get("video") or {}
+    status = v.get("status") or "?"
+    parts = ["<div style='font-size:12px;color:#dbe6f7;line-height:1.5'>"]
+    parts.append(f"<b style='color:#e8eef9'>{info.get('name') or 'detector'}</b><br>")
+    if status == "analyzed":
+        parts.append(f"<span style='color:#2ca25f'>● analyzed</span> · "
+                     f"{int(v.get('num_tracks') or 0)} tracks<br>")
+    else:
+        prog = v.get("progress_pct")
+        pct = f" {int(prog * 100)}%" if isinstance(prog, (int, float)) else ""
+        parts.append(f"<span style='color:#f4a300'>● {status}{pct}</span><br>")
+
+    obs, pcu = info.get("observed_vph"), info.get("pcu_vph")
+    if obs is not None:
+        parts.append(f"<b style='color:#9fb3d4'>Observed</b> {obs:.0f} vph · "
+                     f"<b style='color:#9fb3d4'>PCU</b> {(pcu or 0):.0f} ({info.get('link_direction') or 'AB'})<br>")
+
+    counts, ts = info.get("counts"), info.get("track_stats")
+    if counts:
+        bd = counts.get("by_direction") or {}
+        parts.append(f"<b style='color:#9fb3d4'>{counts.get('line_name') or 'line'}</b> "
+                     f"{int(counts.get('total') or 0)} "
+                     f"(＋{int(bd.get('positive', 0))} / －{int(bd.get('negative', 0))})<br>")
+        bc = counts.get("by_class") or {}
+        if bc:
+            parts.append("<span style='color:#8aa0c2'>"
+                         + ", ".join(f"{k}:{int(n)}" for k, n in bc.items()) + "</span><br>")
+    elif ts:
+        parts.append(f"<b style='color:#9fb3d4'>Tracks</b> {int(ts.get('total_tracks') or 0)}<br>")
+        bc = ts.get("by_class") or {}
+        if bc:
+            parts.append("<span style='color:#8aa0c2'>"
+                         + ", ".join(f"{k}:{int(n)}" for k, n in bc.items()) + "</span><br>")
+
+    segs = info.get("segments") or []
+    if segs:
+        done = sum(1 for s in segs if s.get("status") == "done")
+        parts.append(f"<b style='color:#9fb3d4'>Segments</b> {done}/{len(segs)} "
+                     + "".join(_seg_dot(s.get("status")) for s in segs) + "<br>")
+
+    url = info.get("open_video_url")
+    if url:
+        parts.append(f"<a href='{url}' target='_blank' style='display:inline-block;margin-top:7px;"
+                     f"padding:5px 12px;background:#3aa0ff;color:#06101f;border-radius:6px;"
+                     f"text-decoration:none;font-weight:700'>▶ Open video</a>")
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _img_html(url):
+    if not url:
+        return ("<div style='height:130px;display:flex;align-items:center;justify-content:center;"
+                "color:#8aa0c2;background:#0c0f14;border-radius:6px'>no frame yet</div>")
+    return (f"<img src='{url}' style='width:100%;max-height:200px;object-fit:cover;"
+            f"border-radius:6px' onerror=\"this.style.display='none'\"/>")
+
+
+def detector_popup(info, lat, lon, on_flip=None):
+    """A map popup showing the detector's camera frame (keyframe/trajectories/heatmap toggle),
+    counting stats, per-segment + overall analysis status, and an Open-video button."""
+    if not info or not info.get("reachable", False):
+        msg = (info or {}).get("error") or "counter unavailable"
+        child = W.HTML(value=f"<div style='padding:6px;color:#dbe6f7'>Detector source "
+                             f"unavailable<br><small style='color:#8aa0c2'>{msg}</small></div>")
+        return L.Popup(location=(lat, lon), child=child, max_width=320,
+                       auto_close=False, close_on_escape_key=True)
+
+    imgs = info.get("images") or {}
+    opts = [(lab, k) for lab, k in
+            (("Keyframe", "keyframe"), ("Trajectories", "trajectories"), ("Heatmap", "heatmap"))
+            if imgs.get(k)]
+    children = []
+    img = W.HTML(value=_img_html(imgs.get(opts[0][1]) if opts else None))
+    if len(opts) > 1:
+        tb = W.ToggleButtons(options=opts, value=opts[0][1])
+        tb.observe(lambda ch: setattr(img, "value", _img_html(imgs.get(ch["new"]))), "value")
+        children.append(tb)
+    children.append(img)
+    children.append(W.HTML(value=_detector_stats_html(info)))
+    if on_flip is not None:
+        btn = W.Button(description="Flip count direction", icon="exchange",
+                       layout=W.Layout(width="auto", margin="4px 0 0 0"))
+        btn.on_click(lambda _b: on_flip())
+        children.append(btn)
+    child = W.VBox(children, layout=W.Layout(width="300px"))
+    return L.Popup(location=(lat, lon), child=child, max_width=340, min_width=300,
+                   auto_close=False, close_on_escape_key=True)
 
 
 def legend_html(color_by, has_flows):

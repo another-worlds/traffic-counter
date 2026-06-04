@@ -102,11 +102,12 @@ def insert_stop(sid, lat, lon, name="stop"):
 
 
 def insert_detector(sid, lat, lon, name="detector", link_direction="AB",
-                    source_video_id=None, source_line_id=None):
+                    source_video_id=None, source_line_id=None, link_id=None, snap="node"):
     with _c() as c:
         return _j(c.post(f"/scenarios/{sid}/network/insert-detector",
                          json={"lat": lat, "lon": lon, "name": name, "link_direction": link_direction,
-                               "source_video_id": source_video_id, "source_line_id": source_line_id}))
+                               "source_video_id": source_video_id, "source_line_id": source_line_id,
+                               "link_id": link_id, "snap": snap}))
 
 
 # --- generic objects (lists / class & demand editors) ---
@@ -212,3 +213,8 @@ def counter_sources() -> Dict:
 def pull_observations(sid: str, cid: str) -> Dict:
     with _c() as c:
         return _j(c.post(f"/scenarios/{sid}/counters/{cid}/pull-observations"))
+
+
+def detector_video_info(sid: str, cid: str) -> Dict:
+    with _c(60) as c:
+        return _j(c.get(f"/scenarios/{sid}/counters/{cid}/video-info"))

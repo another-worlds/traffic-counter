@@ -148,14 +148,31 @@ def insert_stop(scenario_id: str, body: dict = Body(...), db: Session = Depends(
 @router.post("/scenarios/{scenario_id}/network/insert-detector")
 def insert_detector(scenario_id: str, body: dict = Body(...), db: Session = Depends(get_db)):
     get_scenario_or_404(db, scenario_id)
-    _, links = loader.load_network(db, scenario_id)
+    nodes, links = loader.load_network(db, scenario_id)
     direction = (body.get("link_direction") or "AB").upper()
-    snapped = georef.snap_to_link(body["lon"], body["lat"], links) if links else None
-    snapped_id = snapped["id"] if snapped else None
-    if snapped_id and direction == "BA":
-        snapped_id = loader.reverse_link_id(links, snapped_id) or snapped_id
+    lon, lat = body["lon"], body["lat"]
+
+    # The drag-to-assign flow binds an explicit directed link the user picked on the map;
+    # otherwise fall back to snapping the drop point to the nearest directed link (legacy).
+    link_id = body.get("link_id")
+    if link_id:
+        snapped_id = link_id
+    else:
+        snapped = georef.snap_to_link(lon, lat, links) if links else None
+        snapped_id = snapped["id"] if snapped else None
+        if snapped_id and direction == "BA":
+            snapped_id = loader.reverse_link_id(links, snapped_id) or snapped_id
+
+    # Marker geometry magnetizes to the nearest node by default; "link" keeps the drop point.
+    geom_lon, geom_lat = lon, lat
+    if (body.get("snap") or "node").lower() == "node" and nodes:
+        nid = loader.nearest_node_id(nodes, lon, lat)
+        nd = next((n for n in nodes if n["id"] == nid), None)
+        if nd and nd.get("geom"):
+            geom_lon, geom_lat = nd["geom"]["coordinates"]
+
     d = Counter(scenario_id=scenario_id, name=body.get("name", "detector"),
-                geom={"type": "Point", "coordinates": [body["lon"], body["lat"]]},
+                geom={"type": "Point", "coordinates": [geom_lon, geom_lat]},
                 snapped_link_id=snapped_id, link_direction=direction,
                 source_video_id=body.get("source_video_id"), source_line_id=body.get("source_line_id"),
                 observed_vph=body.get("observed_vph"), pcu_vph=body.get("pcu_vph") or body.get("observed_vph"))
@@ -216,5 +233,9 @@ def map_layers(scenario_id: str, db: Session = Depends(get_db)):
         "stops": fc([feat(s.geom, {"id": s.id, "kind": "stop", "name": s.name}) for s in stops if s.geom]),
         "lines": fc(line_feats),
         "detectors": fc([feat(d.geom, {"id": d.id, "kind": "detector", "name": d.name,
-                                       "observed_vph": d.observed_vph}) for d in dets if d.geom]),
+                                       "observed_vph": d.observed_vph, "pcu_vph": d.pcu_vph,
+                                       "link_direction": d.link_direction,
+                                       "snapped_link_id": d.snapped_link_id,
+                                       "source_video_id": d.source_video_id,
+                                       "source_line_id": d.source_line_id}) for d in dets if d.geom]),
     }

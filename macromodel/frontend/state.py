@@ -32,6 +32,15 @@ source_labels = solara.reactive([])
 selected_source_label = solara.reactive("")
 direction = solara.reactive("AB")
 
+# detector ↔ traffic-counter embedding
+counter_sources = solara.reactive(None)   # cached /counter-sources payload (or None = not loaded)
+det_project_id = solara.reactive("")      # Detector tool: selected counter project
+det_video_id = solara.reactive("")        # Detector tool: selected counter video
+snap_mode = solara.reactive("node")       # where a dropped detector marker anchors: node | link
+grabbed_line = solara.reactive(None)      # {video_id, line_id, name} while assigning a line to a link
+inspect_detector = solara.reactive(None)  # {id, lat, lon} of the clicked detector (drives the popup)
+detector_info = solara.reactive(None)     # video-info payload for the inspected detector
+
 # lists
 list_obj = solara.reactive("links")
 

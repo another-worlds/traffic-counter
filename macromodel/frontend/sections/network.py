@@ -33,6 +33,7 @@ _bulk_val = solara.reactive("")
 _MAP = {"m": None}                                   # the stable map widget
 _rubber = {"start": None, "rect": None}              # rubber-band box (Selection drag)
 _zone = {"centroid": None, "verts": [], "line": None}  # zone polygon being drawn
+_assign = {"link": None, "hl": []}                   # detector line→link drag: candidate + highlight layers
 
 FILTER_ATTRS = {"links": ["sim_vph", "vc", "lanes", "link_type_id"],
                 "nodes": ["name"],
@@ -96,6 +97,151 @@ def _select(sel):
     if sel:
         _qv_buf.value = {f: sel["props"].get(f) for f in lists.FIELDS.get(sel["obj"], [])}
         _qv_id.value = sel["id"]
+    # Clicking a detector opens its camera/counts popup; anything else dismisses it.
+    if sel and sel["obj"] == "detectors":
+        co = _coords_of(sel)
+        state.inspect_detector.value = {"id": sel["id"],
+                                        "lat": co[1] if co else 0.0, "lon": co[0] if co else 0.0}
+    else:
+        state.inspect_detector.value = None
+        state.detector_info.value = None
+
+
+# --- detector ↔ traffic-counter embedding --------------------------------- #
+def _load_counter_sources():
+    try:
+        state.counter_sources.value = api.counter_sources()
+    except Exception as e:  # noqa: BLE001
+        state.counter_sources.value = {"reachable": False, "error": str(e), "projects": []}
+
+
+def _grab_line(video_id, line_id, name):
+    state.grabbed_line.value = {"video_id": video_id, "line_id": line_id, "name": name}
+    state.edit_mode.value = "Creation"
+    state.active_tool.value = "Detector"
+    state.status.value = f"Grabbed '{name}' — hover a link (red = chosen direction), click to drop."
+
+
+def _cancel_grab():
+    state.grabbed_line.value = None
+    _clear_assign_highlight()
+    state.status.value = "Assignment cancelled."
+
+
+def _seg_point_d2(px, py, a, b):
+    """Squared distance from point (px,py) to segment a-b in lon/lat space."""
+    ax, ay = a; bx, by = b
+    dx, dy = bx - ax, by - ay
+    if dx == 0 and dy == 0:
+        return (px - ax) ** 2 + (py - ay) ** 2
+    t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+    cx, cy = ax + t * dx, ay + t * dy
+    return (px - cx) ** 2 + (py - cy) ** 2
+
+
+def _link_d2(lon, lat, coords):
+    return min(_seg_point_d2(lon, lat, coords[i], coords[i + 1]) for i in range(len(coords) - 1))
+
+
+def _nearest_link_dir(lat, lon):
+    """Nearest link, resolved to the *directed* row whose to-end the cursor points at."""
+    md = state.map_data.value or {}
+    feats = [f for f in md.get("links", {}).get("features", [])
+             if (f.get("geometry") or {}).get("type") == "LineString"
+             and len(f["geometry"]["coordinates"]) >= 2]
+    if not feats:
+        return None
+    best = min(feats, key=lambda f: _link_d2(lon, lat, f["geometry"]["coordinates"]))
+    cs = best["geometry"]["coordinates"]
+    a, b = cs[0], cs[-1]
+    da = (a[0] - lon) ** 2 + (a[1] - lat) ** 2
+    db = (b[0] - lon) ** 2 + (b[1] - lat) ** 2
+    want = tuple(b if db <= da else a)          # the end the cursor is nearer = travel target
+    ends = {tuple(a), tuple(b)}
+    chosen = best
+    for f in feats:                              # prefer the directed row pointing at `want`
+        c2 = f["geometry"]["coordinates"]
+        if {tuple(c2[0]), tuple(c2[-1])} == ends and tuple(c2[-1]) == want:
+            chosen = f
+            break
+    coords = chosen["geometry"]["coordinates"]
+    return {"id": chosen["properties"]["id"], "coords": coords, "to_end": coords[-1]}
+
+
+def _clear_assign_highlight():
+    m = _MAP["m"]
+    for h in _assign["hl"]:
+        try:
+            m.remove_layer(h)
+        except Exception:  # noqa: BLE001
+            pass
+    _assign["hl"] = []
+    _assign["link"] = None
+
+
+def _update_assign_highlight(lat, lon):
+    m = _MAP["m"]
+    cand = _nearest_link_dir(lat, lon)
+    _clear_assign_highlight()
+    _assign["link"] = cand
+    if cand and m is not None:
+        hl = layers.assign_highlight(cand["coords"], cand["to_end"])
+        for h in hl:
+            m.add_layer(h)
+        _assign["hl"] = hl
+
+
+def _drop_grabbed(lat, lon):
+    gl, cand = state.grabbed_line.value, _assign["link"]
+    sid = state.scenario_id.value
+    if not cand:
+        state.status.value = "Hover a link to pick a direction, then click."
+        return
+    try:
+        res = api.insert_detector(sid, lat, lon, name=gl["name"], link_id=cand["id"],
+                                  snap=state.snap_mode.value, source_video_id=gl["video_id"],
+                                  source_line_id=gl["line_id"])
+        try:
+            api.pull_observations(sid, res.get("id"))
+        except Exception:  # noqa: BLE001 — counts may not be ready; volume stays blank
+            pass
+        state.status.value = f"Assigned '{gl['name']}' → link (volume pulled)."
+    except Exception as e:  # noqa: BLE001
+        state.status.value = f"Assign failed: {e}"
+    state.grabbed_line.value = None
+    _clear_assign_highlight()
+    actions.refresh_map()
+
+
+def _fetch_detector_info():
+    insp = state.inspect_detector.value
+    if not insp:
+        state.detector_info.value = None
+        return
+    try:
+        state.detector_info.value = api.detector_video_info(state.scenario_id.value, insp["id"])
+    except Exception as e:  # noqa: BLE001
+        state.detector_info.value = {"reachable": False, "error": str(e)}
+
+
+def _flip_detector_direction():
+    insp = state.inspect_detector.value
+    info = state.detector_info.value or {}
+    if not insp:
+        return
+    new = "BA" if (info.get("link_direction") or "AB").upper() == "AB" else "AB"
+    sid = state.scenario_id.value
+    try:
+        api.update_object("detectors", insp["id"], {"link_direction": new})
+        try:
+            api.pull_observations(sid, insp["id"])
+        except Exception:  # noqa: BLE001
+            pass
+        state.detector_info.value = api.detector_video_info(sid, insp["id"])
+        actions.refresh_map()
+        state.status.value = f"Flipped count direction → {new}."
+    except Exception as e:  # noqa: BLE001
+        state.status.value = f"Flip failed: {e}"
 
 
 def _bbox(a, b):
@@ -209,6 +355,10 @@ def on_interaction(**kw):
         return  # ignore 'click' in Selection mode
 
     # Creation mode
+    # While a counting line is grabbed, track the candidate link under the cursor (red + arrow).
+    if state.active_tool.value == "Detector" and state.grabbed_line.value is not None and t == "mousemove":
+        _update_assign_highlight(lat, lon)
+        return
     if t != "click":
         return
     sid = state.scenario_id.value
@@ -225,8 +375,10 @@ def on_interaction(**kw):
         elif tool == "Stop":
             api.insert_stop(sid, lat, lon); actions.refresh_map()
         elif tool == "Detector":
-            api.insert_detector(sid, lat, lon, link_direction=state.direction.value)
-            actions.refresh_map(); state.status.value = "Detector placed (snapped to nearest link)."
+            if state.grabbed_line.value is not None:
+                _drop_grabbed(lat, lon)
+            else:
+                state.status.value = "Pick a video, then grab a counting line to assign it to a link."
         elif tool == "Link":
             nn = _nearest_node(lat, lon)
             if state.pending_link_from.value is None:
@@ -386,6 +538,10 @@ def build_overlays():
             mk = L.Marker(location=(dp[1], dp[0]), draggable=True)
             mk.observe(lambda ch: state.drag_pos.set([ch["new"][1], ch["new"][0]]), "location")
             ov.append(mk)
+    insp = state.inspect_detector.value
+    if insp and state.detector_info.value is not None:
+        ov.append(layers.detector_popup(state.detector_info.value, insp["lat"], insp["lon"],
+                                         on_flip=_flip_detector_direction))
     return ov
 
 
@@ -421,10 +577,71 @@ def _set_mode(v):
     if v == "Creation" and state.active_tool.value == "Select":
         state.active_tool.value = "Node"
     state.pending_link_from.value = None
+    if v != "Creation":
+        state.grabbed_line.value = None
+        _clear_assign_highlight()
 
 
 def _set_filter(k, v):
     state.elem_filter.set({**state.elem_filter.value, k: v})
+
+
+@solara.component
+def DetectorPanel():
+    """Detector tool: assign a counter video's lines onto links (drag-to-link, Visum-style)."""
+    solara.Select("Marker snaps to", value=state.snap_mode, values=["node", "link"])
+    src = state.counter_sources.value
+    if src is None:
+        solara.Button("Load videos", icon_name="mdi-cctv", on_click=_load_counter_sources, block=True)
+        return
+    if not src.get("reachable", False):
+        solara.Markdown(f"*Counter offline.* `{str(src.get('error', ''))[:36]}`")
+        solara.Button("Retry", text=True, on_click=_load_counter_sources)
+        return
+    projects = src.get("projects", [])
+    if not projects:
+        solara.Markdown("*No counter projects.*")
+        solara.Button("Reload", text=True, on_click=_load_counter_sources)
+        return
+
+    p_by = {(p.get("name") or p["project_id"][:6]): p["project_id"] for p in projects}
+    p_cur = next((n for n, i in p_by.items() if i == state.det_project_id.value), list(p_by)[0])
+    solara.Select("Project", value=p_cur, values=list(p_by),
+                  on_value=lambda n: state.det_project_id.set(p_by[n]))
+    proj = next((p for p in projects if p["project_id"] == p_by.get(p_cur)), projects[0])
+
+    videos = proj.get("videos", [])
+    if not videos:
+        solara.Markdown("*No videos in this project.*")
+        return
+    v_by = {f"{v.get('filename') or v['video_id'][:6]} · {v.get('status', '?')}": v["video_id"]
+            for v in videos}
+    v_cur = next((n for n, i in v_by.items() if i == state.det_video_id.value), list(v_by)[0])
+    solara.Select("Video", value=v_cur, values=list(v_by),
+                  on_value=lambda n: state.det_video_id.set(v_by[n]))
+    vid = next((v for v in videos if v["video_id"] == v_by.get(v_cur)), videos[0])
+
+    md = state.map_data.value or {}
+    assigned = {f["properties"].get("source_line_id")
+                for f in md.get("detectors", {}).get("features", [])
+                if f["properties"].get("source_line_id")}
+    grabbed = state.grabbed_line.value
+    lines = vid.get("lines", [])
+    solara.Markdown("**Counting lines** — grab one, then drop on a link")
+    if not lines:
+        solara.Markdown("*This video has no counting lines yet.*")
+    for ln in lines:
+        lid = ln["line_id"]
+        lname = ln.get("name") or lid[:6]
+        is_grabbed = bool(grabbed and grabbed.get("line_id") == lid)
+        badge = "●" if lid in assigned else "○"
+        label = f"{badge} {lname}" + (" …drop it" if is_grabbed else "")
+        solara.Button(label, block=True, text=not is_grabbed,
+                      color="primary" if is_grabbed else None,
+                      on_click=lambda v=vid["video_id"], i=lid, n=lname: _grab_line(v, i, n))
+    if grabbed:
+        solara.Markdown("*Hover a link (red arrow shows direction), then click to drop.*")
+        solara.Button("Cancel assign", text=True, on_click=_cancel_grab)
 
 
 @solara.component
@@ -447,7 +664,7 @@ def Toolbar():
             solara.Select("Link type", value=cur, values=list(id_by),
                           on_value=lambda n: state.link_type_id.set(id_by[n]))
         if state.active_tool.value == "Detector":
-            solara.Select("Direction", value=state.direction, values=["AB", "BA"])
+            DetectorPanel()
         if state.active_tool.value == "Zone":
             solara.Markdown("*Click a centroid, then boundary vertices; click the first to close.*")
     else:
@@ -565,7 +782,9 @@ def Section():
     solara.use_effect(sync, [state.map_data.value, state.flows_fc.value, state.selected.value,
                              state.selected_many.value, state.visible_layers.value,
                              state.link_color_by.value, state.desire_matrix_id.value,
-                             state.elem_filter.value, _desire_cache.value])
+                             state.elem_filter.value, _desire_cache.value,
+                             state.inspect_detector.value, state.detector_info.value])
+    solara.use_effect(_fetch_detector_info, [state.inspect_detector.value])
 
     def apply_view():
         m.center = state.map_center.value

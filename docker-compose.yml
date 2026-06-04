@@ -195,6 +195,10 @@ services:
       DATABASE_URL: postgresql+psycopg://macromodel:macromodel@macromodel-db:5432/macromodel
       # The only coupling to the counter app — its REST API (best-effort).
       TRAFFIC_COUNTER_API_URL: http://api:8000
+      # Browser-reachable counter origins for the detector popup's <img> and the
+      # "Open video" deep link (the internal http://api:8000 isn't reachable from a browser).
+      TRAFFIC_COUNTER_PUBLIC_URL: http://localhost:8000
+      TRAFFIC_COUNTER_UI_URL: http://localhost:8501
       STORAGE_ROOT: /data
       CORS_ORIGINS: "*"
       ENV: dev

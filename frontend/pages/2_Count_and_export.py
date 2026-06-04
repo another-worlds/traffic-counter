@@ -103,19 +103,24 @@ def _maybe_fetch_asset_data_url(rel_url: Optional[str]) -> Optional[str]:
     return _fetch_asset_data_url(rel_url) if rel_url else None
 
 
-def _render_video_selector(ws_id: str, videos: List[Dict[str, Any]]) -> str:
+def _render_video_selector(ws_id: str, videos: List[Dict[str, Any]],
+                           video_id_param: Optional[str] = None) -> str:
     """Render the single-video selector and return the chosen video ID.
 
     Lines now belong to one video at a time, so the page operates on exactly
     one selection. Identity is keyed by video ID (not by label) so re-analysis
-    can change the track count without dropping the selection.
+    can change the track count without dropping the selection. An optional
+    ``video_id_param`` (from a ``?video_id=`` deep link) preselects on first load.
     """
     sel_key = f"count_export_selected_video_{ws_id}"
     video_by_id: Dict[str, Dict[str, Any]] = {str(v["id"]): v for v in videos}
     ids = list(video_by_id.keys())
 
     current = st.session_state.get(sel_key)
-    if current not in video_by_id:
+    if video_id_param and str(video_id_param) in video_by_id and sel_key not in st.session_state:
+        current = str(video_id_param)
+        st.session_state[sel_key] = current
+    elif current not in video_by_id:
         current = ids[0]
         st.session_state[sel_key] = current
 
@@ -140,6 +145,20 @@ def render_page() -> None:
     st.set_page_config(page_title="Count & Export (Hybrid)", page_icon="📏", layout="wide")
     st.title("📏 Count & Export (Hybrid)")
 
+    # Deep link from a companion app: ?project_id=…&video_id=… preselects the
+    # workspace + video on first load (no effect once the user changes selection).
+    qp = st.query_params
+    project_id_param = qp.get("project_id")
+    video_id_param = qp.get("video_id")
+    if project_id_param and not st.session_state.get("sidebar_ws_select"):
+        try:
+            match = next((p for p in api.list_projects()
+                          if str(p["id"]) == str(project_id_param)), None)
+            if match:
+                st.session_state["workspace"] = match
+        except Exception:
+            pass
+
     ws = render_sidebar()
     if not ws:
         st.stop()
@@ -154,7 +173,7 @@ def render_page() -> None:
 
     ws_id = str(ws["id"])
 
-    selected_video_id = _render_video_selector(ws_id, videos)
+    selected_video_id = _render_video_selector(ws_id, videos, video_id_param)
     preview_video = next(v for v in videos if str(v["id"]) == selected_video_id)
 
     # Hybrid iframe key includes the video id so React fully remounts when the

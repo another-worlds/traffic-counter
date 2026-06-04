@@ -523,6 +523,9 @@ def on_interaction(**kw):
             _update_hover(lat, lon)
             return
         if t == "mouseup":
+            if _maybe_commit_move():               # released a dragged node pin → commit the move
+                _rubber["start"] = None
+                return
             start = _rubber["start"]
             _rubber["start"] = None
             if m is not None and _rubber["rect"] is not None:
@@ -617,6 +620,18 @@ def _commit_move():
             state.status.value = "Node moved (connected links updated)."
         except Exception as e:  # noqa: BLE001
             state.status.value = f"Move failed: {e}"
+
+
+def _maybe_commit_move():
+    """Commit a node move if its dragged pin differs from the stored position."""
+    sel, dp = state.selected.value, state.drag_pos.value
+    if not (sel and sel.get("obj") == "nodes" and dp):
+        return False
+    cur = _coords_of(sel)
+    if not cur or (abs(cur[0] - dp[0]) < 1e-7 and abs(cur[1] - dp[1]) < 1e-7):
+        return False
+    _commit_move()
+    return True
 
 
 def _delete():
@@ -1031,7 +1046,7 @@ def QuickView():
         solara.Button("Save", color="primary", on_click=_save_attrs)
         solara.Button("Delete", color="error", on_click=_delete)
     if obj == "nodes":
-        solara.Markdown("*Drag the pin on the map, then:*")
+        solara.Markdown("*Drag the pin — commits on release (or use the button).*")
         solara.Button("Commit move", on_click=_commit_move)
 
 

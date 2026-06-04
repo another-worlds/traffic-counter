@@ -23,6 +23,8 @@ elem_filter = solara.reactive({"obj": "links", "attr": "", "op": ">", "value": "
 drag_pos = solara.reactive(None)         # [lon, lat] live position of a node being moved
 pending_link_from = solara.reactive(None)
 link_type_id = solara.reactive("")       # link type for inserts
+link_twoway = solara.reactive(True)      # draw bidirectional links (else one-way)
+link_chain = solara.reactive(True)       # chain mode: the new to-node becomes the next from-node
 # display panel
 visible_layers = solara.reactive({"nodes": True, "links": True, "zones": True, "connectors": True,
                                   "stops": True, "lines": True, "detectors": True, "desire": True})

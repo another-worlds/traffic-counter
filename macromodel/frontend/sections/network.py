@@ -33,6 +33,7 @@ _MAP = {"m": None}                                   # the stable map widget
 _rubber = {"start": None, "rect": None}              # rubber-band box (Selection drag)
 _zone = {"centroid": None, "verts": [], "line": None}  # zone polygon being drawn
 _assign = {"link": None, "hl": []}                   # detector line→link drag: candidate + highlight layers
+_draft = {"line": None, "from_ring": None, "snap": None}  # live link-drawing preview layers
 
 FILTER_ATTRS = {"links": ["sim_vph", "vc", "lanes", "link_type_id"],
                 "nodes": ["name"],
@@ -65,6 +66,34 @@ def _nearest_node(lat, lon):
         if d < bd:
             bd, best = d, f["properties"]["id"]
     return best
+
+
+def _snap_tol(px=12):
+    """Pixel snap tolerance as a degree distance at the map's current zoom."""
+    m = _MAP["m"]
+    z = getattr(m, "zoom", None) or state.map_zoom.value or 14
+    return px * 360.0 / (256.0 * (2 ** z))
+
+
+def _node_within(lat, lon, tol):
+    """Nearest node id within `tol` degrees, else None (snap-or-create test)."""
+    md = state.map_data.value or {}
+    best, bd = None, tol * tol
+    for f in md.get("nodes", {}).get("features", []):
+        x, y = f["geometry"]["coordinates"]
+        d = (x - lon) ** 2 + (y - lat) ** 2
+        if d < bd:
+            bd, best = d, f["properties"]["id"]
+    return best
+
+
+def _node_latlon(nid):
+    md = state.map_data.value or {}
+    for f in md.get("nodes", {}).get("features", []):
+        if f["properties"]["id"] == nid:
+            x, y = f["geometry"]["coordinates"]
+            return (y, x)
+    return None
 
 
 def _nearest_any(lat, lon):
@@ -188,6 +217,56 @@ def _update_assign_highlight(lat, lon):
         for h in hl:
             m.add_layer(h)
         _assign["hl"] = hl
+
+
+# --- live link-drawing preview (rubber-band + pending ring + snap dot) ----- #
+def _clear_link_preview():
+    m = _MAP["m"]
+    for k in ("line", "from_ring", "snap"):
+        if _draft[k] is not None and m is not None:
+            try:
+                m.remove_layer(_draft[k])
+            except Exception:  # noqa: BLE001
+                pass
+        _draft[k] = None
+
+
+def _update_link_preview(lat, lon):
+    m = _MAP["m"]
+    frm = _node_latlon(state.pending_link_from.value)
+    if m is None or frm is None:
+        return
+    snap_id = _node_within(lat, lon, _snap_tol())
+    end = _node_latlon(snap_id) if snap_id else (lat, lon)
+    if _draft["line"] is None:
+        _draft["line"] = L.Polyline(locations=[frm, end], color="#3aa0ff", weight=2,
+                                    dash_array="6,6", fill=False)
+        m.add_layer(_draft["line"])
+    else:
+        _draft["line"].locations = [frm, end]
+    if _draft["from_ring"] is None:                 # highlight the chosen FROM node once
+        _draft["from_ring"] = layers.selected_ring(frm[1], frm[0])
+        m.add_layer(_draft["from_ring"])
+    if snap_id:                                     # green dot = will attach to this node
+        if _draft["snap"] is None:
+            _draft["snap"] = L.CircleMarker(location=end, radius=8, color="#7CFC8A",
+                                            fill_color="#7CFC8A", fill_opacity=0.4, weight=2)
+            m.add_layer(_draft["snap"])
+        else:
+            _draft["snap"].location = end
+    elif _draft["snap"] is not None:
+        try:
+            m.remove_layer(_draft["snap"])
+        except Exception:  # noqa: BLE001
+            pass
+        _draft["snap"] = None
+
+
+def _cancel_pending():
+    """Abort an in-progress link/connector chain (Esc / Cancel button)."""
+    state.pending_link_from.value = None
+    _clear_link_preview()
+    state.status.value = "Drawing stopped."
 
 
 def _drop_grabbed(lat, lon):
@@ -358,6 +437,10 @@ def on_interaction(**kw):
     if state.active_tool.value == "Detector" and state.grabbed_line.value is not None and t == "mousemove":
         _update_assign_highlight(lat, lon)
         return
+    # While drawing a link, rubber-band from the pending node to the cursor.
+    if state.active_tool.value == "Link" and state.pending_link_from.value is not None and t == "mousemove":
+        _update_link_preview(lat, lon)
+        return
     if t != "click":
         return
     sid = state.scenario_id.value
@@ -379,14 +462,26 @@ def on_interaction(**kw):
             else:
                 state.status.value = "Pick a video, then grab a counting line to assign it to a link."
         elif tool == "Link":
-            nn = _nearest_node(lat, lon)
+            nid = _node_within(lat, lon, _snap_tol())
+            created = False
+            if nid is None:                                  # empty space → auto-create the node
+                nid = api.insert_node(sid, lat, lon)["id"]
+                created = True
             if state.pending_link_from.value is None:
-                state.pending_link_from.value = nn
-                state.status.value = "Link: now click the TO node."
+                state.pending_link_from.value = nid
+                if created:
+                    actions.refresh_map()                    # show the just-created start node
+                state.status.value = "Link: click the TO node (empty space makes one). Esc to stop."
+            elif nid == state.pending_link_from.value:
+                state.status.value = "Link: pick a different TO node."
             else:
-                api.insert_link(sid, state.pending_link_from.value, nn, state.link_type_id.value or None)
-                state.pending_link_from.value = None
-                actions.refresh_map(); state.status.value = "Link created."
+                api.insert_link(sid, state.pending_link_from.value, nid,
+                                state.link_type_id.value or None, oneway=not state.link_twoway.value)
+                _clear_link_preview()
+                state.pending_link_from.value = nid if state.link_chain.value else None
+                actions.refresh_map()
+                state.status.value = ("Link created — click next node (Esc to stop)."
+                                      if state.link_chain.value else "Link created.")
         elif tool == "Connector":
             if state.pending_link_from.value is None:
                 sel = _nearest_any(lat, lon)
@@ -576,9 +671,18 @@ def _set_mode(v):
     if v == "Creation" and state.active_tool.value == "Select":
         state.active_tool.value = "Node"
     state.pending_link_from.value = None
+    _clear_link_preview()
     if v != "Creation":
         state.grabbed_line.value = None
         _clear_assign_highlight()
+
+
+def _set_tool(t):
+    """Switch the active creation tool, abandoning any in-progress draw."""
+    state.active_tool.value = t
+    state.pending_link_from.value = None
+    _clear_link_preview()
+    _zone.update(centroid=None, verts=[], line=None)
 
 
 def _set_filter(k, v):
@@ -655,17 +759,23 @@ def Toolbar():
         for t in TOOLS[1:]:
             active = state.active_tool.value == t
             solara.Button(t, icon_name=theme.TOOL_ICONS.get(t),
-                          on_click=lambda t=t: state.active_tool.set(t),
+                          on_click=lambda t=t: _set_tool(t),
                           color="primary" if active else None, text=not active, block=True)
-        if state.active_tool.value == "Link" and lts:
-            id_by = {x["name"]: x["id"] for x in lts}
-            cur = next((n for n, i in id_by.items() if i == state.link_type_id.value), lts[0]["name"])
-            solara.Select("Link type", value=cur, values=list(id_by),
-                          on_value=lambda n: state.link_type_id.set(id_by[n]))
+        if state.active_tool.value == "Link":
+            if lts:
+                id_by = {x["name"]: x["id"] for x in lts}
+                cur = next((n for n, i in id_by.items() if i == state.link_type_id.value), lts[0]["name"])
+                solara.Select("Link type", value=cur, values=list(id_by),
+                              on_value=lambda n: state.link_type_id.set(id_by[n]))
+            solara.Switch(label="Two-way", value=state.link_twoway.value, on_value=state.link_twoway.set)
+            solara.Switch(label="Chain", value=state.link_chain.value, on_value=state.link_chain.set)
+            solara.Markdown("*Click nodes to link; empty space makes a node.*")
         if state.active_tool.value == "Detector":
             DetectorPanel()
         if state.active_tool.value == "Zone":
             solara.Markdown("*Click a centroid, then boundary vertices; click the first to close.*")
+        if state.pending_link_from.value is not None:
+            solara.Button("Cancel (Esc)", text=True, on_click=_cancel_pending)
     else:
         solara.Markdown("*Drag a box to multi-select · click selects · right-click inspects*")
 

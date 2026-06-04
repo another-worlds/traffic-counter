@@ -34,6 +34,7 @@ _rubber = {"start": None, "rect": None}              # rubber-band box (Selectio
 _zone = {"centroid": None, "verts": [], "line": None}  # zone polygon being drawn
 _assign = {"link": None, "hl": []}                   # detector line→link drag: candidate + highlight layers
 _draft = {"line": None, "from_ring": None, "snap": None}  # live link-drawing preview layers
+_hover = {"layer": None, "key": None}                # hover-highlight under the cursor (Selection)
 
 FILTER_ATTRS = {"links": ["sim_vph", "vc", "lanes", "link_type_id"],
                 "nodes": ["name"],
@@ -107,6 +108,34 @@ def _nearest_any(lat, lon):
             d = (p[0] - lon) ** 2 + (p[1] - lat) ** 2
             if d < bd:
                 bd, best = d, {"obj": obj, "id": f["properties"]["id"], "props": f["properties"]}
+    return best
+
+
+_PICK_PRIO = {"nodes": 0, "detectors": 0, "stops": 0, "links": 1, "zones": 2}
+
+
+def _pick(lat, lon, tol=None):
+    """Tolerance-gated selection under the cursor. Links use perpendicular distance;
+    points (nodes/stops/detectors) are preferred over links over zones. None = empty."""
+    md = state.map_data.value or {}
+    tol = _snap_tol(14) if tol is None else tol
+    tol2 = tol * tol
+    best, bkey = None, (9, 1e18)
+    for obj in ("nodes", "detectors", "stops", "links", "zones"):
+        for f in md.get(obj, {}).get("features", []):
+            g = f.get("geometry") or {}
+            if obj == "links" and g.get("type") == "LineString" and len(g.get("coordinates", [])) >= 2:
+                d = _link_d2(lon, lat, g["coordinates"])
+            else:
+                p = _point_of(f)
+                if not p:
+                    continue
+                d = (p[0] - lon) ** 2 + (p[1] - lat) ** 2
+            if d > tol2:
+                continue
+            key = (_PICK_PRIO[obj], d)
+            if key < bkey:
+                bkey, best = key, {"obj": obj, "id": f["properties"]["id"], "props": f["properties"]}
     return best
 
 
@@ -267,6 +296,45 @@ def _cancel_pending():
     state.pending_link_from.value = None
     _clear_link_preview()
     state.status.value = "Drawing stopped."
+
+
+# --- hover highlight (Selection mode) ------------------------------------- #
+def _clear_hover():
+    m = _MAP["m"]
+    if _hover["layer"] is not None and m is not None:
+        try:
+            m.remove_layer(_hover["layer"])
+        except Exception:  # noqa: BLE001
+            pass
+    _hover["layer"] = None
+    _hover["key"] = None
+
+
+def _update_hover(lat, lon):
+    m = _MAP["m"]
+    if m is None:
+        return
+    cand = _pick(lat, lon)
+    key = (cand["obj"], cand["id"]) if cand else None
+    if key == _hover["key"]:
+        return
+    _clear_hover()
+    _hover["key"] = key
+    if not cand:
+        return
+    if cand["obj"] == "links":
+        coords = next((f["geometry"]["coordinates"]
+                       for f in (state.map_data.value or {}).get("links", {}).get("features", [])
+                       if f["properties"]["id"] == cand["id"]), None)
+        if coords:
+            _hover["layer"] = L.Polyline(locations=[(y, x) for x, y in coords],
+                                         color="#7CFC8A", weight=5, opacity=0.6, fill=False)
+    else:
+        co = _coords_of(cand)
+        if co:
+            _hover["layer"] = layers.hover_ring(co[0], co[1])
+    if _hover["layer"] is not None:
+        m.add_layer(_hover["layer"])
 
 
 def _drop_grabbed(lat, lon):
@@ -434,11 +502,12 @@ def on_interaction(**kw):
                            f"font-family:ui-monospace,monospace'>{lat:.5f}, {lon:.5f}</div>")
 
     if t == "contextmenu":
-        _select(_nearest_any(lat, lon))
+        _select(_pick(lat, lon))
         return
 
     if state.edit_mode.value == "Selection":
         if t == "mousedown":
+            _clear_hover()
             _rubber["start"] = (lat, lon)
             return
         if t == "mousemove" and _rubber["start"] is not None and m is not None:
@@ -449,6 +518,9 @@ def on_interaction(**kw):
                 m.add_layer(_rubber["rect"])
             else:
                 _rubber["rect"].bounds = [(s, w), (n, e)]
+            return
+        if t == "mousemove":                         # idle hover-highlight under the cursor
+            _update_hover(lat, lon)
             return
         if t == "mouseup":
             start = _rubber["start"]
@@ -464,7 +536,8 @@ def on_interaction(**kw):
             if abs(start[0] - lat) > 1e-5 or abs(start[1] - lon) > 1e-5:
                 _box_select(start, (lat, lon))
             else:
-                _select(_nearest_any(lat, lon))
+                _clear_hover()
+                _select(_pick(lat, lon))
             return
         return  # ignore 'click' in Selection mode
 
@@ -721,6 +794,7 @@ def _set_mode(v):
         state.active_tool.value = "Node"
     state.pending_link_from.value = None
     _clear_link_preview()
+    _clear_hover()
     if v != "Creation":
         state.grabbed_line.value = None
         _clear_assign_highlight()
@@ -736,6 +810,21 @@ def _set_tool(t):
 
 def _set_filter(k, v):
     state.elem_filter.set({**state.elem_filter.value, k: v})
+
+
+def _select_matching():
+    """Add every element passing the Display filter to the multi-selection."""
+    flt = state.elem_filter.value
+    obj = flt.get("obj", "links")
+    if not flt.get("attr"):
+        state.status.value = "Set a filter attribute first."
+        return
+    md = state.map_data.value or {}
+    many = [{"obj": obj, "id": f["properties"]["id"], "props": f["properties"]}
+            for f in md.get(obj, {}).get("features", []) if _passes(f.get("properties", {}), flt)]
+    state.selected.value = None
+    state.selected_many.value = many
+    state.status.value = f"Selected {len(many)} {obj} matching the filter."
 
 
 @solara.component
@@ -863,8 +952,10 @@ def DisplayPanel(sid):
                       on_value=lambda v: _set_filter("op", v))
         solara.InputText("Value", value=flt.get("value", ""), on_value=lambda v: _set_filter("value", v))
     if flt.get("attr"):
-        solara.Button("Clear filter", text=True,
-                      on_click=lambda: state.elem_filter.set({"obj": "links", "attr": "", "op": ">", "value": ""}))
+        with solara.Row():
+            solara.Button("Select matching", text=True, on_click=_select_matching)
+            solara.Button("Clear filter", text=True,
+                          on_click=lambda: state.elem_filter.set({"obj": "links", "attr": "", "op": ">", "value": ""}))
 
     md = state.map_data.value or {}
     counts = " · ".join(f"{k}:{len(md.get(k, {}).get('features', []))}"

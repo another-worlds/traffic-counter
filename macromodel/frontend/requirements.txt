@@ -4,3 +4,4 @@ ipyleaflet>=0.18,<0.20
 ipywidgets>=8,<9
 httpx==0.27.2
 pandas==2.2.2  # Lists/Demand/Matrices sections render tables via solara.DataFrame
+matplotlib==3.9.2  # Procedures validation chart (observed-vs-modelled scatter + GEH)

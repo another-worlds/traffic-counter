@@ -3,11 +3,55 @@ editor). Add / reorder / toggle / run operations and view the run log + KPIs.
 """
 from __future__ import annotations
 
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
 import solara
 
 import actions
 import api_client as api
 import state
+
+
+def _style_dark(ax):
+    ax.set_facecolor("#0f141c")
+    for s in ax.spines.values():
+        s.set_color("#33405a")
+    ax.tick_params(colors="#9fb3d4", labelsize=8)
+    ax.xaxis.label.set_color("#9fb3d4")
+    ax.yaxis.label.set_color("#9fb3d4")
+    ax.title.set_color("#dbe6f7")
+
+
+@solara.component
+def ValidationChart():
+    flows = state.flows_fc.value
+    pts = [] if not flows else [
+        (f["properties"]["obs_vph"], f["properties"]["sim_vph"], f["properties"].get("geh") or 0.0)
+        for f in flows["features"] if f["properties"].get("obs_vph") is not None]
+
+    def make_fig():
+        if not pts:
+            return None
+        obs = [p[0] for p in pts]; sim = [p[1] for p in pts]; geh = [p[2] for p in pts]
+        cols = ["#2ca25f" if g < 5 else "#f4a300" if g < 10 else "#d7301f" for g in geh]
+        fig, ax = plt.subplots(1, 2, figsize=(8.2, 3.1))
+        fig.patch.set_facecolor("#1b212c")
+        mx = max(max(obs), max(sim)) * 1.1 or 1
+        ax[0].plot([0, mx], [0, mx], "--", color="#566", lw=1)
+        ax[0].scatter(obs, sim, c=cols, s=34, edgecolor="k", linewidth=0.3)
+        ax[0].set_xlabel("observed vph"); ax[0].set_ylabel("modelled vph")
+        ax[0].set_title("Observed vs modelled")
+        ax[1].hist(geh, bins=[0, 2, 4, 5, 6, 8, 10, 15], color="#3aa0ff", edgecolor="#11161e")
+        ax[1].axvline(5, color="#2ca25f", ls="--", lw=1.2)
+        ax[1].set_xlabel("GEH"); ax[1].set_title("GEH distribution")
+        _style_dark(ax[0]); _style_dark(ax[1])
+        fig.tight_layout()
+        return fig
+
+    fig = solara.use_memo(make_fig, [tuple(pts)])  # called unconditionally (rules of hooks)
+    if fig is not None:
+        solara.FigureMatplotlib(fig)
 
 _refresh = solara.reactive(0)
 _new_op = solara.reactive("TripGeneration")
@@ -101,3 +145,4 @@ def Section():
             f"### Result\nmean GEH **{(m.get('mean_geh') or 0):.2f}** · "
             f"GEH&lt;5 **{(m.get('pct_geh_lt5') or 0):.0f}%** · RMSE **{(m.get('rmse') or 0):.0f}** vph "
             "— see coloured links in the Network tab.")
+    ValidationChart()

@@ -90,7 +90,11 @@ def linkflows_fc(links: List[dict], sim: Dict[str, float], targets: List[dict]) 
     for l in links:
         lid = l["id"]
         sim_v = float(sim.get(lid, 0.0))
-        props = {"kind": "link", "id": lid, "name": l.get("name"), "sim_vph": sim_v}
+        lanes = int(l.get("lanes") or 1)
+        cap = float(l.get("capacity_vph") or (lanes * 1800))
+        props = {"kind": "link", "id": lid, "name": l.get("name"), "sim_vph": sim_v,
+                 "lanes": lanes, "capacity_vph": cap, "length_m": l.get("length_m"),
+                 "vc": (sim_v / cap) if cap else None}
         if lid in obs:
             o = obs[lid]
             g = float(calibration.geh([sim_v], [o])[0])

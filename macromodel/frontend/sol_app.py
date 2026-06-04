@@ -10,7 +10,19 @@ import solara
 
 import actions
 import state
+import theme
 from sections import demand, lists, matrices, network, procedures
+
+
+def _enable_dark():
+    try:
+        import solara.lab
+        try:
+            solara.lab.theme.dark.value = True
+        except Exception:
+            solara.lab.theme.dark = True
+    except Exception:
+        pass
 
 SECTIONS = {
     "Network": network.Section,
@@ -35,13 +47,16 @@ def ScenarioBar():
 @solara.component
 def Page():
     solara.Title("MacroModel")
+    solara.Style(theme.CSS)
+    solara.use_effect(_enable_dark, [])
     solara.use_effect(actions.refresh_scenarios, [])
 
-    with solara.Column(style={"padding": "6px 14px"}):
+    with solara.Column(classes=["mm-appbar"]):
         with solara.Row(style={"align-items": "center", "gap": "16px"}):
-            solara.Markdown("### 🚦 MacroModel")
+            solara.HTML(tag="div", unsafe_innerHTML="🚦 <b class='mm-title'>MacroModel</b>")
             ScenarioBar()
             solara.ToggleButtonsSingle(value=state.section, values=list(SECTIONS))
         solara.Markdown(state.status.value)
 
-    SECTIONS[state.section.value]()
+    with solara.Column(style={"padding": "0 6px"}):
+        SECTIONS[state.section.value]()

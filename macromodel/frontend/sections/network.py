@@ -1,9 +1,10 @@
 """Network section — a Visum-style editor.
 
-Left: a vertical element toolbar. Centre: the ipyleaflet map (pan/zoom preserved via
-two-way center/zoom binding — fixes the click-resets-scale bug). Right: an always-on
-"Quick view" inspector. LMB with the Select tool (or RMB anywhere) selects the nearest
-element, which glows red; a selected node gets a draggable handle you can move + commit.
+The map is a single STABLE ipyleaflet widget (created once via use_memo); its .layers are
+swapped imperatively, so panning/zooming and the click handler are never lost (fixes the
+click-resets-scale + LMB-does-nothing bugs). Leaflet double-click/box zoom are disabled —
+only scroll zoom + drag pan. A Selection/Creation mode decides whether LMB selects or
+inserts; right-click always inspects. Quick view edits the selected element's attributes.
 """
 from __future__ import annotations
 
@@ -15,22 +16,18 @@ import actions
 import api_client as api
 import layers
 import state
-
-try:
-    from solara import get_widget
-except Exception:  # pragma: no cover
-    from reacton.core import get_widget
+import theme
+from sections import lists
 
 TOOLS = ["Select", "Node", "Link", "Zone", "Connector", "Stop", "Detector"]
-# Visum object types we don't edit yet — shown disabled to mirror the full object list.
 PLACEHOLDERS = ["Turns", "Main nodes", "Territories", "OD pairs", "PrT paths", "POIs"]
 
+_desire_cache = solara.reactive(None)   # {"labels":[...], "values":[[...]]}
+_qv_buf = solara.reactive({})
+_qv_id = solara.reactive("")
 
-def _set_tool(t):
-    state.active_tool.value = t
-    state.pending_link_from.value = None
 
-
+# --- geometry helpers ----------------------------------------------------- #
 def _nearest_node(lat, lon):
     md = state.map_data.value or {}
     best, bd = None, 1e18
@@ -78,24 +75,30 @@ def _coords_of(sel):
 def _select(sel):
     state.selected.value = sel
     state.drag_pos.value = _coords_of(sel) if (sel and sel["obj"] == "nodes") else None
+    if sel:
+        _qv_buf.value = {f: sel["props"].get(f) for f in lists.FIELDS.get(sel["obj"], [])}
+        _qv_id.value = sel["id"]
 
 
+# --- map interaction ------------------------------------------------------ #
 def on_interaction(**kw):
     t = kw.get("type")
-    c = kw.get("coordinates") or (None, None)
-    lat, lon = c
+    lat, lon = (kw.get("coordinates") or (None, None))
     if lat is None:
         return
-    if t == "contextmenu":            # right-click → inspect, regardless of tool
+    if t == "contextmenu":                      # right-click → inspect (any mode)
         _select(_nearest_any(lat, lon))
         return
     if t != "click":
         return
-
     sid = state.scenario_id.value
     if not sid:
         state.status.value = "Pick a scenario first."
         return
+    if state.edit_mode.value != "Creation":     # Selection mode → select nearest
+        _select(_nearest_any(lat, lon))
+        return
+
     tool = state.active_tool.value
     try:
         if tool == "Node":
@@ -105,8 +108,8 @@ def on_interaction(**kw):
         elif tool == "Stop":
             api.insert_stop(sid, lat, lon); actions.refresh_map()
         elif tool == "Detector":
-            api.insert_detector(sid, lat, lon, link_direction=state.direction.value); actions.refresh_map()
-            state.status.value = "Detector placed (snapped to nearest link)."
+            api.insert_detector(sid, lat, lon, link_direction=state.direction.value)
+            actions.refresh_map(); state.status.value = "Detector placed (snapped to nearest link)."
         elif tool == "Link":
             nn = _nearest_node(lat, lon)
             if state.pending_link_from.value is None:
@@ -125,19 +128,12 @@ def on_interaction(**kw):
                 else:
                     state.status.value = "Connector: first click a zone."
             else:
-                api.create_object(sid, "connectors",
-                                  {"zone_id": state.pending_link_from.value, "node_id": _nearest_node(lat, lon),
-                                   "direction": "both"})
+                api.create_object(sid, "connectors", {"zone_id": state.pending_link_from.value,
+                                                       "node_id": _nearest_node(lat, lon), "direction": "both"})
                 state.pending_link_from.value = None
                 actions.refresh_map(); state.status.value = "Connector created."
-        else:  # Select
-            _select(_nearest_any(lat, lon))
     except Exception as e:  # noqa: BLE001
         state.status.value = f"{tool} failed: {e}"
-
-
-def _on_drag(loc):
-    state.drag_pos.value = [loc[1], loc[0]]  # (lat,lon) → [lon,lat]
 
 
 def _commit_move():
@@ -146,7 +142,6 @@ def _commit_move():
         try:
             api.move_node(state.scenario_id.value, sel["id"], dp[1], dp[0])
             actions.refresh_map()
-            _select({**sel, "props": {**sel["props"]}})  # keep selection
             state.status.value = "Node moved (connected links updated)."
         except Exception as e:  # noqa: BLE001
             state.status.value = f"Move failed: {e}"
@@ -166,34 +161,91 @@ def _delete():
         state.status.value = f"Delete failed: {e}"
 
 
+def _save_attrs():
+    sel = state.selected.value
+    if not sel:
+        return
+    obj = sel["obj"]
+    try:
+        api.update_object(obj, sel["id"], lists._coerce(_qv_buf.value))
+        actions.refresh_map()
+        for f in (state.map_data.value or {}).get(obj, {}).get("features", []):
+            if f["properties"].get("id") == sel["id"]:
+                _select({"obj": obj, "id": sel["id"], "props": f["properties"]})
+                break
+        state.status.value = "Saved."
+    except Exception as e:  # noqa: BLE001
+        state.status.value = f"Save failed: {e}"
+
+
+# --- overlays (live widgets) ---------------------------------------------- #
 def build_overlays():
     md = state.map_data.value or {}
-    ov = [layers.tile_layer_element()]
-    if md.get("links"):
-        ov += layers.map_link_elements(md["links"])
-    if state.flows_fc.value:
-        ov += layers.flows_elements(state.flows_fc.value)
-    if md.get("connectors"):
-        ov += layers.connector_elements(md["connectors"])
-    if md.get("lines"):
-        ov += layers.line_elements(md["lines"])
-    if md.get("nodes"):
-        ov += layers.map_node_elements(md["nodes"])
-    if md.get("zones"):
-        ov += layers.zone_elements(md["zones"])
-    if md.get("stops"):
-        ov += layers.stop_elements(md["stops"])
-    if md.get("detectors"):
-        ov += layers.detector_elements(md["detectors"])
+    vis = state.visible_layers.value
+    flows = state.flows_fc.value
+    ov = []
+    if vis.get("links", True):
+        if flows:
+            ov += layers.flow_link_widgets(flows, state.link_color_by.value)
+        elif md.get("links"):
+            ov += layers.plain_link_widgets(md["links"])
+    if vis.get("connectors", True) and md.get("connectors"):
+        ov += layers.connector_widgets(md["connectors"])
+    if vis.get("lines", True) and md.get("lines"):
+        ov += layers.line_widgets(md["lines"])
+    if vis.get("desire", True) and _desire_cache.value and md.get("zones"):
+        dv = _desire_cache.value
+        ov += layers.desire_widgets(md["zones"], dv["labels"], dv["values"])
+    if vis.get("nodes", True) and md.get("nodes"):
+        ov += layers.node_widgets(md["nodes"])
+    if vis.get("zones", True) and md.get("zones"):
+        ov += layers.zone_widgets(md["zones"])
+    if vis.get("stops", True) and md.get("stops"):
+        ov += layers.stop_widgets(md["stops"])
+    if vis.get("detectors", True) and md.get("detectors"):
+        ov += layers.detector_widgets(md["detectors"])
     sel = state.selected.value
     if sel:
-        coords = _coords_of(sel)
-        if coords:
-            ov.append(layers.selected_marker(coords[0], coords[1]))
+        co = _coords_of(sel)
+        if co:
+            ov.append(layers.selected_ring(co[0], co[1]))
         if sel["obj"] == "nodes" and state.drag_pos.value:
             dp = state.drag_pos.value
-            ov.append(L.Marker.element(location=(dp[1], dp[0]), draggable=True, on_location=_on_drag))
+            mk = L.Marker(location=(dp[1], dp[0]), draggable=True)
+            mk.observe(lambda ch: state.drag_pos.set([ch["new"][1], ch["new"][0]]), "location")
+            ov.append(mk)
     return ov
+
+
+def _make_map():
+    m = L.Map(center=state.map_center.value, zoom=state.map_zoom.value,
+              basemap=L.basemaps.CartoDB.DarkMatter, scroll_wheel_zoom=True,
+              double_click_zoom=False, box_zoom=False, dragging=True)
+    m.layout.height = "84vh"
+    m.on_interaction(on_interaction)
+    legend = W.HTML(value=layers.legend_html(state.link_color_by.value, False))
+    m.add(L.WidgetControl(widget=legend, position="bottomright"))
+    m._legend = legend
+    return m
+
+
+def _load_desire():
+    mid = state.desire_matrix_id.value
+    if not mid:
+        _desire_cache.value = None
+        return
+    try:
+        _desire_cache.value = api.matrix_values(mid)
+    except Exception:  # noqa: BLE001
+        _desire_cache.value = None
+
+
+# --- panels --------------------------------------------------------------- #
+def _set_mode(v):
+    state.edit_mode.value = v
+    if v == "Creation" and state.active_tool.value == "Select":
+        state.active_tool.value = "Node"
+    state.pending_link_from.value = None
 
 
 @solara.component
@@ -201,24 +253,49 @@ def Toolbar():
     sid = state.scenario_id.value
     lts = solara.use_memo(lambda: api.list_objects(sid, "link_types") if sid else [], [sid])
     solara.Markdown("**Network**")
-    for t in TOOLS:
-        active = state.active_tool.value == t
-        solara.Button(t, on_click=lambda t=t: _set_tool(t), color="primary" if active else None,
-                      text=not active, block=True, dense=True)
-    if state.active_tool.value == "Link" and lts:
-        id_by = {x["name"]: x["id"] for x in lts}
-        cur = next((n for n, i in id_by.items() if i == state.link_type_id.value), lts[0]["name"])
-        solara.Select("Link type", value=cur, values=list(id_by),
-                      on_value=lambda n: state.link_type_id.set(id_by[n]))
-    if state.active_tool.value == "Detector":
-        solara.Select("Direction", value=state.direction, values=["AB", "BA"])
-    solara.Markdown("—")
+    solara.ToggleButtonsSingle(value=state.edit_mode.value, values=["Selection", "Creation"],
+                               on_value=_set_mode)
+    if state.edit_mode.value == "Creation":
+        solara.Markdown("*Insert element*")
+        for t in TOOLS[1:]:
+            active = state.active_tool.value == t
+            solara.Button(t, icon_name=theme.TOOL_ICONS.get(t),
+                          on_click=lambda t=t: state.active_tool.set(t),
+                          color="primary" if active else None, text=not active, block=True)
+        if state.active_tool.value == "Link" and lts:
+            id_by = {x["name"]: x["id"] for x in lts}
+            cur = next((n for n, i in id_by.items() if i == state.link_type_id.value), lts[0]["name"])
+            solara.Select("Link type", value=cur, values=list(id_by),
+                          on_value=lambda n: state.link_type_id.set(id_by[n]))
+        if state.active_tool.value == "Detector":
+            solara.Select("Direction", value=state.direction, values=["AB", "BA"])
+    else:
+        solara.Markdown("*Click selects · right-click inspects*")
+    solara.Markdown("*Not editable yet*")
     for t in PLACEHOLDERS:
-        solara.Button(t, disabled=True, text=True, block=True, dense=True)
+        solara.Button(t, disabled=True, text=True, block=True)
+
+
+@solara.component
+def DisplayPanel(sid):
+    solara.Markdown("**Display**")
+    solara.Select("Colour links by", value=state.link_color_by, values=["GEH", "Volume", "V/C"])
+    mats = solara.use_memo(
+        lambda: [m for m in (api.list_matrices(sid) if sid else []) if m.get("kind") == "demand"],
+        [sid, state.map_data.value is not None])
+    by = {f"{m['name']} · {m['id'][:6]}": m["id"] for m in mats}
+    cur = next((l for l, i in by.items() if i == state.desire_matrix_id.value), "(none)")
+    solara.Select("Desire lines", value=cur, values=["(none)"] + list(by),
+                  on_value=lambda l: state.desire_matrix_id.set(by.get(l, "")))
+    solara.Markdown("**Layers**")
+    vis = state.visible_layers.value
+    for k in ("links", "nodes", "zones", "connectors", "stops", "lines", "detectors", "desire"):
+        solara.Checkbox(label=k, value=vis.get(k, True),
+                        on_value=lambda nv, k=k: state.visible_layers.set({**state.visible_layers.value, k: nv}))
     md = state.map_data.value or {}
-    counts = {k: len(md.get(k, {}).get("features", [])) for k in
-              ("nodes", "links", "zones", "connectors", "stops", "lines", "detectors")}
-    solara.Markdown("**Counts**\n\n" + "\n".join(f"- {k}: {v}" for k, v in counts.items()))
+    counts = " · ".join(f"{k}:{len(md.get(k, {}).get('features', []))}"
+                        for k in ("nodes", "links", "zones", "detectors"))
+    solara.Markdown(counts)
 
 
 @solara.component
@@ -226,39 +303,54 @@ def QuickView():
     solara.Markdown("### Quick view")
     sel = state.selected.value
     if not sel:
-        solara.Markdown("*LMB (Select tool) or **right-click** an element to inspect it.*")
+        solara.Markdown("*Click an element (Selection mode), or right-click anything, to inspect.*")
         return
-    solara.Markdown(f"**{sel['obj'][:-1]}** · `{sel['id'][:8]}`")
-    for k, v in sel.get("props", {}).items():
-        if k in ("id", "kind"):
-            continue
-        solara.Markdown(f"- **{k}**: {v}")
-    if sel["obj"] == "nodes":
-        solara.Markdown("*Drag the pin to move; then commit.*")
-        solara.Button("Commit move", on_click=_commit_move, color="primary", dense=True)
-    solara.Button("Delete element", on_click=_delete, color="error", dense=True)
+    obj = sel["obj"]
+    solara.Markdown(f"**{obj[:-1]}** · `{sel['id'][:8]}`")
+    for f in lists.FIELDS.get(obj, []):
+        v = _qv_buf.value.get(f)
+        if isinstance(v, bool):
+            solara.Switch(label=f, value=v, on_value=lambda nv, f=f: _qv_buf.set({**_qv_buf.value, f: nv}))
+        else:
+            solara.InputText(f, value="" if v is None else str(v),
+                             on_value=lambda nv, f=f: _qv_buf.set({**_qv_buf.value, f: nv}))
+    with solara.Row():
+        solara.Button("Save", color="primary", on_click=_save_attrs)
+        solara.Button("Delete", color="error", on_click=_delete)
+    if obj == "nodes":
+        solara.Markdown("*Drag the pin on the map, then:*")
+        solara.Button("Commit move", on_click=_commit_move)
 
 
 @solara.component
 def Section():
-    if state.scenario_id.value and state.map_data.value is None:
+    sid = state.scenario_id.value
+    if sid and state.map_data.value is None:
         actions.refresh_map()
-    overlays = build_overlays()
-    with solara.Row(style={"height": "84vh", "gap": "6px"}):
-        with solara.Column(style={"min-width": "150px", "max-width": "168px", "overflow-y": "auto"}):
+
+    m = solara.use_memo(_make_map, [])
+    solara.use_effect(_load_desire, [state.desire_matrix_id.value])
+
+    def sync():
+        base = [l for l in m.layers if isinstance(l, L.TileLayer)] or [layers.dark_tile()]
+        m.layers = tuple(base) + tuple(build_overlays())
+        if getattr(m, "_legend", None) is not None:
+            m._legend.value = layers.legend_html(state.link_color_by.value, state.flows_fc.value is not None)
+    solara.use_effect(sync, [state.map_data.value, state.flows_fc.value, state.selected.value,
+                             state.visible_layers.value, state.link_color_by.value,
+                             state.desire_matrix_id.value, _desire_cache.value])
+
+    def apply_view():
+        m.center = state.map_center.value
+        m.zoom = state.map_zoom.value
+    solara.use_effect(apply_view, [state.map_center.value, state.map_zoom.value])
+
+    with solara.Row(style={"height": "86vh", "gap": "8px"}):
+        with solara.Column(classes=["mm-rail"], style={"overflow-y": "auto"}):
             Toolbar()
+            DisplayPanel(sid)
         with solara.Column(style={"flex": "1"}):
-            map_el = L.Map.element(
-                center=state.map_center.value, zoom=state.map_zoom.value, scroll_wheel_zoom=True,
-                layout=W.Layout(height="82vh"), layers=overlays,
-                on_center=lambda c: state.map_center.set(tuple(c)),
-                on_zoom=lambda z: state.map_zoom.set(z))
-
-            def _attach():
-                w = get_widget(map_el)
-                w.on_interaction(on_interaction)
-                return lambda: w.on_interaction(on_interaction, remove=True)
-
-            solara.use_effect(_attach, [])
-        with solara.Column(style={"min-width": "230px", "max-width": "270px", "overflow-y": "auto"}):
+            solara.display(m)
+        with solara.Column(classes=["mm-panel"], style={"min-width": "250px", "max-width": "300px",
+                                                        "overflow-y": "auto"}):
             QuickView()

@@ -72,6 +72,51 @@ def counter_elements(fc: dict) -> list:
     return out
 
 
+NODE, STOP, LINE = "#555555", "#8e44ad", "#2b8cbe"
+
+
+def _circles(fc, color, radius, fill=0.9):
+    out = []
+    for f in fc.get("features", []):
+        g = f.get("geometry")
+        if not g or g.get("type") != "Point":
+            continue
+        lon, lat = g["coordinates"]
+        out.append(L.CircleMarker.element(location=(lat, lon), radius=radius, color=color,
+                                          fill_color=color, fill_opacity=fill, weight=1))
+    return out
+
+
+def map_node_elements(fc):
+    return _circles(fc, NODE, 4, 0.85)
+
+
+def map_link_elements(fc):
+    return [L.GeoJSON.element(data=fc, style={"color": GRAY, "weight": 2, "opacity": 0.7})]
+
+
+def connector_elements(fc):
+    return [L.GeoJSON.element(data=fc, style={"color": "#999999", "weight": 1.5,
+                                              "opacity": 0.7, "dashArray": "4,4"})]
+
+
+def stop_elements(fc):
+    return _circles(fc, STOP, 5)
+
+
+def line_elements(fc):
+    return [L.GeoJSON.element(data=fc, style={"color": LINE, "weight": 4, "opacity": 0.8})]
+
+
+def detector_elements(fc):
+    return _circles(fc, COUNTER, 6)
+
+
+def selected_marker(lon, lat):
+    return L.CircleMarker.element(location=(lat, lon), radius=12, color="#111111",
+                                  fill_color="#ffd400", fill_opacity=0.5, weight=2)
+
+
 def bounds_of(fc: dict):
     lats, lons = [], []
     for f in fc.get("features", []):

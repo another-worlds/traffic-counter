@@ -8,7 +8,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .db import init_db
-from .routers import calibration, counters, model, network, results, scenarios, zones
+from .routers import (
+    calibration, counters, crud, matrices, model, network, network_edit, results, scenarios, zones,
+)
+from .routers import procedures as procedures_router
 
 
 def _init_db_with_retry(attempts: int = 10, delay: float = 2.0) -> None:
@@ -45,7 +48,8 @@ def create_app() -> FastAPI:
     def healthz():
         return {"ok": True, "service": "macromodel-api", "env": settings.env}
 
-    for r in (scenarios, network, zones, counters, model, calibration, results):
+    for r in (scenarios, network, network_edit, zones, counters, model, calibration, results,
+              crud, procedures_router, matrices):
         app.include_router(r.router)
     return app
 

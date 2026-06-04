@@ -12,10 +12,12 @@ from .storage import storage
 
 
 # --- persistence ---------------------------------------------------------- #
-def store_od(db, scenario_id: str, T, step: str, name: str) -> ODMatrix:
-    key = f"{scenario_id}/od_{step}_{uuid.uuid4().hex}.parquet"
+def store_od(db, scenario_id: str, T, step: str, name: str,
+             kind: str = "demand", mode: str = None, demand_layer: str = None) -> ODMatrix:
+    key = f"{scenario_id}/mtx_{step}_{uuid.uuid4().hex}.parquet"
     storage.save_matrix(key, T)
-    m = ODMatrix(scenario_id=scenario_id, name=name, step=step, n_zones=len(T), storage_ref=key)
+    m = ODMatrix(scenario_id=scenario_id, name=name, step=step, n_zones=len(T),
+                 storage_ref=key, kind=kind, mode_id=mode, demand_layer_id=demand_layer)
     db.add(m)
     db.flush()
     return m

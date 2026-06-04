@@ -1,12 +1,13 @@
 """SQLAlchemy engine/session wiring.
 
 Mirrors the traffic-counter API's pattern (api/app/db.py): a single engine, a
-sessionmaker, a declarative Base, and create_all() for MVP simplicity. Swap for
-Alembic before evolving the schema in production.
+sessionmaker, a declarative Base, and create_all() for MVP simplicity. New columns on
+pre-existing tables are added idempotently by _safe_add_columns (create_all does not
+ALTER existing tables). Swap for Alembic before evolving the schema in production.
 """
 from __future__ import annotations
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import settings
@@ -15,12 +16,35 @@ engine = create_engine(settings.database_url, pool_pre_ping=True, future=True)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
 
+# Columns added to tables that may already exist from an earlier schema.
+_NEW_COLUMNS = {
+    "nodes": [("node_type_id", "VARCHAR")],
+    "links": [("link_type_id", "VARCHAR"), ("v0_kmh", "FLOAT"), ("allowed_modes", "JSON")],
+    "zones": [("zone_type_id", "VARCHAR")],
+    "od_matrices": [("kind", "VARCHAR"), ("mode_id", "VARCHAR"), ("demand_layer_id", "VARCHAR")],
+}
+
+
+def _safe_add_columns() -> None:
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    with engine.begin() as conn:
+        for table, cols in _NEW_COLUMNS.items():
+            if table not in tables:
+                continue
+            have = {c["name"] for c in insp.get_columns(table)}
+            for name, sqltype in cols:
+                if name in have:
+                    continue
+                coltype = "TEXT" if (sqltype == "JSON" and engine.dialect.name == "sqlite") else sqltype
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {name} {coltype}"))
+
 
 def init_db() -> None:
-    # Import models so they register on Base.metadata before create_all.
-    from . import models  # noqa: F401
+    from . import models  # noqa: F401 — register models on Base.metadata
 
     Base.metadata.create_all(engine)
+    _safe_add_columns()
 
 
 def get_db():

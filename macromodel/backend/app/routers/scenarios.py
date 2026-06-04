@@ -7,6 +7,7 @@ from ..db import get_db
 from ..models import Counter, Link, Node, Scenario, Zone
 from ..schemas import ScenarioCreate, ScenarioOut
 from ..services import demo as demo_service
+from ..services import seeds
 
 router = APIRouter(tags=["scenarios"])
 
@@ -32,6 +33,8 @@ def get_scenario_or_404(db: Session, scenario_id: str) -> Scenario:
 def create_scenario(body: ScenarioCreate, db: Session = Depends(get_db)):
     sc = Scenario(name=body.name, description=body.description, bbox=body.bbox)
     db.add(sc)
+    db.flush()
+    seeds.seed_defaults(db, sc.id)  # link/node/zone types, modes, activities, layers, procedures
     db.commit()
     return _out(db, sc)
 

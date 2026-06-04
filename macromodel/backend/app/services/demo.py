@@ -14,8 +14,8 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import Counter, Scenario, Zone
-from . import assignment, distribution, generation, loader, modechoice, netconvert, osm_import
+from ..models import Connector, Counter, Line, LineRouteStop, Scenario, Stop, Zone, ZoneDemand
+from . import assignment, distribution, generation, loader, modechoice, netconvert, osm_import, seeds
 
 
 def _midpoint(link: dict) -> List[float]:
@@ -29,6 +29,7 @@ def build_demo(db: Session, name: str = "Demo: 4x4 grid", seed: int = 42) -> str
     sc = Scenario(name=name, description="Self-contained offline demo scenario.")
     db.add(sc)
     db.flush()
+    seeds.seed_defaults(db, sc.id)  # link/node/zone types, modes, activities, layers, procedures
 
     nodes, links, grid = osm_import.build_sample_network(rows=4, cols=4)
     loader.persist_network(db, sc.id, nodes, links)
@@ -48,14 +49,35 @@ def build_demo(db: Session, name: str = "Demo: 4x4 grid", seed: int = 42) -> str
     by_node = {n["id"]: n for n in nodes}
     for k, nid in enumerate(perimeter):
         coords = by_node[nid]["geom"]["coordinates"]
-        db.add(Zone(
+        Ph = float(base_prod[k] * perturb[k] * 1.3)   # perturbed home productions
+        Aw = float(base_attr[k] * perturb_a[k])        # perturbed work attractions
+        z = Zone(
             scenario_id=sc.id, name=f"Z{k:02d}",
             centroid={"type": "Point", "coordinates": coords},
-            connector_node_id=nid,
-            production=float(base_prod[k] * perturb[k] * 1.3),
-            attraction=float(base_attr[k] * perturb_a[k]),
-        ))
+            connector_node_id=nid, production=Ph, attraction=Aw,
+        )
+        db.add(z)
+        db.flush()
+        db.add(Connector(scenario_id=sc.id, zone_id=z.id, node_id=nid, direction="both"))
+        # Per-activity demand so the multi-layer 4-step (HW/WH/HO/OH) has inputs.
+        db.add(ZoneDemand(scenario_id=sc.id, zone_id=z.id, activity="H", production=Ph, attraction=0.3 * Aw))
+        db.add(ZoneDemand(scenario_id=sc.id, zone_id=z.id, activity="W", production=0.3 * Ph, attraction=Aw))
+        db.add(ZoneDemand(scenario_id=sc.id, zone_id=z.id, activity="O", production=0.4 * Ph, attraction=0.4 * Aw))
     db.flush()
+
+    # A little PuT data (two stops + one bus line) so the network/lists aren't empty.
+    s_ids = []
+    for k in (perimeter[0], perimeter[3]):
+        s = Stop(scenario_id=sc.id, name=f"Stop {len(s_ids)+1}",
+                 geom={"type": "Point", "coordinates": by_node[k]["geom"]["coordinates"]}, node_id=k)
+        db.add(s)
+        db.flush()
+        s_ids.append(s.id)
+    line = Line(scenario_id=sc.id, name="Bus 1", tsys="Bus", headway_min=10.0)
+    db.add(line)
+    db.flush()
+    for i, sid in enumerate(s_ids):
+        db.add(LineRouteStop(line_id=line.id, stop_id=sid, idx=i))
 
     # Ground truth -> observed counts.
     P_t, A_t = generation.balance(base_prod, base_attr)

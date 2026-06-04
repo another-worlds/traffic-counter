@@ -2,16 +2,25 @@
 
 A single map with a step sidebar mirroring the macroscopic pipeline:
 scenario → network → zones → georeferenced counters → 4-step → calibration.
-The map widget is a stable module-level object mutated imperatively by the action
-callbacks; UI state lives in solara.reactive values.
+
+The map is created *inside* the Page component and its layers are driven declaratively
+from reactive state (Solara closes any widget created at import time, so a module-level
+Map would be dead on arrival). Layer data lives in reactive FeatureCollections; the click
+handler is attached to the rendered map widget via use_effect.
 """
 from __future__ import annotations
 
 import ipyleaflet as L
+import ipywidgets as W
 import solara
 
 import api_client as api
 import layers
+
+try:  # Solara re-exports reacton's get_widget; fall back just in case.
+    from solara import get_widget
+except Exception:  # pragma: no cover
+    from reacton.core import get_widget
 
 # --- reactive UI state ----------------------------------------------------- #
 scenario_id = solara.reactive("")
@@ -25,82 +34,40 @@ counter_seq = solara.reactive(0)
 source_labels = solara.reactive([])
 selected_source_label = solara.reactive("")
 
+# Map view + layer data (reactive → re-renders the map declaratively).
+center = solara.reactive((41.31, 69.27))
+zoom = solara.reactive(12)
+network_fc = solara.reactive(None)
+zones_fc = solara.reactive(None)
+counters_fc = solara.reactive(None)
+flows_fc = solara.reactive(None)
+
 _source_by_label: dict = {}  # label -> {"video_id", "line_id"}
 
-# --- stable map + imperative layer registry -------------------------------- #
-_map = L.Map(center=(41.31, 69.27), zoom=13, scroll_wheel_zoom=True)
-_map.layout.height = "96vh"
-_layers: dict = {}
 
-
-def _set_layer(key: str, layer) -> None:
-    old = _layers.get(key)
-    if old is not None:
-        try:
-            _map.remove_layer(old)
-        except Exception:
-            pass
-    _layers[key] = layer
-    if layer is not None:
-        _map.add_layer(layer)
-
-
-def _fit(fc: dict) -> None:
+# --- helpers --------------------------------------------------------------- #
+def _recenter(fc: dict) -> None:
     b = layers.bounds_of(fc)
-    if b:
-        _map.fit_bounds(b)
+    if not b:
+        return
+    (s, w), (n, e) = b
+    center.value = ((s + n) / 2.0, (w + e) / 2.0)
+    zoom.value = 14
 
 
-def refresh_network_layers() -> None:
+def _reload_overlays(recenter: bool = True) -> None:
     sid = scenario_id.value
     if not sid:
         return
     net = api.get_network(sid)
-    _set_layer("network", layers.network_layer(net))
-    _set_layer("zones", layers.zone_layer(api.get_zones(sid)))
-    _set_layer("counters", layers.counter_layer(api.get_counters(sid)))
-    _set_layer("flows", None)
-    _fit(net)
+    network_fc.value = net
+    zones_fc.value = api.get_zones(sid)
+    counters_fc.value = api.get_counters(sid)
+    flows_fc.value = None
+    if recenter:
+        _recenter(net)
 
 
-def refresh_flows() -> None:
-    sid = scenario_id.value
-    if not sid:
-        return
-    _set_layer("flows", layers.linkflow_layer(api.link_flows(sid)))
-    _set_layer("counters", layers.counter_layer(api.get_counters(sid)))
-
-
-def _on_map_click(**kwargs) -> None:
-    if kwargs.get("type") != "click" or not place_mode.value:
-        return
-    coords = kwargs.get("coordinates") or (None, None)
-    lat, lon = coords
-    if lat is None:
-        return
-    src = _source_by_label.get(selected_source_label.value, {})
-    counter_seq.value += 1
-    try:
-        res = api.create_counter(
-            scenario_id.value, name=f"C{counter_seq.value:02d}", lat=lat, lon=lon,
-            source_video_id=src.get("video_id"), source_line_id=src.get("line_id"),
-            link_direction=direction.value,
-        )
-        if src.get("video_id"):
-            try:
-                api.pull_observations(scenario_id.value, res["id"])
-            except Exception as e:  # noqa: BLE001
-                status.value = f"Counter placed; observation pull failed: {e}"
-        _set_layer("counters", layers.counter_layer(api.get_counters(scenario_id.value)))
-        status.value = f"Placed counter at {lat:.4f}, {lon:.4f}."
-    except Exception as e:  # noqa: BLE001
-        status.value = f"Could not place counter: {e}"
-
-
-_map.on_interaction(_on_map_click)
-
-
-# --- actions --------------------------------------------------------------- #
 def _show_metrics(title: str, m: dict) -> None:
     metrics_md.value = (
         f"**{title}**\n\n"
@@ -110,11 +77,12 @@ def _show_metrics(title: str, m: dict) -> None:
     )
 
 
+# --- actions (set reactive state; the map repaints itself) ----------------- #
 def on_load_demo() -> None:
     try:
         sc = api.create_demo()
         scenario_id.value = sc["id"]
-        refresh_network_layers()
+        _reload_overlays()
         status.value = (f"Demo loaded: {sc['n_nodes']} nodes, {sc['n_links']} links, "
                         f"{sc['n_zones']} zones, {sc['n_counters']} counters. Now run the 4-step model.")
     except Exception as e:  # noqa: BLE001
@@ -127,7 +95,7 @@ def on_create_sample() -> None:
         scenario_id.value = sc["id"]
         api.load_sample(sc["id"])
         api.auto_zones(sc["id"], n=8)
-        refresh_network_layers()
+        _reload_overlays()
         status.value = "Scenario created with sample network + 8 zones. Add counters or run the model."
     except Exception as e:  # noqa: BLE001
         status.value = f"Create failed: {e}"
@@ -136,7 +104,7 @@ def on_create_sample() -> None:
 def on_auto_zones() -> None:
     try:
         api.auto_zones(scenario_id.value, n=8)
-        refresh_network_layers()
+        zones_fc.value = api.get_zones(scenario_id.value)
         status.value = "Auto-generated 8 zones."
     except Exception as e:  # noqa: BLE001
         status.value = f"Auto-zones failed: {e}"
@@ -145,15 +113,15 @@ def on_auto_zones() -> None:
 def on_load_sources() -> None:
     try:
         data = api.counter_sources()
-        labels, _source_by_label_local = [], {}
+        labels, mapping = [], {}
         for proj in data.get("projects", []):
             for v in proj.get("videos", []):
                 for ln in v.get("lines", []):
                     lbl = f"{proj.get('name')} / {v.get('filename')} / {ln.get('name')}"
                     labels.append(lbl)
-                    _source_by_label_local[lbl] = {"video_id": v["video_id"], "line_id": ln["line_id"]}
+                    mapping[lbl] = {"video_id": v["video_id"], "line_id": ln["line_id"]}
         _source_by_label.clear()
-        _source_by_label.update(_source_by_label_local)
+        _source_by_label.update(mapping)
         source_labels.value = labels
         if labels:
             selected_source_label.value = labels[0]
@@ -165,10 +133,35 @@ def on_load_sources() -> None:
         status.value = f"Could not load sources: {e}"
 
 
-def on_run() -> None:
+def _place_counter(lat: float, lon: float) -> None:
+    sid = scenario_id.value
+    if not sid:
+        status.value = "Create or load a scenario first."
+        return
+    src = _source_by_label.get(selected_source_label.value, {})
+    counter_seq.value += 1
     try:
-        m = api.run_4step(scenario_id.value, beta=beta.value)
-        refresh_flows()
+        res = api.create_counter(
+            sid, name=f"C{counter_seq.value:02d}", lat=lat, lon=lon,
+            source_video_id=src.get("video_id"), source_line_id=src.get("line_id"),
+            link_direction=direction.value)
+        if src.get("video_id"):
+            try:
+                api.pull_observations(sid, res["id"])
+            except Exception as e:  # noqa: BLE001
+                status.value = f"Counter placed; observation pull failed: {e}"
+        counters_fc.value = api.get_counters(sid)
+        status.value = f"Placed counter at {lat:.4f}, {lon:.4f}."
+    except Exception as e:  # noqa: BLE001
+        status.value = f"Could not place counter: {e}"
+
+
+def on_run() -> None:
+    sid = scenario_id.value
+    try:
+        m = api.run_4step(sid, beta=beta.value)
+        flows_fc.value = api.link_flows(sid)
+        counters_fc.value = api.get_counters(sid)
         _show_metrics("4-step (uncalibrated)", m)
         status.value = "4-step model run. Links coloured by GEH at counters — calibrate to improve the fit."
     except Exception as e:  # noqa: BLE001
@@ -176,9 +169,10 @@ def on_run() -> None:
 
 
 def on_calibrate() -> None:
+    sid = scenario_id.value
     try:
-        res = api.calibrate(scenario_id.value)
-        refresh_flows()
+        res = api.calibrate(sid)
+        flows_fc.value = api.link_flows(sid)
         _show_metrics("Calibrated (ODME)", res["after"])
         b, a = res["before"], res["after"]
         status.value = (f"Calibrated: mean GEH {b['mean_geh']:.2f} → {a['mean_geh']:.2f}, "
@@ -191,6 +185,18 @@ def on_calibrate() -> None:
 @solara.component
 def Page():
     solara.Title("MacroModel")
+
+    # Build the layer element list from reactive data (rebuilt on every change).
+    overlays = [layers.tile_layer_element()]
+    if network_fc.value:
+        overlays += layers.network_elements(network_fc.value)
+    if flows_fc.value:
+        overlays += layers.flows_elements(flows_fc.value)
+    if zones_fc.value:
+        overlays += layers.zone_elements(zones_fc.value)
+    if counters_fc.value:
+        overlays += layers.counter_elements(counters_fc.value)
+
     with solara.Sidebar():
         solara.Markdown("## 🚦 MacroModel\n*counts → georeference → 4-step → calibrate*")
         with solara.Card("1 · Scenario"):
@@ -217,4 +223,21 @@ def Page():
                 solara.Markdown(metrics_md.value)
         solara.Markdown("Legend — GEH: 🟩 &lt;5 · 🟧 5–10 · 🟥 &gt;10")
 
-    solara.display(_map)
+    with solara.Column(style={"height": "92vh"}):
+        map_el = L.Map.element(
+            center=center.value, zoom=zoom.value, scroll_wheel_zoom=True,
+            layout=W.Layout(height="100%", width="100%"), layers=overlays)
+
+    def _attach_click():
+        widget = get_widget(map_el)
+
+        def handler(**kw):
+            if kw.get("type") == "click" and place_mode.value:
+                coords = kw.get("coordinates") or (None, None)
+                if coords[0] is not None:
+                    _place_counter(coords[0], coords[1])
+
+        widget.on_interaction(handler)
+        return lambda: widget.on_interaction(handler, remove=True)
+
+    solara.use_effect(_attach_click, [])

@@ -1,11 +1,18 @@
-"""Build ipyleaflet layers from the macromodel-api GeoJSON payloads."""
+"""Build ipyleaflet *elements* from the macromodel-api GeoJSON payloads.
+
+Solara requires widgets to be created at render time (not import time) and dynamic
+layers to be passed declaratively to ``Map.element(layers=[...])`` — an element has no
+``add_layer``. So every builder returns a list of element objects created via the
+``.element(...)`` constructor Solara adds to each widget class.
+"""
 from __future__ import annotations
 
 import ipyleaflet as L
-import ipywidgets as W
 
 GREEN, AMBER, RED = "#2ca25f", "#f4a300", "#d7301f"
 GRAY, BLUE, COUNTER = "#8a8a8a", "#3182bd", "#e24b4a"
+
+OSM_TILES = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
 
 
 def color_for_geh(g):
@@ -18,13 +25,17 @@ def color_for_geh(g):
     return RED
 
 
-def network_layer(fc: dict) -> L.GeoJSON:
+def tile_layer_element():
+    return L.TileLayer.element(url=OSM_TILES, attribution="© OpenStreetMap", base=True)
+
+
+def network_elements(fc: dict) -> list:
     links = {"type": "FeatureCollection",
              "features": [f for f in fc["features"] if f["properties"].get("kind") == "link"]}
-    return L.GeoJSON(data=links, style={"color": GRAY, "weight": 2, "opacity": 0.55}, name="network")
+    return [L.GeoJSON.element(data=links, style={"color": GRAY, "weight": 2, "opacity": 0.55})]
 
 
-def linkflow_layer(fc: dict) -> L.GeoJSON:
+def flows_elements(fc: dict) -> list:
     feats = [f for f in fc["features"] if f.get("geometry", {}).get("type") == "LineString"]
     data = {"type": "FeatureCollection", "features": feats}
 
@@ -37,36 +48,28 @@ def linkflow_layer(fc: dict) -> L.GeoJSON:
             return {"color": color_for_geh(g), "weight": max(weight, 4), "opacity": 0.95}
         return {"color": "#4575b4", "weight": weight, "opacity": 0.5}
 
-    return L.GeoJSON(data=data, style_callback=style_cb, name="flows")
+    return [L.GeoJSON.element(data=data, style_callback=style_cb)]
 
 
-def zone_layer(fc: dict) -> L.LayerGroup:
-    markers = []
+def zone_elements(fc: dict) -> list:
+    out = []
     for f in fc.get("features", []):
         geom = f.get("geometry")
         if not geom:
             continue
         lon, lat = geom["coordinates"]
-        p = f["properties"]
-        markers.append(L.CircleMarker(
-            location=(lat, lon), radius=9, color=BLUE, fill_color=BLUE, fill_opacity=0.45, weight=1,
-            popup=W.HTML(f"<b>{p.get('name')}</b><br>P={p.get('production'):.0f} A={p.get('attraction'):.0f}"),
-        ))
-    return L.LayerGroup(layers=markers, name="zones")
+        out.append(L.CircleMarker.element(
+            location=(lat, lon), radius=9, color=BLUE, fill_color=BLUE, fill_opacity=0.45, weight=1))
+    return out
 
 
-def counter_layer(fc: dict) -> L.LayerGroup:
-    markers = []
+def counter_elements(fc: dict) -> list:
+    out = []
     for f in fc.get("features", []):
         lon, lat = f["geometry"]["coordinates"]
-        p = f["properties"]
-        obs = p.get("observed_vph")
-        label = f"<b>{p.get('name')}</b><br>obs={obs:.0f} vph" if obs else f"<b>{p.get('name')}</b><br>(no obs)"
-        markers.append(L.CircleMarker(
-            location=(lat, lon), radius=6, color=COUNTER, fill_color=COUNTER, fill_opacity=0.9, weight=2,
-            popup=W.HTML(label),
-        ))
-    return L.LayerGroup(layers=markers, name="counters")
+        out.append(L.CircleMarker.element(
+            location=(lat, lon), radius=6, color=COUNTER, fill_color=COUNTER, fill_opacity=0.9, weight=2))
+    return out
 
 
 def bounds_of(fc: dict):

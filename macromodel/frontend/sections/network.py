@@ -294,8 +294,25 @@ def _update_link_preview(lat, lon):
 def _cancel_pending():
     """Abort an in-progress link/connector chain (Esc / Cancel button)."""
     state.pending_link_from.value = None
+    state.split_arm.value = None
     _clear_link_preview()
     state.status.value = "Drawing stopped."
+
+
+def _arm_split(link_id):
+    state.split_arm.value = link_id
+    state.status.value = "Split: click the point on the link for the new node (Esc to cancel)."
+
+
+def _do_split(lat, lon):
+    lid = state.split_arm.value
+    state.split_arm.value = None
+    try:
+        api.split_link(state.scenario_id.value, lid, lat, lon)
+        actions.refresh_map()
+        state.status.value = "Link split."
+    except Exception as e:  # noqa: BLE001
+        state.status.value = f"Split failed: {e}"
 
 
 # --- hover highlight (Selection mode) ------------------------------------- #
@@ -500,6 +517,11 @@ def on_interaction(**kw):
         m._coords.value = (f"<div style='background:rgba(20,26,36,.82);color:#cfe0ff;"
                            f"padding:2px 7px;border-radius:6px;font-size:11px;"
                            f"font-family:ui-monospace,monospace'>{lat:.5f}, {lon:.5f}</div>")
+
+    if state.split_arm.value is not None:            # armed: the next click is the split point
+        if t == "click":
+            _do_split(lat, lon)
+        return
 
     if t == "contextmenu":
         _select(_pick(lat, lon))
@@ -808,6 +830,7 @@ def _set_mode(v):
     if v == "Creation" and state.active_tool.value == "Select":
         state.active_tool.value = "Node"
     state.pending_link_from.value = None
+    state.split_arm.value = None
     _clear_link_preview()
     _clear_hover()
     if v != "Creation":
@@ -819,6 +842,7 @@ def _set_tool(t):
     """Switch the active creation tool, abandoning any in-progress draw."""
     state.active_tool.value = t
     state.pending_link_from.value = None
+    state.split_arm.value = None
     _clear_link_preview()
     _zone.update(centroid=None, verts=[], line=None)
 
@@ -986,7 +1010,7 @@ def Toolbar():
             DetectorPanel()
         if state.active_tool.value == "Zone":
             solara.Markdown("*Click a centroid, then boundary vertices; click the first to close.*")
-        if state.pending_link_from.value is not None:
+        if state.pending_link_from.value is not None or state.split_arm.value is not None:
             solara.Button("Cancel (Esc)", text=True, on_click=_cancel_pending)
     else:
         solara.Markdown("*Drag a box to multi-select · click selects · right-click inspects*")
@@ -1108,6 +1132,13 @@ def QuickView():
     if obj == "nodes":
         solara.Markdown("*Drag the pin — commits on release (or use the button).*")
         solara.Button("Commit move", on_click=_commit_move)
+    if obj == "links":
+        if state.split_arm.value == sel["id"]:
+            solara.Markdown("*Click the point on the link to split.*")
+            solara.Button("Cancel split", text=True, on_click=_cancel_pending)
+        else:
+            solara.Markdown("*Split: click below, then click the point on the link.*")
+            solara.Button("Split link", on_click=lambda: _arm_split(sel["id"]))
 
 
 @solara.component

@@ -133,6 +133,63 @@ def move_node(scenario_id: str, body: dict = Body(...), db: Session = Depends(ge
     return {"ok": True, "links_updated": len(links)}
 
 
+@router.post("/scenarios/{scenario_id}/network/split-link")
+def split_link(scenario_id: str, body: dict = Body(...), db: Session = Depends(get_db)):
+    """Insert a node on a link at the clicked point; replace the link (and its reverse
+    twin, if any) with two attribute-inheriting halves. Re-snaps affected detectors."""
+    get_scenario_or_404(db, scenario_id)
+    from shapely.geometry import LineString, Point
+
+    link = db.query(Link).filter(Link.id == body["link_id"], Link.scenario_id == scenario_id).first()
+    if not link or not link.geom or len(link.geom.get("coordinates", [])) < 2:
+        raise HTTPException(404, "link not found")
+    line = LineString(link.geom["coordinates"])
+    proj = line.interpolate(line.project(Point(float(body["lon"]), float(body["lat"]))))
+    sx, sy = float(proj.x), float(proj.y)
+    a, b = link.geom["coordinates"][0], link.geom["coordinates"][-1]
+    if _haversine_m((sx, sy), a) < 1.0 or _haversine_m((sx, sy), b) < 1.0:
+        raise HTTPException(400, "split point is at an endpoint")
+
+    mid = Node(scenario_id=scenario_id, name="node", geom={"type": "Point", "coordinates": [sx, sy]})
+    db.add(mid)
+    db.flush()
+
+    all_links = db.query(Link).filter(Link.scenario_id == scenario_id).all()
+    twin = next((l for l in all_links if l.from_node_id == link.to_node_id
+                 and l.to_node_id == link.from_node_id), None)
+    xy = {n.id: n.geom["coordinates"]
+          for n in db.query(Node).filter(Node.scenario_id == scenario_id) if n.geom}
+    xy[mid.id] = [sx, sy]
+
+    def clone(src, frm_id, to_id):
+        a2, b2 = xy[frm_id], xy[to_id]
+        return Link(scenario_id=scenario_id, name=src.name, from_node_id=frm_id, to_node_id=to_id,
+                    geom={"type": "LineString", "coordinates": [a2, b2]}, length_m=_haversine_m(a2, b2),
+                    lanes=src.lanes, free_flow_speed_ms=src.free_flow_speed_ms, jam_density=src.jam_density,
+                    capacity_vph=src.capacity_vph, oneway=src.oneway, link_type_id=src.link_type_id,
+                    v0_kmh=src.v0_kmh, allowed_modes=src.allowed_modes)
+
+    halves = {link.id: [clone(link, link.from_node_id, mid.id), clone(link, mid.id, link.to_node_id)]}
+    if twin is not None:
+        halves[twin.id] = [clone(twin, twin.from_node_id, mid.id), clone(twin, mid.id, twin.to_node_id)]
+    for hs in halves.values():
+        db.add_all(hs)
+    db.flush()
+
+    dets = db.query(Counter).filter(Counter.scenario_id == scenario_id,
+                                    Counter.snapped_link_id.in_(list(halves))).all()
+    for d in dets:
+        cand = halves.get(d.snapped_link_id) or []
+        if d.geom and cand:
+            p = Point(d.geom["coordinates"][0], d.geom["coordinates"][1])
+            d.snapped_link_id = min(cand, key=lambda L: LineString(L.geom["coordinates"]).distance(p)).id
+
+    for old_id in list(halves):
+        db.query(Link).filter(Link.id == old_id).delete()
+    db.commit()
+    return {"node_id": mid.id, "new_link_ids": [l.id for hs in halves.values() for l in hs]}
+
+
 @router.post("/scenarios/{scenario_id}/network/insert-stop")
 def insert_stop(scenario_id: str, body: dict = Body(...), db: Session = Depends(get_db)):
     get_scenario_or_404(db, scenario_id)

@@ -123,6 +123,12 @@ def move_node(sid, node_id, lat, lon):
                          json={"node_id": node_id, "lat": lat, "lon": lon}))
 
 
+def split_link(sid, link_id, lat, lon):
+    with _c() as c:
+        return _j(c.post(f"/scenarios/{sid}/network/split-link",
+                         json={"link_id": link_id, "lat": lat, "lon": lon}))
+
+
 def insert_stop(sid, lat, lon, name="stop"):
     with _c() as c:
         return _j(c.post(f"/scenarios/{sid}/network/insert-stop", json={"lat": lat, "lon": lon, "name": name}))

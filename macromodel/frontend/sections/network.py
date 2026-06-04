@@ -866,6 +866,82 @@ def _select_matching():
     state.status.value = f"Selected {len(many)} {obj} matching the filter."
 
 
+# --- network validation (client-side over /map) --------------------------- #
+def _check_network():
+    md = state.map_data.value or {}
+    nodes = md.get("nodes", {}).get("features", [])
+    links = md.get("links", {}).get("features", [])
+    zones = md.get("zones", {}).get("features", [])
+    conns = md.get("connectors", {}).get("features", [])
+    node_xy = {f["properties"]["id"]: f["geometry"]["coordinates"] for f in nodes if f.get("geometry")}
+    issues, used = [], set()
+
+    for f in links:                                  # links with missing/invalid endpoints
+        p = f["properties"]
+        frm, to = p.get("from_node_id"), p.get("to_node_id")
+        if not frm or not to or frm not in node_xy or to not in node_xy:
+            issues.append({"kind": "link", "id": p["id"], "obj": "links",
+                           "label": f"⚠ Link {p['id'][:6]}: bad endpoint"})
+        used.update(x for x in (frm, to) if x)
+
+    for f in nodes:                                  # orphan nodes (no link)
+        nid = f["properties"]["id"]
+        if nid not in used:
+            issues.append({"kind": "node", "id": nid, "obj": "nodes",
+                           "label": f"○ Node {nid[:6]}: no links"})
+
+    conn_zones = {c["properties"].get("zone_id") for c in conns}
+    for f in zones:                                  # zones with no connector
+        p = f["properties"]
+        if p["id"] not in conn_zones and p.get("connector_node_id") is None:
+            issues.append({"kind": "zone", "id": p["id"], "obj": "zones",
+                           "label": f"⌖ Zone {p['id'][:6]}: no connector"})
+
+    seen = {}                                        # coincident nodes
+    for nid, (x, y) in node_xy.items():
+        key = (round(x, 6), round(y, 6))
+        if key in seen:
+            issues.append({"kind": "node", "id": nid, "obj": "nodes",
+                           "label": f"⨯ Node {nid[:6]}: coincides with {seen[key][:6]}"})
+        else:
+            seen[key] = nid
+
+    parent = {nid: nid for nid in node_xy}           # disconnected components (union-find)
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for f in links:
+        p = f["properties"]
+        frm, to = p.get("from_node_id"), p.get("to_node_id")
+        if frm in parent and to in parent:
+            parent[find(frm)] = find(to)
+    comps = {}
+    for nid in parent:
+        comps.setdefault(find(nid), []).append(nid)
+    for comp in sorted(comps.values(), key=len, reverse=True)[1:]:
+        if len(comp) >= 2:                           # lone nodes already reported as orphans
+            issues.append({"kind": "node", "id": comp[0], "obj": "nodes",
+                           "label": f"⛓ Island of {len(comp)} node(s)"})
+
+    state.validation.value = issues
+    state.status.value = (f"Network check: {len(issues)} issue(s)." if issues
+                          else "Network check: no issues found.")
+
+
+def _focus_issue(it):
+    md = state.map_data.value or {}
+    feat = next((f for f in md.get(it["obj"], {}).get("features", [])
+                 if f["properties"]["id"] == it["id"]), None)
+    if feat is None:
+        return
+    _select({"obj": it["obj"], "id": it["id"], "props": feat["properties"]})
+    _zoom_to_selection()
+
+
 @solara.component
 def DetectorPanel():
     """Detector tool: assign a counter video's lines onto links (drag-to-link, Visum-style)."""
@@ -1063,6 +1139,21 @@ def DisplayPanel(sid):
 
 
 @solara.component
+def ValidationPanel():
+    solara.Markdown("**Validation**")
+    solara.Button("Check network", on_click=_check_network, block=True)
+    issues = state.validation.value
+    if issues is None:
+        return
+    if not issues:
+        solara.Markdown("*No issues found.*")
+        return
+    solara.Markdown(f"*{len(issues)} issue(s) — click to locate:*")
+    for it in issues[:60]:
+        solara.Button(it["label"], text=True, block=True, on_click=lambda it=it: _focus_issue(it))
+
+
+@solara.component
 def MultiView(many):
     by_type = {}
     for s in many:
@@ -1180,6 +1271,7 @@ def Section():
         with solara.Column(classes=["mm-rail"], style={"overflow-y": "auto"}):
             Toolbar()
             DisplayPanel(sid)
+            ValidationPanel()
         with solara.Column(style={"flex": "1"}):
             solara.display(m)
         with solara.Column(classes=["mm-panel"], style={"min-width": "250px", "max-width": "300px",

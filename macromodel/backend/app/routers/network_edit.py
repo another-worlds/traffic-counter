@@ -210,7 +210,8 @@ def map_layers(scenario_id: str, db: Session = Depends(get_db)):
         z, n = zone_xy.get(c.zone_id), node_xy.get(c.node_id)
         if z and n:
             connector_feats.append(feat({"type": "LineString", "coordinates": [z, n]},
-                                        {"id": c.id, "kind": "connector"}))
+                                        {"id": c.id, "kind": "connector", "zone_id": c.zone_id,
+                                         "node_id": c.node_id, "direction": c.direction}))
     line_feats = []
     for ln in lines:
         seq = (db.query(LineRouteStop).filter(LineRouteStop.line_id == ln.id)
@@ -221,16 +222,24 @@ def map_layers(scenario_id: str, db: Session = Depends(get_db)):
                                    {"id": ln.id, "kind": "line", "name": ln.name, "color": ln.color}))
 
     return {
-        "nodes": fc([feat(n.geom, {"id": n.id, "kind": "node", "name": n.name}) for n in nodes if n.geom]),
+        "nodes": fc([feat(n.geom, {"id": n.id, "kind": "node", "name": n.name,
+                                   "node_type_id": n.node_type_id}) for n in nodes if n.geom]),
         "links": fc([feat(l.geom, {"id": l.id, "kind": "link", "name": l.name,
-                                   "link_type_id": l.link_type_id}) for l in links if l.geom]),
+                                   "link_type_id": l.link_type_id,
+                                   "from_node_id": l.from_node_id, "to_node_id": l.to_node_id,
+                                   "lanes": l.lanes, "free_flow_speed_ms": l.free_flow_speed_ms,
+                                   "v0_kmh": l.v0_kmh, "capacity_vph": l.capacity_vph,
+                                   "oneway": l.oneway}) for l in links if l.geom]),
         "zones": fc([feat(z.geom or z.centroid, {"id": z.id, "kind": "zone", "name": z.name,
+                                                 "zone_type_id": z.zone_type_id,
+                                                 "connector_node_id": z.connector_node_id,
                                                  "production": z.production, "attraction": z.attraction,
                                                  "population": z.population, "workplaces": z.workplaces,
                                                  "centroid": (z.centroid or {}).get("coordinates")})
                      for z in zones if (z.centroid or z.geom)]),
         "connectors": fc(connector_feats),
-        "stops": fc([feat(s.geom, {"id": s.id, "kind": "stop", "name": s.name}) for s in stops if s.geom]),
+        "stops": fc([feat(s.geom, {"id": s.id, "kind": "stop", "name": s.name,
+                                   "node_id": s.node_id}) for s in stops if s.geom]),
         "lines": fc(line_feats),
         "detectors": fc([feat(d.geom, {"id": d.id, "kind": "detector", "name": d.name,
                                        "observed_vph": d.observed_vph, "pcu_vph": d.pcu_vph,

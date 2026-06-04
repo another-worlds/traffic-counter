@@ -33,7 +33,7 @@ _MAP = {"m": None}                                   # the stable map widget
 _rubber = {"start": None, "rect": None}              # rubber-band box (Selection drag)
 _zone = {"centroid": None, "verts": [], "line": None}  # zone polygon being drawn
 _assign = {"link": None, "hl": []}                   # detector line→link drag: candidate + highlight layers
-_draft = {"line": None, "from_ring": None, "snap": None}  # live link-drawing preview layers
+_draft = {"line": None, "from_ring": None, "snap": None, "auto": []}  # link-draw preview + auto-node ids
 _hover = {"layer": None, "key": None}                # hover-highlight under the cursor (Selection)
 
 FILTER_ATTRS = {"links": ["sim_vph", "vc", "lanes", "link_type_id"],
@@ -364,6 +364,7 @@ def _drop_grabbed(lat, lon):
         res = api.insert_detector(sid, lat, lon, name=gl["name"], link_id=cand["id"],
                                   snap=state.snap_mode.value, source_video_id=gl["video_id"],
                                   source_line_id=gl["line_id"])
+        _push_undo([("detectors", res.get("id"))])
         try:
             api.pull_observations(sid, res.get("id"))
         except Exception:  # noqa: BLE001 — counts may not be ready; volume stays blank
@@ -465,7 +466,8 @@ def _finalize_zone():
     m, c, verts = _MAP["m"], _zone["centroid"], _zone["verts"]
     poly = [[lon, lat] for (lat, lon) in verts]
     try:
-        api.insert_zone(state.scenario_id.value, c[0], c[1], name="zone", polygon=poly)
+        r = api.insert_zone(state.scenario_id.value, c[0], c[1], name="zone", polygon=poly)
+        _push_undo([("zones", r.get("id"))])
         state.status.value = f"Zone created ({len(verts)} vertices)."
     except Exception as ex:  # noqa: BLE001
         state.status.value = f"Zone failed: {ex}"
@@ -590,9 +592,13 @@ def on_interaction(**kw):
         return
     try:
         if tool == "Node":
-            api.insert_node(sid, lat, lon); actions.refresh_map()
+            r = api.insert_node(sid, lat, lon)
+            _push_undo([("nodes", r["id"])])
+            actions.refresh_map()
         elif tool == "Stop":
-            api.insert_stop(sid, lat, lon); actions.refresh_map()
+            r = api.insert_stop(sid, lat, lon)
+            _push_undo([("stops", r["id"])])
+            actions.refresh_map()
         elif tool == "Detector":
             if state.grabbed_line.value is not None:
                 _drop_grabbed(lat, lon)
@@ -606,14 +612,21 @@ def on_interaction(**kw):
                 created = True
             if state.pending_link_from.value is None:
                 state.pending_link_from.value = nid
+                _draft["auto"] = [nid] if created else []
                 if created:
                     actions.refresh_map()                    # show the just-created start node
                 state.status.value = "Link: click the TO node (empty space makes one). Esc to stop."
             elif nid == state.pending_link_from.value:
                 state.status.value = "Link: pick a different TO node."
             else:
-                api.insert_link(sid, state.pending_link_from.value, nid,
-                                state.link_type_id.value or None, oneway=not state.link_twoway.value)
+                res = api.insert_link(sid, state.pending_link_from.value, nid,
+                                      state.link_type_id.value or None, oneway=not state.link_twoway.value)
+                auto = list(_draft.get("auto") or [])
+                if created:
+                    auto.append(nid)
+                _push_undo([("links", lid) for lid in res.get("ids", [])]
+                           + [("nodes", a) for a in auto])
+                _draft["auto"] = []
                 _clear_link_preview()
                 state.pending_link_from.value = nid if state.link_chain.value else None
                 actions.refresh_map()
@@ -628,8 +641,9 @@ def on_interaction(**kw):
                 else:
                     state.status.value = "Connector: first click a zone."
             else:
-                api.create_object(sid, "connectors", {"zone_id": state.pending_link_from.value,
-                                                       "node_id": _nearest_node(lat, lon), "direction": "both"})
+                r = api.create_object(sid, "connectors", {"zone_id": state.pending_link_from.value,
+                                                          "node_id": _nearest_node(lat, lon), "direction": "both"})
+                _push_undo([("connectors", r.get("id"))])
                 state.pending_link_from.value = None
                 actions.refresh_map(); state.status.value = "Connector created."
     except Exception as e:  # noqa: BLE001
@@ -714,6 +728,32 @@ def _bulk_delete_all():
         state.status.value = f"Deleted {len(many)} elements."
     except Exception as e:  # noqa: BLE001
         state.status.value = f"Bulk delete failed: {e}"
+
+
+# --- undo of last creation (creates only) --------------------------------- #
+_UNDO_ORDER = {"links": 0, "detectors": 1, "stops": 2, "connectors": 3, "zones": 4, "nodes": 5}
+
+
+def _push_undo(items):
+    items = [(o, i) for (o, i) in items if i]
+    if items:
+        state.undo_stack.value = (state.undo_stack.value + [items])[-30:]
+
+
+def _undo():
+    stack = state.undo_stack.value
+    if not stack:
+        state.status.value = "Nothing to undo."
+        return
+    last = stack[-1]
+    state.undo_stack.value = stack[:-1]
+    try:
+        for obj, rid in sorted(last, key=lambda t: _UNDO_ORDER.get(t[0], 9)):
+            api.delete_object(obj, rid)
+        actions.refresh_map()
+        state.status.value = "Undid last creation."
+    except Exception as e:  # noqa: BLE001
+        state.status.value = f"Undo failed: {e}"
 
 
 # --- overlays (live widgets) ---------------------------------------------- #
@@ -863,7 +903,9 @@ _KEY_TOOLS = {"n": "Node", "l": "Link", "z": "Zone", "c": "Connector", "d": "Det
 def _on_key(event):
     """Map keyboard shortcuts (only fire when the map itself has focus)."""
     key = (event.get("key") or "").lower()
-    if key == "escape":
+    if key == "z" and (event.get("ctrlKey") or event.get("metaKey")):
+        _undo()
+    elif key == "escape":
         _cancel_pending()
         state.grabbed_line.value = None
         _clear_assign_highlight()
@@ -1107,7 +1149,10 @@ def Toolbar():
     solara.Markdown("**Network**")
     solara.ToggleButtonsSingle(value=state.edit_mode.value, values=["Selection", "Creation"],
                                on_value=_set_mode)
-    solara.Markdown("*Keys (map focused): 1/2 mode · n l z c d p tool · Esc · Del*")
+    solara.Markdown("*Keys (map focused): 1/2 mode · n l z c d p tool · Esc · Del · Ctrl+Z*")
+    if state.undo_stack.value:
+        solara.Button(f"Undo last create ({len(state.undo_stack.value)})", text=True,
+                      icon_name="mdi-undo", on_click=_undo)
     if state.edit_mode.value == "Creation":
         solara.Markdown("*Insert element*")
         for t in TOOLS[1:]:

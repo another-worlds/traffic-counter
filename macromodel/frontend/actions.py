@@ -66,6 +66,8 @@ def recenter() -> None:
 def select_scenario(sid: str) -> None:
     state.scenario_id.value = sid
     state.selected.value = None
+    state.undo_stack.value = []          # ids belong to the previous scenario
+    state.validation.value = None
     refresh_map()
     recenter()
 

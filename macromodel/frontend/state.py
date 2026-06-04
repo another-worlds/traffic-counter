@@ -16,6 +16,7 @@ map_zoom = solara.reactive(14)
 map_data = solara.reactive(None)         # /map response: {nodes, links, zones, connectors, stops, lines, detectors}
 data_version = solara.reactive(0)        # bumps on each map refresh — cheap memo key for FK dropdowns
 validation = solara.reactive(None)       # list of network-check issues (or None = not run yet)
+undo_stack = solara.reactive([])         # stack of create-ops (each a list of (obj, id)) for undo
 flows_fc = solara.reactive(None)         # results/link-flows
 active_tool = solara.reactive("Select")
 edit_mode = solara.reactive("Selection")  # "Selection" | "Creation"

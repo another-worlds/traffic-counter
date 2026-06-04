@@ -81,6 +81,27 @@ def insert_zone(scenario_id: str, body: dict = Body(...), db: Session = Depends(
     return {"id": z.id, "connector_node_id": connector}
 
 
+@router.post("/scenarios/{scenario_id}/network/move-node")
+def move_node(scenario_id: str, body: dict = Body(...), db: Session = Depends(get_db)):
+    get_scenario_or_404(db, scenario_id)
+    node = db.query(Node).filter(Node.id == body["node_id"], Node.scenario_id == scenario_id).first()
+    if not node:
+        raise HTTPException(404, "node not found")
+    lon, lat = float(body["lon"]), float(body["lat"])
+    node.geom = {"type": "Point", "coordinates": [lon, lat]}
+    xy = {n.id: n.geom["coordinates"] for n in db.query(Node).filter(Node.scenario_id == scenario_id) if n.geom}
+    xy[node.id] = [lon, lat]
+    links = db.query(Link).filter(Link.scenario_id == scenario_id,
+                                  (Link.from_node_id == node.id) | (Link.to_node_id == node.id)).all()
+    for l in links:
+        a, b = xy.get(l.from_node_id), xy.get(l.to_node_id)
+        if a and b:
+            l.geom = {"type": "LineString", "coordinates": [a, b]}
+            l.length_m = _haversine_m(a, b)
+    db.commit()
+    return {"ok": True, "links_updated": len(links)}
+
+
 @router.post("/scenarios/{scenario_id}/network/insert-stop")
 def insert_stop(scenario_id: str, body: dict = Body(...), db: Session = Depends(get_db)):
     get_scenario_or_404(db, scenario_id)

@@ -72,6 +72,12 @@ def insert_zone(sid, lat, lon, name="zone"):
         return _j(c.post(f"/scenarios/{sid}/network/insert-zone", json={"lat": lat, "lon": lon, "name": name}))
 
 
+def move_node(sid, node_id, lat, lon):
+    with _c() as c:
+        return _j(c.post(f"/scenarios/{sid}/network/move-node",
+                         json={"node_id": node_id, "lat": lat, "lon": lon}))
+
+
 def insert_stop(sid, lat, lon, name="stop"):
     with _c() as c:
         return _j(c.post(f"/scenarios/{sid}/network/insert-stop", json={"lat": lat, "lon": lon, "name": name}))

@@ -113,8 +113,9 @@ def detector_elements(fc):
 
 
 def selected_marker(lon, lat):
-    return L.CircleMarker.element(location=(lat, lon), radius=12, color="#111111",
-                                  fill_color="#ffd400", fill_opacity=0.5, weight=2)
+    """Red 'glow' ring around the selected element."""
+    return L.CircleMarker.element(location=(lat, lon), radius=13, color="#e60000",
+                                  fill_color="#e60000", fill_opacity=0.25, weight=3)
 
 
 def bounds_of(fc: dict):

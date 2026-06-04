@@ -16,6 +16,7 @@ map_data = solara.reactive(None)         # /map response: {nodes, links, zones, 
 flows_fc = solara.reactive(None)         # results/link-flows
 active_tool = solara.reactive("Select")
 selected = solara.reactive(None)         # {"obj": str, "id": str, "props": dict}
+drag_pos = solara.reactive(None)         # [lon, lat] live position of a node being moved
 pending_link_from = solara.reactive(None)
 link_type_id = solara.reactive("")       # link type for inserts
 # detector source binding

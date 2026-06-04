@@ -21,7 +21,6 @@ import theme
 from sections import lists
 
 TOOLS = ["Select", "Node", "Link", "Zone", "Connector", "Stop", "Detector"]
-PLACEHOLDERS = ["Turns", "Main nodes", "Territories", "OD pairs", "PrT paths", "POIs"]
 
 _desire_cache = solara.reactive(None)
 _qv_buf = solara.reactive({})
@@ -669,9 +668,6 @@ def Toolbar():
             solara.Markdown("*Click a centroid, then boundary vertices; click the first to close.*")
     else:
         solara.Markdown("*Drag a box to multi-select · click selects · right-click inspects*")
-    solara.Markdown("*Not editable yet*")
-    for t in PLACEHOLDERS:
-        solara.Button(t, disabled=True, text=True, block=True)
 
 
 @solara.component

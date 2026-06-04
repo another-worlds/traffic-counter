@@ -13,6 +13,7 @@ status = solara.reactive("Load the demo scenario, or create one, to begin.")
 map_center = solara.reactive((41.305, 69.265))
 map_zoom = solara.reactive(14)
 map_data = solara.reactive(None)         # /map response: {nodes, links, zones, connectors, stops, lines, detectors}
+data_version = solara.reactive(0)        # bumps on each map refresh — cheap memo key for FK dropdowns
 flows_fc = solara.reactive(None)         # results/link-flows
 active_tool = solara.reactive("Select")
 edit_mode = solara.reactive("Selection")  # "Selection" | "Creation"

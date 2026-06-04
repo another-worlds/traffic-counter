@@ -37,6 +37,44 @@ _refresh = solara.reactive(0)
 _edit_id = solara.reactive("")
 _buf = solara.reactive({})
 
+# Foreign-key fields render a name-driven dropdown instead of a raw UUID/code text box.
+# field -> (object type to list, label attribute, value attribute to store)
+FK_REGISTRY = {
+    "link_type_id": ("link_types", "name", "id"),
+    "node_type_id": ("node_types", "name", "id"),
+    "zone_type_id": ("zone_types", "name", "id"),
+    "node_id": ("nodes", "name", "id"),
+    "zone_id": ("zones", "name", "id"),
+    "connector_node_id": ("nodes", "name", "id"),
+    "activity": ("activities", "code", "code"),
+    "mode_code": ("modes", "code", "code"),
+    "demand_layer": ("demand_layers", "code", "code"),
+}
+_NONE = "(none)"
+
+
+def _fk_options(sid, field) -> dict:
+    """{label: stored_value} for an FK field; '(none)'→None is always first."""
+    obj, label_f, val_f = FK_REGISTRY[field]
+    rows = api.list_objects(sid, obj) if sid else []
+    by_label = {_NONE: None}
+    for r in rows:
+        lbl = str(r.get(label_f) or (r.get("id") or "")[:6])
+        if lbl in by_label:                          # disambiguate duplicate labels
+            lbl = f"{lbl} · {(r.get('id') or '')[:4]}"
+        by_label[lbl] = r.get(val_f)
+    return by_label
+
+
+@solara.component
+def FkSelect(field, value, on_value, sid, label=None):
+    """A dropdown over the rows of the referenced object, storing its id/code."""
+    by_label = solara.use_memo(lambda: _fk_options(sid, field),
+                               [sid, field, state.data_version.value, _refresh.value])
+    cur = next((l for l, v in by_label.items() if v == value), _NONE)
+    solara.Select(label or field, value=cur, values=list(by_label),
+                  on_value=lambda l: on_value(by_label.get(l)))
+
 
 def _bump():
     _refresh.value += 1
@@ -78,7 +116,9 @@ def RowEditor(obj, rows):
     if _edit_id.value:
         for f in FIELDS.get(obj, []):
             v = _buf.value.get(f)
-            if isinstance(v, bool):
+            if f in FK_REGISTRY:
+                FkSelect(f, v, lambda nv, f=f: _buf.set({**_buf.value, f: nv}), state.scenario_id.value)
+            elif isinstance(v, bool):
                 solara.Switch(label=f, value=v, on_value=lambda nv, f=f: _buf.set({**_buf.value, f: nv}))
             else:
                 solara.InputText(f, value="" if v is None else str(v),

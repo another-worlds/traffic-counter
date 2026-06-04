@@ -38,6 +38,7 @@ def refresh_map() -> None:
     try:
         state.map_data.value = api.get_map(sid)
         state.flows_fc.value = None
+        state.data_version.value += 1
     except Exception as e:  # noqa: BLE001
         state.status.value = f"map load failed: {e}"
 

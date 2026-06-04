@@ -732,23 +732,46 @@ def MultiView(many):
 @solara.component
 def QuickView():
     solara.Markdown("### Quick view")
+    sid = state.scenario_id.value
     many = state.selected_many.value
+    sel = state.selected.value
+    obj = sel["obj"] if sel else None
+    # Hooks must run before the early returns (stable hook order). Link types feed the
+    # link_type_id dropdown and its default-inheritance.
+    lt_rows = solara.use_memo(
+        lambda: (api.list_objects(sid, "link_types") if (sid and obj == "links") else []),
+        [sid, obj, state.data_version.value])
     if many:
         MultiView(many)
         return
-    sel = state.selected.value
     if not sel:
         solara.Markdown("*Drag a box (Selection mode) to multi-select; click or right-click to inspect one.*")
         return
-    obj = sel["obj"]
+
+    def set_field(f, nv):
+        _qv_buf.set({**_qv_buf.value, f: nv})
+
+    def set_link_type(ltid):
+        buf = {**_qv_buf.value, "link_type_id": ltid}
+        row = next((r for r in lt_rows if r.get("id") == ltid), None)
+        if row:                                  # inherit type defaults (override before Save)
+            for dst, src in (("lanes", "num_lanes"), ("v0_kmh", "v0_kmh"), ("capacity_vph", "capacity_vph")):
+                if row.get(src) is not None:
+                    buf[dst] = row[src]
+        _qv_buf.set(buf)
+
     solara.Markdown(f"**{obj[:-1]}** · `{sel['id'][:8]}`")
     for f in lists.FIELDS.get(obj, []):
         v = _qv_buf.value.get(f)
-        if isinstance(v, bool):
-            solara.Switch(label=f, value=v, on_value=lambda nv, f=f: _qv_buf.set({**_qv_buf.value, f: nv}))
+        if f == "link_type_id" and obj == "links":
+            lists.FkSelect(f, v, set_link_type, sid)
+        elif f in lists.FK_REGISTRY:
+            lists.FkSelect(f, v, lambda nv, f=f: set_field(f, nv), sid)
+        elif isinstance(v, bool):
+            solara.Switch(label=f, value=v, on_value=lambda nv, f=f: set_field(f, nv))
         else:
             solara.InputText(f, value="" if v is None else str(v),
-                             on_value=lambda nv, f=f: _qv_buf.set({**_qv_buf.value, f: nv}))
+                             on_value=lambda nv, f=f: set_field(f, nv))
     with solara.Row():
         solara.Button("Save", color="primary", on_click=_save_attrs)
         solara.Button("Delete", color="error", on_click=_delete)

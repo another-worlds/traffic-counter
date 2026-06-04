@@ -30,6 +30,8 @@ visible_layers = solara.reactive({"nodes": True, "links": True, "zones": True, "
                                   "stops": True, "lines": True, "detectors": True, "desire": True})
 link_color_by = solara.reactive("GEH")   # GEH | Volume | V/C
 desire_matrix_id = solara.reactive("")   # demand matrix to draw as desire lines (or "")
+basemap = solara.reactive("Dark")        # Dark | Aerial | OSM base tiles (aerial = tracing)
+show_labels = solara.reactive(False)     # draw node/link/zone name labels on the map
 # detector source binding
 source_labels = solara.reactive([])
 selected_source_label = solara.reactive("")

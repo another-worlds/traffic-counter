@@ -390,12 +390,48 @@ def _finalize_zone():
     actions.refresh_map()
 
 
+# --- view helpers (build-from-zero orientation) --------------------------- #
+def _fit_network():
+    m = _MAP["m"]
+    md = state.map_data.value or {}
+    if m is None:
+        return
+    b = layers.bounds_of(md.get("nodes") or {}) or layers.bounds_of(md.get("zones") or {})
+    if b:
+        m.fit_bounds(b)
+    else:
+        state.status.value = "Nothing to fit yet — add nodes or search for a place."
+
+
+def _zoom_to_selection():
+    m = _MAP["m"]
+    if m is None:
+        return
+    sels = ([state.selected.value] if state.selected.value else []) + list(state.selected_many.value)
+    pts = [co for s in sels if (co := _coords_of(s))]
+    if not pts:
+        state.status.value = "Select something first."
+        return
+    if len(pts) == 1:
+        lon, lat = pts[0]
+        m.center = (lat, lon)
+        m.zoom = max(int(getattr(m, "zoom", None) or state.map_zoom.value or 14), 16)
+    else:
+        lons = [p[0] for p in pts]; lats = [p[1] for p in pts]
+        m.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]])
+
+
 def on_interaction(**kw):
     t = kw.get("type")
     lat, lon = (kw.get("coordinates") or (None, None))
     if lat is None:
         return
     m = _MAP["m"]
+
+    if t == "mousemove" and m is not None and getattr(m, "_coords", None) is not None:
+        m._coords.value = (f"<div style='background:rgba(20,26,36,.82);color:#cfe0ff;"
+                           f"padding:2px 7px;border-radius:6px;font-size:11px;"
+                           f"font-family:ui-monospace,monospace'>{lat:.5f}, {lon:.5f}</div>")
 
     if t == "contextmenu":
         _select(_nearest_any(lat, lon))
@@ -618,6 +654,11 @@ def build_overlays():
         ov += layers.stop_widgets(md["stops"])
     if vis.get("detectors", True) and md.get("detectors"):
         ov += layers.detector_widgets(md["detectors"])
+    if state.show_labels.value:                      # name labels (capped for performance)
+        lab = [md[k] for k in ("nodes", "links", "zones") if vis.get(k, True) and md.get(k)]
+        if sum(len(fc.get("features", [])) for fc in lab) <= 300:
+            for fc in lab:
+                ov += layers.label_widgets(fc)
     for s in state.selected_many.value:
         co = _coords_of(s)
         if co:
@@ -648,6 +689,14 @@ def _make_map():
     legend = W.HTML(value=layers.legend_html(state.link_color_by.value, False))
     m.add(L.WidgetControl(widget=legend, position="bottomright"))
     m._legend = legend
+    coords = W.HTML(value="")
+    m.add(L.WidgetControl(widget=coords, position="bottomleft"))
+    m._coords = coords
+    try:                                            # geocoder: jump to a real place to build over
+        m.add(L.SearchControl(position="topleft", zoom=16,
+                              url="https://nominatim.openstreetmap.org/search?format=json&q={s}"))
+    except Exception:  # noqa: BLE001 — older ipyleaflet / offline: skip gracefully
+        pass
     _MAP["m"] = m
     return m
 
@@ -783,6 +832,10 @@ def Toolbar():
 @solara.component
 def DisplayPanel(sid):
     solara.Markdown("**Display**")
+    solara.Select("Basemap", value=state.basemap, values=["Dark", "Aerial", "OSM"])
+    with solara.Row():
+        solara.Button("Fit network", text=True, on_click=_fit_network)
+        solara.Button("Zoom to sel.", text=True, on_click=_zoom_to_selection)
     solara.Select("Colour links by", value=state.link_color_by, values=["GEH", "Volume", "V/C"])
     mats = solara.use_memo(
         lambda: [m for m in (api.list_matrices(sid) if sid else []) if m.get("kind") == "demand"],
@@ -797,6 +850,7 @@ def DisplayPanel(sid):
     for k in ("links", "nodes", "zones", "connectors", "stops", "lines", "detectors", "desire"):
         solara.Checkbox(label=k, value=vis.get(k, True),
                         on_value=lambda nv, k=k: state.visible_layers.set({**state.visible_layers.value, k: nv}))
+    solara.Checkbox(label="name labels", value=state.show_labels.value, on_value=state.show_labels.set)
 
     solara.Markdown("**Filter** (hide non-matching)")
     flt = state.elem_filter.value
@@ -903,15 +957,20 @@ def Section():
         m.dragging = (state.edit_mode.value != "Selection")  # Selection → rubber-band, not pan
     solara.use_effect(apply_mode, [state.edit_mode.value])
 
+    def apply_basemap():
+        others = [l for l in m.layers if not isinstance(l, L.TileLayer)]
+        m.layers = (layers.base_tile(state.basemap.value),) + tuple(others)
+    solara.use_effect(apply_basemap, [state.basemap.value])
+
     def sync():
-        base = [l for l in m.layers if isinstance(l, L.TileLayer)] or [layers.dark_tile()]
+        base = [l for l in m.layers if isinstance(l, L.TileLayer)] or [layers.base_tile(state.basemap.value)]
         m.layers = tuple(base) + tuple(build_overlays())
         if getattr(m, "_legend", None) is not None:
             m._legend.value = layers.legend_html(state.link_color_by.value, state.flows_fc.value is not None)
     solara.use_effect(sync, [state.map_data.value, state.flows_fc.value, state.selected.value,
                              state.selected_many.value, state.visible_layers.value,
                              state.link_color_by.value, state.desire_matrix_id.value,
-                             state.elem_filter.value, _desire_cache.value,
+                             state.elem_filter.value, _desire_cache.value, state.show_labels.value,
                              state.inspect_detector.value, state.detector_info.value])
     solara.use_effect(_fetch_detector_info, [state.inspect_detector.value])
 

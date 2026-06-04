@@ -44,6 +44,27 @@ def dark_tile():
     return L.TileLayer(url=theme.DARK_TILES, attribution="© OpenStreetMap, © CARTO", base=True)
 
 
+def aerial_tile():
+    t = L.basemap_to_tiles(L.basemaps.Esri.WorldImagery)
+    t.base = True
+    return t
+
+
+def osm_tile():
+    t = L.basemap_to_tiles(L.basemaps.OpenStreetMap.Mapnik)
+    t.base = True
+    return t
+
+
+def base_tile(name):
+    """Base tile layer for the Display basemap selector (aerial = trace from photos)."""
+    if name == "Aerial":
+        return aerial_tile()
+    if name == "OSM":
+        return osm_tile()
+    return dark_tile()
+
+
 # --- network geometry (from /map) ----------------------------------------- #
 def _circles(fc, color, radius, fill=0.9):
     out = []
@@ -149,6 +170,44 @@ def desire_widgets(zones_fc, labels, values, topn=40):
 def selected_ring(lon, lat):
     return L.CircleMarker(location=(lat, lon), radius=13, color="#ff2d2d",
                           fill_color="#ff2d2d", fill_opacity=0.22, weight=3)
+
+
+def hover_ring(lon, lat):
+    return L.CircleMarker(location=(lat, lon), radius=10, color="#7CFC8A",
+                          fill_color="#7CFC8A", fill_opacity=0.12, weight=2)
+
+
+def _label_point(geom, props):
+    t = geom.get("type")
+    if t == "Point":
+        return geom["coordinates"]
+    if t == "LineString":
+        cs = geom["coordinates"]
+        return cs[len(cs) // 2]
+    if t == "Polygon":
+        c = props.get("centroid")
+        if c:
+            return c
+        ring = geom["coordinates"][0]
+        return [sum(p[0] for p in ring) / len(ring), sum(p[1] for p in ring) / len(ring)]
+    return props.get("centroid")
+
+
+def label_widgets(fc, field="name", color="#cfe0ff"):
+    """Name labels as tiny DivIcon markers (toggleable; capped by the caller)."""
+    out = []
+    for f in fc.get("features", []):
+        p = f.get("properties") or {}
+        txt = p.get(field)
+        pt = _label_point(f.get("geometry") or {}, p)
+        if not txt or pt is None:
+            continue
+        lon, lat = pt
+        html = (f"<div style='font-size:11px;color:{color};white-space:nowrap;"
+                f"text-shadow:0 0 3px #000,0 0 3px #000;pointer-events:none'>{txt}</div>")
+        out.append(L.Marker(location=(lat, lon), draggable=False, keyboard=False,
+                            icon=L.DivIcon(html=html, icon_size=[1, 1], icon_anchor=[-5, 7])))
+    return out
 
 
 # --- detector line→link assignment (Visum-style highlight + direction arrow) ------ #
@@ -302,10 +361,14 @@ def bounds_of(fc: dict):
     for f in fc.get("features", []):
         geom = f.get("geometry") or {}
         coords = geom.get("coordinates")
-        if geom.get("type") == "Point":
+        t = geom.get("type")
+        if t == "Point":
             lons.append(coords[0]); lats.append(coords[1])
-        elif geom.get("type") == "LineString":
+        elif t == "LineString":
             for x, y in coords:
+                lons.append(x); lats.append(y)
+        elif t == "Polygon":
+            for x, y in coords[0]:
                 lons.append(x); lats.append(y)
     if not lats:
         return None

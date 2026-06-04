@@ -6,6 +6,10 @@ __pycache__/
 *.parquet
 *.mp4
 *.pt
+# Local SQLite artifacts (e.g. macromodel walkthrough/demo runs without PostGIS)
+*.db
+*.sqlite
+*.sqlite3
 .streamlit/secrets.toml
 .idea/
 .vscode/

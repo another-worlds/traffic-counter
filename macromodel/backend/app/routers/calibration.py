@@ -65,7 +65,8 @@ def calibrate(scenario_id: str, body: CalibrateRequest, db: Session = Depends(ge
 
 @router.get("/scenarios/{scenario_id}/calibration/{run_id}")
 def get_run(scenario_id: str, run_id: str, db: Session = Depends(get_db)):
-    run = db.query(CalibrationRun).filter(CalibrationRun.id == run_id).first()
+    run = db.query(CalibrationRun).filter(
+        CalibrationRun.id == run_id, CalibrationRun.scenario_id == scenario_id).first()
     if not run:
         raise HTTPException(404, "calibration run not found")
     return {

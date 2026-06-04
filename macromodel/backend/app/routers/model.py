@@ -59,10 +59,15 @@ def run_assignment(scenario_id: str, body: AssignmentRequest, db: Session = Depe
     zones = _zones_or_400(db, scenario_id)
     connectors = [z["connector_node_id"] for z in zones]
 
-    od = (db.query(ODMatrix).filter(ODMatrix.id == body.od_matrix_id).first()
-          if body.od_matrix_id else latest_distributed_od(db, scenario_id))
-    if not od:
-        raise HTTPException(400, "no OD matrix — run trip-distribution first")
+    if body.od_matrix_id:
+        od = db.query(ODMatrix).filter(
+            ODMatrix.id == body.od_matrix_id, ODMatrix.scenario_id == scenario_id).first()
+        if not od:
+            raise HTTPException(404, "OD matrix not found in this scenario")
+    else:
+        od = latest_distributed_od(db, scenario_id)
+        if not od:
+            raise HTTPException(400, "no OD matrix — run trip-distribution first")
 
     T = storage.load_matrix(od.storage_ref)
     sim, _ = _assign(nodes, links, connectors, T)

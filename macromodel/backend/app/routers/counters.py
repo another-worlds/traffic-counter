@@ -86,7 +86,8 @@ def create_counter(scenario_id: str, body: CounterCreate, db: Session = Depends(
 @router.post("/scenarios/{scenario_id}/counters/{counter_id}/pull-observations")
 def pull_observations(scenario_id: str, counter_id: str, db: Session = Depends(get_db)):
     get_scenario_or_404(db, scenario_id)
-    c = db.query(Counter).filter(Counter.id == counter_id).first()
+    c = db.query(Counter).filter(
+        Counter.id == counter_id, Counter.scenario_id == scenario_id).first()
     if not c:
         raise HTTPException(404, "counter not found")
     if not (c.source_video_id and c.source_line_id):
@@ -121,7 +122,8 @@ def counter_video_info(scenario_id: str, counter_id: str, db: Session = Depends(
     and a deep link into the counter's Count & Export view. Best-effort: every sub-call is
     isolated so a partial counter outage still returns whatever could be fetched."""
     get_scenario_or_404(db, scenario_id)
-    c = db.query(Counter).filter(Counter.id == counter_id).first()
+    c = db.query(Counter).filter(
+        Counter.id == counter_id, Counter.scenario_id == scenario_id).first()
     if not c:
         raise HTTPException(404, "counter not found")
 

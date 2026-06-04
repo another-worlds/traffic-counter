@@ -25,9 +25,10 @@ def link_dict(l: Link) -> dict:
 
 def zone_dict(z: Zone) -> dict:
     return {
-        "id": z.id, "name": z.name, "centroid": z.centroid,
+        "id": z.id, "name": z.name, "centroid": z.centroid, "geom": z.geom,
         "connector_node_id": z.connector_node_id,
         "production": z.production, "attraction": z.attraction,
+        "population": z.population, "workplaces": z.workplaces,
     }
 
 

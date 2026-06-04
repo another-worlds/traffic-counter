@@ -13,6 +13,24 @@ def refresh_scenarios() -> None:
         state.status.value = f"API error: {e}"
 
 
+def ensure_default() -> None:
+    """On startup the base scenario is always an empty, editable one (demo is opt-in)."""
+    refresh_scenarios()
+    if state.scenario_id.value:
+        return
+    empty = next((s for s in state.scenarios.value if (s.get("n_nodes") or 0) == 0), None)
+    try:
+        if empty:
+            select_scenario(empty["id"])
+        else:
+            sc = api.create_scenario("New scenario")
+            refresh_scenarios()
+            select_scenario(sc["id"])
+        state.status.value = "Empty scenario ready — build a network, or Load demo (Sioux Falls)."
+    except Exception as e:  # noqa: BLE001
+        state.status.value = f"API error: {e}"
+
+
 def refresh_map() -> None:
     sid = state.scenario_id.value
     if not sid:

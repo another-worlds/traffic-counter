@@ -59,7 +59,21 @@ def node_widgets(fc):
 
 
 def zone_widgets(fc):
-    return _circles(fc, BLUE, 9, 0.4)
+    out = []
+    for f in fc.get("features", []):
+        g = f.get("geometry") or {}
+        if g.get("type") == "Polygon":
+            out.append(L.GeoJSON(data=f, style={"color": BLUE, "weight": 1.5, "opacity": 0.7,
+                                                "fillColor": BLUE, "fillOpacity": 0.16}))
+            c = (f.get("properties") or {}).get("centroid")
+            if c:
+                out.append(L.CircleMarker(location=(c[1], c[0]), radius=5, color=BLUE,
+                                          fill_color=BLUE, fill_opacity=0.8, weight=1))
+        elif g.get("type") == "Point":
+            lon, lat = g["coordinates"]
+            out.append(L.CircleMarker(location=(lat, lon), radius=9, color=BLUE,
+                                      fill_color=BLUE, fill_opacity=0.4, weight=1))
+    return out
 
 
 def stop_widgets(fc):

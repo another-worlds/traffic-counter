@@ -95,6 +95,9 @@ class Zone(Base):
     connector_node_id = Column(String, ForeignKey("nodes.id", ondelete="SET NULL"), nullable=True)
     production = Column(Float, default=0.0)  # legacy total; per-activity lives in ZoneDemand
     attraction = Column(Float, default=0.0)
+    # demand-strata variables that drive generation (req #5)
+    population = Column(Float, default=0.0)
+    workplaces = Column(Float, default=0.0)
     zone_type_id = Column(String, ForeignKey("zone_types.id", ondelete="SET NULL"), nullable=True)
 
     scenario = relationship("Scenario", back_populates="zones")
@@ -305,6 +308,10 @@ class DemandLayer(Base):
     from_activity = Column(String(8))   # production end (activity code)
     to_activity = Column(String(8))     # attraction end
     beta = Column(Float, default=0.1)   # gravity deterrence (per minute)
+    # demand-strata generation (req #5): P_i = trip_rate * zone[prod_var]; A_j = zone[attr_var]
+    prod_var = Column(String(16), default="population")    # population | workplaces
+    attr_var = Column(String(16), default="workplaces")
+    trip_rate = Column(Float, default=0.4)
 
 
 class ZoneDemand(Base):

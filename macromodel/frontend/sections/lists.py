@@ -16,7 +16,7 @@ OBJECTS = ["links", "nodes", "zones", "connectors", "stops", "lines", "detectors
 FIELDS = {
     "links": ["name", "link_type_id", "lanes", "free_flow_speed_ms", "v0_kmh", "capacity_vph", "oneway"],
     "nodes": ["name", "node_type_id"],
-    "zones": ["name", "zone_type_id", "production", "attraction"],
+    "zones": ["name", "zone_type_id", "population", "workplaces", "production", "attraction"],
     "connectors": ["zone_id", "node_id", "direction", "t0_min", "weight"],
     "stops": ["name", "node_id"],
     "lines": ["name", "tsys", "headway_min", "color"],
@@ -26,7 +26,8 @@ FIELDS = {
     "zone_types": ["name", "category"],
     "modes": ["code", "name", "is_prt", "assignment"],
     "activities": ["code", "name", "is_home"],
-    "demand_layers": ["code", "name", "from_activity", "to_activity", "beta"],
+    "demand_layers": ["code", "name", "from_activity", "to_activity", "beta",
+                      "prod_var", "attr_var", "trip_rate"],
     "zone_demand": ["zone_id", "activity", "production", "attraction"],
     "mode_choice_params": ["demand_layer", "mode_code", "asc", "beta_time"],
 }

@@ -41,7 +41,7 @@ def ScenarioBar():
     if labels:
         solara.Select("Scenario", value=cur, values=labels,
                       on_value=lambda l: actions.select_scenario(by_label[l]))
-    solara.Button("Load demo", color="primary", on_click=actions.load_demo)
+    solara.Button("Load demo (Sioux Falls)", color="primary", on_click=actions.load_demo)
 
 
 @solara.component
@@ -49,7 +49,7 @@ def Page():
     solara.Title("MacroModel")
     solara.Style(theme.CSS)
     solara.use_effect(_enable_dark, [])
-    solara.use_effect(actions.refresh_scenarios, [])
+    solara.use_effect(actions.ensure_default, [])
 
     with solara.Column(classes=["mm-appbar"]):
         with solara.Row(style={"align-items": "center", "gap": "16px"}):

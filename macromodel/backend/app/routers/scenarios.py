@@ -58,6 +58,7 @@ def delete_scenario(scenario_id: str, db: Session = Depends(get_db)):
 
 @router.post("/scenarios/demo", response_model=ScenarioOut)
 def create_demo(db: Session = Depends(get_db)):
-    """Build a complete, self-contained demo scenario (network + zones + synthetic counters)."""
-    scenario_id = demo_service.build_demo(db)
+    """Build the real Sioux Falls benchmark scenario (network + OD + detectors)."""
+    from ..services import siouxfalls
+    scenario_id = siouxfalls.build_sioux_falls(db)
     return _out(db, get_scenario_or_404(db, scenario_id))

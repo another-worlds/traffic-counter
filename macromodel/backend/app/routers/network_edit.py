@@ -69,16 +69,47 @@ def insert_zone(scenario_id: str, body: dict = Body(...), db: Session = Depends(
     get_scenario_or_404(db, scenario_id)
     nodes, _ = loader.load_network(db, scenario_id)
     connector = loader.nearest_node_id(nodes, body["lon"], body["lat"]) if nodes else None
+    geom = None
+    poly = body.get("polygon")
+    if poly and len(poly) >= 3:  # close the ring
+        ring = [list(p) for p in poly]
+        if ring[0] != ring[-1]:
+            ring.append(ring[0])
+        geom = {"type": "Polygon", "coordinates": [ring]}
     z = Zone(scenario_id=scenario_id, name=body.get("name", "zone"),
-             centroid={"type": "Point", "coordinates": [body["lon"], body["lat"]]},
+             centroid={"type": "Point", "coordinates": [body["lon"], body["lat"]]}, geom=geom,
              connector_node_id=connector, zone_type_id=body.get("zone_type_id"),
-             production=float(body.get("production", 0.0)), attraction=float(body.get("attraction", 0.0)))
+             production=float(body.get("production", 0.0)), attraction=float(body.get("attraction", 0.0)),
+             population=float(body.get("population", 0.0)), workplaces=float(body.get("workplaces", 0.0)))
     db.add(z)
     db.flush()
     if connector:
         db.add(Connector(scenario_id=scenario_id, zone_id=z.id, node_id=connector, direction="both"))
     db.commit()
     return {"id": z.id, "connector_node_id": connector}
+
+
+@router.post("/scenarios/{scenario_id}/network/select-in-bbox")
+def select_in_bbox(scenario_id: str, body: dict = Body(...), db: Session = Depends(get_db)):
+    """Return element ids whose geometry falls inside a lat/lon box (rubber-band select)."""
+    get_scenario_or_404(db, scenario_id)
+    s, w, n, e = body["south"], body["west"], body["north"], body["east"]
+
+    def inside(lon, lat):
+        return w <= lon <= e and s <= lat <= n
+
+    nodes, links = loader.load_network(db, scenario_id)
+    nin = {nd["id"] for nd in nodes if nd.get("geom") and inside(*nd["geom"]["coordinates"])}
+    zones = db.query(Zone).filter(Zone.scenario_id == scenario_id).all()
+    dets = db.query(Counter).filter(Counter.scenario_id == scenario_id).all()
+    stops = db.query(Stop).filter(Stop.scenario_id == scenario_id).all()
+    return {
+        "nodes": sorted(nin),
+        "links": [l["id"] for l in links if l["from_node_id"] in nin or l["to_node_id"] in nin],
+        "zones": [z.id for z in zones if z.centroid and inside(*z.centroid["coordinates"])],
+        "detectors": [c.id for c in dets if c.geom and inside(*c.geom["coordinates"])],
+        "stops": [st.id for st in stops if st.geom and inside(*st.geom["coordinates"])],
+    }
 
 
 @router.post("/scenarios/{scenario_id}/network/move-node")
@@ -176,8 +207,10 @@ def map_layers(scenario_id: str, db: Session = Depends(get_db)):
         "nodes": fc([feat(n.geom, {"id": n.id, "kind": "node", "name": n.name}) for n in nodes if n.geom]),
         "links": fc([feat(l.geom, {"id": l.id, "kind": "link", "name": l.name,
                                    "link_type_id": l.link_type_id}) for l in links if l.geom]),
-        "zones": fc([feat(z.centroid or z.geom, {"id": z.id, "kind": "zone", "name": z.name,
-                                                 "production": z.production, "attraction": z.attraction})
+        "zones": fc([feat(z.geom or z.centroid, {"id": z.id, "kind": "zone", "name": z.name,
+                                                 "production": z.production, "attraction": z.attraction,
+                                                 "population": z.population, "workplaces": z.workplaces,
+                                                 "centroid": (z.centroid or {}).get("coordinates")})
                      for z in zones if (z.centroid or z.geom)]),
         "connectors": fc(connector_feats),
         "stops": fc([feat(s.geom, {"id": s.id, "kind": "stop", "name": s.name}) for s in stops if s.geom]),

@@ -27,7 +27,8 @@ REGISTRY = {
     "nodes": (Node, ["name", "node_type_id"], "name"),
     "links": (Link, ["name", "link_type_id", "lanes", "free_flow_speed_ms", "v0_kmh",
                       "capacity_vph", "oneway", "allowed_modes"], "name"),
-    "zones": (Zone, ["name", "zone_type_id", "production", "attraction", "connector_node_id"], "name"),
+    "zones": (Zone, ["name", "zone_type_id", "production", "attraction", "population", "workplaces",
+                     "connector_node_id"], "name"),
     "connectors": (Connector, ["zone_id", "node_id", "direction", "t0_min", "weight"], None),
     "stops": (Stop, ["name", "node_id"], "name"),
     "lines": (Line, ["name", "tsys", "headway_min", "color"], "name"),
@@ -38,7 +39,8 @@ REGISTRY = {
     "zone_types": (ZoneType, ["name", "category"], "name"),
     "modes": (Mode, ["code", "name", "is_prt", "assignment"], "code"),
     "activities": (Activity, ["code", "name", "is_home"], "code"),
-    "demand_layers": (DemandLayer, ["code", "name", "from_activity", "to_activity", "beta"], "code"),
+    "demand_layers": (DemandLayer, ["code", "name", "from_activity", "to_activity", "beta",
+                                    "prod_var", "attr_var", "trip_rate"], "code"),
     "zone_demand": (ZoneDemand, ["zone_id", "activity", "production", "attraction"], None),
     "mode_choice_params": (ModeChoiceParam, ["demand_layer", "mode_code", "asc", "beta_time"], None),
 }
@@ -96,3 +98,26 @@ def delete_object(obj: str, row_id: str, db: Session = Depends(get_db)):
     if row:
         db.delete(row)
         db.commit()
+
+
+@router.post("/objects/{obj}/bulk-update")
+def bulk_update(obj: str, body: dict = Body(...), db: Session = Depends(get_db)):
+    """Apply one attribute patch to many rows (Visum-style multi-edit)."""
+    model, fields, _ = _spec(obj)
+    ids = body.get("ids", [])
+    patch = {k: v for k, v in (body.get("patch") or {}).items() if k in fields}
+    rows = db.query(model).filter(model.id.in_(ids)).all()
+    for r in rows:
+        for k, v in patch.items():
+            setattr(r, k, v)
+    db.commit()
+    return {"updated": len(rows), "fields": list(patch)}
+
+
+@router.post("/objects/{obj}/bulk-delete")
+def bulk_delete(obj: str, body: dict = Body(...), db: Session = Depends(get_db)):
+    model, _, _ = _spec(obj)
+    ids = body.get("ids", [])
+    n = db.query(model).filter(model.id.in_(ids)).delete(synchronize_session=False)
+    db.commit()
+    return {"deleted": int(n)}

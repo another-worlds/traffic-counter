@@ -20,8 +20,9 @@ Base = declarative_base()
 _NEW_COLUMNS = {
     "nodes": [("node_type_id", "VARCHAR")],
     "links": [("link_type_id", "VARCHAR"), ("v0_kmh", "FLOAT"), ("allowed_modes", "JSON")],
-    "zones": [("zone_type_id", "VARCHAR")],
+    "zones": [("zone_type_id", "VARCHAR"), ("population", "FLOAT"), ("workplaces", "FLOAT")],
     "od_matrices": [("kind", "VARCHAR"), ("mode_id", "VARCHAR"), ("demand_layer_id", "VARCHAR")],
+    "demand_layers": [("prod_var", "VARCHAR"), ("attr_var", "VARCHAR"), ("trip_rate", "FLOAT")],
 }
 
 

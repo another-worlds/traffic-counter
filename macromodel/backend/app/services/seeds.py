@@ -35,11 +35,16 @@ ACTIVITIES = [
     {"code": "W", "name": "Work", "is_home": False},
     {"code": "O", "name": "Other", "is_home": False},
 ]
+# Demand strata: each layer generates P_i = trip_rate * zone[prod_var], A_j = zone[attr_var]
 DEMAND_LAYERS = [
-    {"code": "HW", "name": "Home→Work", "from_activity": "H", "to_activity": "W", "beta": 0.10},
-    {"code": "WH", "name": "Work→Home", "from_activity": "W", "to_activity": "H", "beta": 0.10},
-    {"code": "HO", "name": "Home→Other", "from_activity": "H", "to_activity": "O", "beta": 0.14},
-    {"code": "OH", "name": "Other→Home", "from_activity": "O", "to_activity": "H", "beta": 0.14},
+    {"code": "HW", "name": "Home→Work", "from_activity": "H", "to_activity": "W", "beta": 0.10,
+     "prod_var": "population", "attr_var": "workplaces", "trip_rate": 0.42},
+    {"code": "WH", "name": "Work→Home", "from_activity": "W", "to_activity": "H", "beta": 0.10,
+     "prod_var": "workplaces", "attr_var": "population", "trip_rate": 0.42},
+    {"code": "HO", "name": "Home→Other", "from_activity": "H", "to_activity": "O", "beta": 0.14,
+     "prod_var": "population", "attr_var": "population", "trip_rate": 0.30},
+    {"code": "OH", "name": "Other→Home", "from_activity": "O", "to_activity": "H", "beta": 0.14,
+     "prod_var": "population", "attr_var": "population", "trip_rate": 0.30},
 ]
 # PrT is the reference (asc 0); PuT a bit less attractive but viable.
 MODE_CHOICE = [

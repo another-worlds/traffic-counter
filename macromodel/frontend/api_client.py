@@ -67,9 +67,27 @@ def insert_link(sid, from_node_id, to_node_id, link_type_id=None, oneway=False):
                                "link_type_id": link_type_id, "oneway": oneway}))
 
 
-def insert_zone(sid, lat, lon, name="zone"):
+def insert_zone(sid, lat, lon, name="zone", polygon=None, population=0.0, workplaces=0.0):
     with _c() as c:
-        return _j(c.post(f"/scenarios/{sid}/network/insert-zone", json={"lat": lat, "lon": lon, "name": name}))
+        return _j(c.post(f"/scenarios/{sid}/network/insert-zone",
+                         json={"lat": lat, "lon": lon, "name": name, "polygon": polygon,
+                               "population": population, "workplaces": workplaces}))
+
+
+def select_in_bbox(sid, south, west, north, east):
+    with _c() as c:
+        return _j(c.post(f"/scenarios/{sid}/network/select-in-bbox",
+                         json={"south": south, "west": west, "north": north, "east": east}))
+
+
+def bulk_update(obj, ids, patch):
+    with _c() as c:
+        return _j(c.post(f"/objects/{obj}/bulk-update", json={"ids": ids, "patch": patch}))
+
+
+def bulk_delete(obj, ids):
+    with _c() as c:
+        return _j(c.post(f"/objects/{obj}/bulk-delete", json={"ids": ids}))
 
 
 def move_node(sid, node_id, lat, lon):

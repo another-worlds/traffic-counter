@@ -90,10 +90,30 @@ def op_set_attribute(ctx, params):
 
 
 def op_generation(ctx, params):
+    """Trip generation from demand-strata variables (req #5):
+    P_i = trip_rate * zone[prod_var], A_j = zone[attr_var]; then balance ΣA→ΣP.
+    Falls back to ZoneDemand-by-activity, then legacy zone P/A."""
     layers = _layers(ctx)
-    zd = _zone_demand(ctx)
     zone_ids = [z["id"] for z in ctx.zones]
-    if not zd:  # fallback to legacy per-zone production/attraction (single HW-like layer)
+    strata = {z["id"]: {"population": float(z.get("population") or 0.0),
+                        "workplaces": float(z.get("workplaces") or 0.0)} for z in ctx.zones}
+    has_strata = any(v["population"] or v["workplaces"] for v in strata.values())
+
+    if has_strata and layers:
+        ctx.gen = {}
+        for layer in layers:
+            pv = getattr(layer, "prod_var", None) or "population"
+            av = getattr(layer, "attr_var", None) or "workplaces"
+            rate = getattr(layer, "trip_rate", None)
+            rate = 0.4 if rate is None else float(rate)
+            P = np.array([rate * strata[z].get(pv, 0.0) for z in zone_ids], float)
+            A = np.array([strata[z].get(av, 0.0) for z in zone_ids], float)
+            ctx.gen[layer.code] = generation.balance(P, A)
+        total = sum(P.sum() for P, _ in ctx.gen.values())
+        return f"generation (strata pop/workplaces) → {len(ctx.gen)} layers, ΣP={total:.0f}"
+
+    zd = _zone_demand(ctx)
+    if not zd:  # legacy per-zone production/attraction (single HW-like layer)
         P = np.array([z.get("production") or 0.0 for z in ctx.zones], float)
         A = np.array([z.get("attraction") or 0.0 for z in ctx.zones], float)
         code = layers[0].code if layers else "HW"
@@ -105,7 +125,7 @@ def op_generation(ctx, params):
         A = np.array([zd.get(layer.to_activity, {}).get(z, (0.0, 0.0))[1] for z in zone_ids], float)
         ctx.gen[layer.code] = generation.balance(P, A)
     total = sum(P.sum() for P, _ in ctx.gen.values())
-    return f"generation → {len(ctx.gen)} layers, ΣP={total:.0f}"
+    return f"generation (ZoneDemand) → {len(ctx.gen)} layers, ΣP={total:.0f}"
 
 
 def op_distribution(ctx, params):

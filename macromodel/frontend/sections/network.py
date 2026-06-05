@@ -1188,17 +1188,23 @@ def DisplayPanel(sid):
         solara.Button("Fit network", text=True, on_click=_fit_network)
         solara.Button("Zoom to sel.", text=True, on_click=_zoom_to_selection)
     solara.Select("Colour links by", value=state.link_color_by, values=["GEH", "Volume", "V/C"])
+
+    solara.Markdown("**Desire lines** (OD bars)")
+    vis = state.visible_layers.value
+    show_desire = vis.get("desire", True)
+    solara.Checkbox(label="Show desire lines", value=show_desire,
+                    on_value=lambda nv: state.visible_layers.set({**state.visible_layers.value, "desire": nv}))
     mats = solara.use_memo(
         lambda: [m for m in (api.list_matrices(sid) if sid else []) if m.get("kind") == "demand"],
         [sid, state.map_data.value is not None])
     by = {f"{m['name']} · {m['id'][:6]}": m["id"] for m in mats}
     cur = next((l for l, i in by.items() if i == state.desire_matrix_id.value), "(none)")
-    solara.Select("Desire lines", value=cur, values=["(none)"] + list(by),
-                  on_value=lambda l: state.desire_matrix_id.set(by.get(l, "")))
+    solara.Select("Matrix", value=cur, values=["(none)"] + list(by),
+                  on_value=lambda l: state.desire_matrix_id.set(by.get(l, "")),
+                  disabled=not show_desire)
 
     solara.Markdown("**Layers**")
-    vis = state.visible_layers.value
-    for k in ("links", "nodes", "zones", "connectors", "stops", "lines", "detectors", "desire"):
+    for k in ("links", "nodes", "zones", "connectors", "stops", "lines", "detectors"):
         solara.Checkbox(label=k, value=vis.get(k, True),
                         on_value=lambda nv, k=k: state.visible_layers.set({**state.visible_layers.value, k: nv}))
     solara.Checkbox(label="name labels", value=state.show_labels.value, on_value=state.show_labels.set)

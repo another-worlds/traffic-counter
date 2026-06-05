@@ -127,7 +127,7 @@ def flow_link_widgets(fc, color_by):
         sim = p.get("sim_vph")
         if sim is None:
             return {"color": GRAY, "weight": 2, "opacity": 0.6}
-        weight = 2 + min(sim / 150.0, 9)
+        weight = int(round(2 + min(sim / 150.0, 9)))
         if color_by == "Volume":
             return {"color": color_for_volume(sim), "weight": max(weight, 3), "opacity": 0.95}
         if color_by == "V/C":
@@ -163,7 +163,7 @@ def desire_widgets(zones_fc, labels, values, topn=40):
     out = []
     for v, a, b in trips:
         out.append(L.Polyline(locations=[cent[a], cent[b]], color=DESIRE,
-                              weight=1 + 7 * (v / vmax), opacity=0.5, fill=False))
+                              weight=int(round(1 + 7 * (v / vmax))), opacity=0.5, fill=False))
     return out
 
 

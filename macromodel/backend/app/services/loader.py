@@ -56,6 +56,8 @@ def persist_network(db: Session, scenario_id: str, nodes: List[dict], links: Lis
     for n in nodes:
         db.add(Node(id=n["id"], scenario_id=scenario_id, name=n.get("name"),
                     geom=n["geom"], osm_id=n.get("osm_id")))
+    db.flush()  # nodes must hit the DB before links reference them — Postgres enforces the FK
+    # (SQLAlchemy has no Node<->Link relationship to order these, and SQLite doesn't enforce it)
     for l in links:
         db.add(Link(id=l["id"], scenario_id=scenario_id, name=l.get("name"),
                     from_node_id=l["from_node_id"], to_node_id=l["to_node_id"], geom=l["geom"],

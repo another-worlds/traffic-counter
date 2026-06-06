@@ -20,6 +20,10 @@ class Settings(BaseSettings):
     env: str = "dev"
     cors_origins: str = "*"
 
+    # Optional custom Overpass API endpoint (e.g. a self-hosted instance).
+    # Leave empty to use the osmnx default (https://overpass-api.de/api).
+    overpass_endpoint: str = ""
+
     # UXsim simulation defaults.
     uxsim_deltan: int = 5          # platoon size (vehicles per simulated packet)
     sim_duration_s: int = 3600     # tmax — 1 h so link traffic_volume ≈ vph

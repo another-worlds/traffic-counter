@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -35,7 +35,10 @@ def load_sample(scenario_id: str, body: SampleNetworkRequest, db: Session = Depe
 @router.post("/scenarios/{scenario_id}/network/import-osm")
 def import_osm(scenario_id: str, body: BBoxImport, db: Session = Depends(get_db)):
     get_scenario_or_404(db, scenario_id)
-    nodes, links = osm_import.import_bbox(body.south, body.west, body.north, body.east)
+    try:
+        nodes, links = osm_import.import_bbox(body.south, body.west, body.north, body.east)
+    except ConnectionError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
     _clear(db, scenario_id)
     loader.persist_network(db, scenario_id, nodes, links)
     db.commit()

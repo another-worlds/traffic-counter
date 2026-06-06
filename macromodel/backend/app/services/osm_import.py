@@ -101,11 +101,40 @@ def _parse_lanes(lanes) -> int:
 
 def import_bbox(south: float, west: float, north: float, east: float) -> Tuple[List[dict], List[dict]]:
     import osmnx as ox  # heavy + online; imported lazily
+    import requests.exceptions
 
-    try:  # osmnx >= 2.0 takes bbox=(left, bottom, right, top)
-        G = ox.graph_from_bbox(bbox=(west, south, east, north), network_type="drive")
-    except TypeError:  # osmnx 1.x positional (north, south, east, west)
-        G = ox.graph_from_bbox(north, south, east, west, network_type="drive")
+    from ..config import settings
+
+    if settings.overpass_endpoint:
+        ox.settings.overpass_endpoint = settings.overpass_endpoint
+
+    # osmnx 1.9.x accepts the `bbox` keyword but still uses the old
+    # (north, south, east, west) order — no TypeError is raised so the
+    # except-TypeError fallback never fires.  Use explicit version detection
+    # so v1.x gets positional args (no FutureWarning, correct order) and v2+
+    # gets the new (left, bottom, right, top) tuple form.
+    _ox_major = int(ox.__version__.split(".")[0])
+    try:
+        if _ox_major >= 2:
+            G = ox.graph_from_bbox(bbox=(west, south, east, north), network_type="drive")
+        else:
+            G = ox.graph_from_bbox(north, south, east, west, network_type="drive")
+    except Exception as exc:
+        # osmnx ≤1.9 has a bug: when the Overpass connection fails,
+        # _get_overpass_pause re-raises as UnboundLocalError instead of
+        # propagating the original ConnectionError.  Walk the full cause
+        # chain so we surface a clean 503 regardless of which exception
+        # type osmnx happens to leak.
+        cause: BaseException | None = exc
+        while cause is not None:
+            if isinstance(cause, (requests.exceptions.ConnectionError, OSError)):
+                endpoint = ox.settings.overpass_endpoint
+                raise ConnectionError(
+                    f"Cannot reach Overpass API at {endpoint!r}. "
+                    "Check network connectivity or set OVERPASS_ENDPOINT to a reachable instance."
+                ) from exc
+            cause = getattr(cause, "__cause__", None) or getattr(cause, "__context__", None)
+        raise
 
     nodes: List[dict] = []
     idmap: Dict[object, str] = {}

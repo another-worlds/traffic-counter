@@ -202,6 +202,10 @@ services:
       STORAGE_ROOT: /data
       CORS_ORIGINS: "*"
       ENV: dev
+      # Optional: point to a self-hosted Overpass instance when overpass-api.de
+      # is unreachable (e.g. air-gapped networks, corporate firewalls).
+      # Example: OVERPASS_ENDPOINT: "http://overpass:80/api"
+      # OVERPASS_ENDPOINT: ""
     ports: ["8100:8100"]
     volumes:
       - macromodel_storage:/data

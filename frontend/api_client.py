@@ -237,7 +237,7 @@ def reap_stale_jobs() -> Dict:
 
 def get_video_segments(video_id: str) -> List[Dict]:
     """Return per-hour processing segments for a video."""
-    with _client(timeout=15.0) as c:
+    with _client(timeout=30.0) as c:
         r = c.get(f"/videos/{video_id}/segments")
         _raise(r)
         return r.json()

@@ -135,7 +135,7 @@ def _build_seg_entries(
     for seg in sorted(segments, key=lambda s: s["segment_idx"]):
         t0 = float(seg.get("start_time_s", 0))
         t1 = float(seg.get("end_time_s", t0 + 3600))
-        label = f"{_fmt_time(t0)}–{_fmt_time(t1)}"
+        label = seg.get("label") or f"{_fmt_time(t0)}–{_fmt_time(t1)}"
 
         if is_df and not tracks_df.empty:
             if "start_frame" in seg and "end_frame" in seg:
@@ -157,12 +157,83 @@ def _build_seg_entries(
     return entries
 
 
+REASON_LABELS = {
+    "missing_osd": "Нет метки времени (OSD)",
+    "time_jump": "Скачок времени",
+    "time_reverse": "Обратный ход времени",
+    "frozen_osd": "Замороженная метка",
+    "sync_recovery": "Стабилизация после склейки",
+}
+
+
+def _write_gaps_sheet(wb, gap_map: Dict, rows_excluded: int, existing_titles: set) -> None:
+    """Log detected timestamp inconsistencies on a dedicated sheet."""
+    title = "Несоответствия"
+    if title in existing_titles:
+        title = "Несоответствия_2"
+    existing_titles.add(title)
+    ws = wb.create_sheet(title=title)
+
+    stats = gap_map.get("stats", {})
+    ws.cell(row=1, column=1, value="Анализ меток времени (timestamp correction)").font = Font(bold=True, size=14)
+    _write_header(ws, ["Показатель", "Значение"], row=3)
+
+    summary_rows = [
+        ("Количество разрывов", stats.get("num_gaps", 0)),
+        ("Доля видео в разрывах", f"{100 * stats.get('gap_fraction', 0):.1f}%"),
+        ("Длительность разрывов (с)", stats.get("gap_duration_s", 0)),
+        ("Исключено строк треков", rows_excluded),
+    ]
+    if stats.get("sync_map_enabled"):
+        summary_rows.extend([
+            ("Сегментов OSD (sync map)", stats.get("num_segments", gap_map.get("num_segments", "—"))),
+            ("Доверенных 1-мин интервалов", stats.get("trusted_bins", "—")),
+            ("Доля доверенного timeline", (
+                f"{100 * float(stats.get('trusted_fraction', 0)):.1f}%"
+                if stats.get("trusted_fraction") is not None else "—"
+            )),
+        ])
+    by_reason = stats.get("by_reason", {})
+    for reason, count in by_reason.items():
+        label = REASON_LABELS.get(reason, reason)
+        summary_rows.append((f"Причина: {label}", count))
+
+    r = 4
+    for label, val in summary_rows:
+        ws.cell(row=r, column=1, value=label)
+        ws.cell(row=r, column=2, value=val)
+        r += 1
+
+    r += 1
+    gap_headers = ["Кадр нач.", "Кадр кон.", "Время нач. (с)", "Время кон. (с)", "Причина"]
+    _write_header(ws, gap_headers, row=r)
+    r += 1
+    for g in gap_map.get("gaps", []):
+        reason = REASON_LABELS.get(g.get("reason", ""), g.get("reason", ""))
+        row_vals = [
+            g.get("start_frame"),
+            g.get("end_frame"),
+            round(float(g.get("start_t_s", 0)), 1),
+            round(float(g.get("end_t_s", 0)), 1),
+            reason,
+        ]
+        for j, val in enumerate(row_vals, start=1):
+            ws.cell(row=r, column=j, value=val)
+        r += 1
+
+    _autosize(ws)
+
+
 def build_xlsx_for_video(
     project_name: str,
     video_filename: str,
     tracks_df,
     lines: List[Dict],
     segments: Optional[List[Dict]] = None,
+    gap_map: Optional[Dict] = None,
+    rows_excluded: int = 0,
+    raw_tracks_df=None,
+    wall_clock_segments: Optional[List[Dict]] = None,
 ) -> bytes:
     """Generate per-line workbook bytes.
 
@@ -176,38 +247,85 @@ def build_xlsx_for_video(
     ws.title = "Сводка"
     ws.cell(row=1, column=1, value=f"Проект: {project_name}").font = Font(bold=True, size=14)
     ws.cell(row=2, column=1, value=f"Видео: {video_filename}")
+    if gap_map:
+        note = "⚠ Скорректировано по разрывам меток времени"
+        if wall_clock_segments:
+            note += f" · {len(wall_clock_segments)} UTC hour(s)"
+        ws.cell(row=3, column=1, value=note).font = Font(
+            bold=True, color="C65911"
+        )
 
-    svod_headers = [
-        "Линия", "Всего", "Прямое", "Обратное",
-        *[ru for _, ru in CLASS_ORDER],
-    ]
-    _write_header(ws, svod_headers, row=4)
-
+    corrected = bool(gap_map)
+    raw_counts = None
+    if corrected and raw_tracks_df is not None:
+        raw_counts = compute_counts_for_lines(raw_tracks_df, lines)
     full_counts = compute_counts_for_lines(tracks_df, lines)
-    r = 5
+
+    if corrected:
+        svod_headers = [
+            "Линия", "Исходно", "Скоррект.", "Исключено",
+            "Прямое", "Обратное",
+            *[ru for _, ru in CLASS_ORDER],
+        ]
+        header_row = 4
+    else:
+        svod_headers = [
+            "Линия", "Всего", "Прямое", "Обратное",
+            *[ru for _, ru in CLASS_ORDER],
+        ]
+        header_row = 4
+    _write_header(ws, svod_headers, row=header_row)
+
+    raw_by_id = {}
+    if raw_counts:
+        raw_by_id = {ln["line_id"]: ln for ln in raw_counts["per_line"]}
+
+    r = header_row + 1
     for ln in full_counts["per_line"]:
         bdir = ln["by_direction"]
         bcls = ln["by_class"]
-        row_vals = [
-            ln["line_name"],
-            ln["total"],
-            bdir.get("positive", 0),
-            bdir.get("negative", 0),
-            *[bcls.get(key, 0) for key, _ in CLASS_ORDER],
-        ]
+        if corrected:
+            raw_ln = raw_by_id.get(ln["line_id"], {})
+            raw_total = raw_ln.get("total", ln["total"])
+            row_vals = [
+                ln["line_name"],
+                raw_total,
+                ln["total"],
+                raw_total - ln["total"],
+                bdir.get("positive", 0),
+                bdir.get("negative", 0),
+                *[bcls.get(key, 0) for key, _ in CLASS_ORDER],
+            ]
+        else:
+            row_vals = [
+                ln["line_name"],
+                ln["total"],
+                bdir.get("positive", 0),
+                bdir.get("negative", 0),
+                *[bcls.get(key, 0) for key, _ in CLASS_ORDER],
+            ]
         for j, val in enumerate(row_vals, start=1):
             ws.cell(row=r, column=j, value=val)
         r += 1
 
     ws.cell(row=r, column=1, value="Итого уникальных треков").font = Font(bold=True)
-    ws.cell(row=r, column=2, value=full_counts["total_unique_tracks"]).font = Font(bold=True)
+    if corrected and raw_counts:
+        ws.cell(row=r, column=2, value=raw_counts["total_unique_tracks"]).font = Font(bold=True)
+        ws.cell(row=r, column=3, value=full_counts["total_unique_tracks"]).font = Font(bold=True)
+        ws.cell(row=r, column=4, value=rows_excluded).font = Font(bold=True)
+    else:
+        ws.cell(row=r, column=2, value=full_counts["total_unique_tracks"]).font = Font(bold=True)
     _autosize(ws)
 
+    existing_titles: set = {ws.title}
+    if gap_map:
+        _write_gaps_sheet(wb, gap_map, rows_excluded, existing_titles)
+
     # Pre-pass: 1 materialization per segment (O(S) total, independent of line count).
-    seg_entries = _build_seg_entries(tracks_df, lines, segments, full_counts["per_line"])
+    export_segments = wall_clock_segments if wall_clock_segments else segments
+    seg_entries = _build_seg_entries(tracks_df, lines, export_segments, full_counts["per_line"])
 
     # ── Sheets per line — no materialization in this loop ────────────────────
-    existing_titles: set = {ws.title}
     for line in lines:
         title = _safe_sheet_title(line.get("name", "Линия"), existing_titles)
         existing_titles.add(title)

@@ -288,7 +288,9 @@ def load_materialized_tracks(project_id: str, video_id: str) -> MaterializedTrac
     entry = _cache_get(ck)
     if entry is None:
         if seg_ck is not None:
-            df = _load_segments_df(project_id, video_id) or pd.DataFrame(columns=_EMPTY_COLS)
+            df = _load_segments_df(project_id, video_id)
+            if df is None or df.empty:
+                df = pd.DataFrame(columns=_EMPTY_COLS)
         else:
             storage = get_storage()
             df = _normalise_dtypes(_read_parquet(storage, key_tracks(project_id, video_id)))

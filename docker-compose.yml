@@ -149,6 +149,7 @@ services:
       context: ./frontend
     environment:
       API_URL: http://api:8000
+      TIMESTAMP_CORRECTION_API_URL: http://timestamp-correction-api:8200
       # PUBLIC_API_URL must be reachable from the user's browser. Leave
       # unset for single-host deployments — the React iframe will derive
       # the API host from window.location (port 8000). Set this only when
@@ -161,6 +162,7 @@ services:
       - ./frontend:/app
     depends_on:
       - api
+      - timestamp-correction-api
     deploy:
       resources:
         limits:
@@ -225,9 +227,77 @@ services:
     depends_on:
       - macromodel-api
 
+  # ---------------------------------------------------------------------------
+  # timestamp_correction: OSD timestamp mapping + gap-corrected counts.
+  # Reads analyzed videos from the counter API and writes timestamp_* artifacts
+  # to shared storage. See timestamp_correction/.
+  # ---------------------------------------------------------------------------
+  timestamp-correction-api:
+    build:
+      context: ./timestamp_correction/backend
+    command: ./start.sh
+    environment:
+      TRAFFIC_COUNTER_API_URL: http://api:8000
+      DATABASE_URL: postgresql+psycopg://traffic:traffic@db:5432/traffic
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_ROOT: /data
+      ENV: dev
+      DEVICE: cpu
+      CORS_ORIGINS: "*"
+      SAMPLE_INTERVAL_MINUTES: "1"
+      USE_SYNC_MAP: "true"
+      SYNC_BIN_DURATION_S: "60"
+      SYNC_TOLERANCE_S: "5"
+      SYNC_STABLE_BINS_REQUIRED: "3"
+    ports: ["8200:8200"]
+    volumes:
+      - storage:/data
+      - ./timestamp_correction/backend:/app
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+    restart: unless-stopped
+
+  timestamp-correction-worker:
+    build:
+      context: ./timestamp_correction/backend
+    command: ./start_worker.sh
+    environment:
+      TRAFFIC_COUNTER_API_URL: http://api:8000
+      DATABASE_URL: postgresql+psycopg://traffic:traffic@db:5432/traffic
+      STORAGE_BACKEND: local
+      LOCAL_STORAGE_ROOT: /data
+      WORKER_MODE: poll
+      AUTO_SCAN_ENABLED: "true"
+      DEVICE: cpu
+      POLL_INTERVAL_S: "30"
+      STALE_PROCESSING_S: "7200"
+      SAMPLE_INTERVAL_MINUTES: "1"
+      USE_SYNC_MAP: "true"
+      SYNC_BIN_DURATION_S: "60"
+      SYNC_TOLERANCE_S: "5"
+      SYNC_STABLE_BINS_REQUIRED: "3"
+    volumes:
+      - storage:/data
+      - ./timestamp_correction/backend:/app
+      - timestamp_model_cache:/root/.EasyOCR
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_started
+      timestamp-correction-api:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   pgdata:
   storage:
   model_cache:
+  timestamp_model_cache:
   macromodel_pgdata:
   macromodel_storage:

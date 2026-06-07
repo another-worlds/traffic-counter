@@ -93,6 +93,21 @@ def _safe_add_columns():
         )""",
         "CREATE INDEX IF NOT EXISTS ix_video_segments_video_id ON video_segments(video_id)",
         "CREATE INDEX IF NOT EXISTS ix_video_segments_status ON video_segments(status)",
+        """CREATE TABLE IF NOT EXISTS timestamp_scans (
+            video_id UUID PRIMARY KEY REFERENCES videos(id) ON DELETE CASCADE,
+            status VARCHAR(32) NOT NULL DEFAULT 'pending',
+            progress JSON,
+            region JSON,
+            gaps JSON,
+            stats JSON,
+            timeline_summary JSON,
+            timeline_viz JSON,
+            error_message TEXT,
+            started_at TIMESTAMP,
+            completed_at TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS ix_timestamp_scans_status ON timestamp_scans(status)",
     ]
     with engine.begin() as conn:
         for stmt in stmts:

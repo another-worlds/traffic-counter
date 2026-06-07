@@ -30,6 +30,8 @@ import {
 } from './api';
 import Viewport from './Viewport';
 import SidePanel from './SidePanel';
+import TimestampPanel from './TimestampPanel';
+import { resolveTimestampApiBaseUrl } from './timestampApi';
 import { getTool } from './tools';
 import type { ToolContext } from './tools';
 import './styles.css';
@@ -111,6 +113,10 @@ export default function App({ bootstrap }: AppProps) {
   const apiCfg = React.useMemo<ApiBaseConfig>(
     () => ({ baseUrl: resolveApiBaseUrl(bootstrap?.apiBaseUrl) }),
     [bootstrap?.apiBaseUrl],
+  );
+  const tsCfg = React.useMemo(
+    () => ({ baseUrl: resolveTimestampApiBaseUrl(bootstrap?.timestampApiBaseUrl) }),
+    [bootstrap?.timestampApiBaseUrl],
   );
   const apiCfgRef = React.useRef(apiCfg);
   apiCfgRef.current = apiCfg;
@@ -433,6 +439,10 @@ export default function App({ bootstrap }: AppProps) {
     setSuggestions(undefined);
   }, []);
 
+  const persistedLineIds = model.lines
+    .filter((l) => serverLinesRef.current.has(l.id))
+    .map((l) => l.id);
+
   return (
     <div className="overlay-shell">
       {apiError && (
@@ -530,6 +540,18 @@ export default function App({ bootstrap }: AppProps) {
               Single camera angle — no scene cuts detected.
             </p>
           )}
+
+          <TimestampPanel
+            videoId={spec.videoId}
+            projectId={spec.projectId}
+            lineIds={persistedLineIds}
+            tsCfg={tsCfg}
+            apiBaseUrl={bootstrap?.apiBaseUrl}
+            frames={bootstrap?.frames}
+            frameIndex={model.currentFrame}
+            videoSize={videoSize}
+            videoStatus={bootstrap?.videoStatus}
+          />
         </section>
 
         <SidePanel

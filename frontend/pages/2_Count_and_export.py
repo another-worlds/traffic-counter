@@ -61,6 +61,16 @@ def _absolute_url(rel: Optional[str]) -> Optional[str]:
     return api.file_url(rel)
 
 
+def _browser_timestamp_api_base_url() -> Optional[str]:
+    """Return the timestamp-correction API URL the browser should use."""
+    raw = os.environ.get("PUBLIC_TIMESTAMP_CORRECTION_API_URL", "").strip()
+    if not raw:
+        return None
+    if "localhost" in raw or "127.0.0.1" in raw:
+        return None
+    return raw
+
+
 def _browser_api_base_url() -> Optional[str]:
     """Return the API URL the *browser* should use, or None to let the React
     iframe derive it from window.location. ``PUBLIC_API_URL`` defaults to
@@ -129,7 +139,11 @@ def _render_video_selector(ws_id: str, videos: List[Dict[str, Any]],
         src = v.get("local_source_path") or ""
         folder = os.path.dirname(src) if src else ""
         prefix = f"{folder}/" if folder else ""
-        return f'{prefix}{v["filename"]} · {v.get("num_tracks", 0)} tracks'
+        status = v.get("status", "?")
+        tracks = v.get("num_tracks", 0)
+        if status == "analyzed":
+            return f'{prefix}{v["filename"]} · {tracks} tracks'
+        return f'{prefix}{v["filename"]} · {status}'
 
     st.selectbox(
         "📼 Video",
@@ -165,10 +179,14 @@ def render_page() -> None:
 
     st.caption(f"Workspace: **{ws['name']}**")
 
-    videos = [v for v in api.list_videos(ws["id"]) if v.get("status") == "analyzed"]
+    all_videos = api.list_videos(ws["id"])
+    videos = [
+        v for v in all_videos
+        if v.get("status") in ("uploaded", "queued", "analyzing", "analyzed")
+    ]
 
     if not videos:
-        st.info("No analyzed videos in this workspace. Process videos on the Watched Folder page first.")
+        st.info("No videos in this workspace. Import videos on the Watched Folder page first.")
         st.stop()
 
     ws_id = str(ws["id"])
@@ -241,6 +259,7 @@ def render_page() -> None:
         # the host from window.location (remote browsers can't reach
         # "localhost" on the server).
         "apiBaseUrl": _browser_api_base_url(),
+        "timestampApiBaseUrl": _browser_timestamp_api_base_url(),
         "initialLines": lines,
         "frames": frames_for_bootstrap,
         "frameUrl": legacy_frame_url,
@@ -250,6 +269,7 @@ def render_page() -> None:
             "width": int(preview_video.get("width") or 1920),
             "height": int(preview_video.get("height") or 1080),
         },
+        "videoStatus": preview_video.get("status", "uploaded"),
         "trackStats": track_stats,
         "suggestions": suggestions,
     }

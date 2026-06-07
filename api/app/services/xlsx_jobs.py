@@ -26,6 +26,11 @@ from ..config import settings
 from ..db import SessionLocal
 from ..models import CountingLine, Project, Video, VideoSegment
 from .tracks import load_tracks_for_video
+from .timestamp_gaps import (
+    build_wall_clock_segments_for_tracks,
+    filter_tracks_by_gaps,
+    load_gap_map,
+)
 from .xlsx_export import build_xlsx_for_video
 
 log = logging.getLogger("api.xlsx_jobs")
@@ -99,6 +104,7 @@ def run_export_job(
     video_id: str,
     video_filename: str,
     line_ids: List[str],
+    apply_timestamp_correction: bool = False,
 ) -> None:
     """Background worker — opens its own DB session, builds the workbook,
     writes it to disk, updates the registry. Catches *everything* so a
@@ -127,6 +133,20 @@ def run_export_job(
                 for ln in lines
             ]
             tracks_df = load_tracks_for_video(project_id, video_id)
+            gap_map = None
+            rows_excluded = 0
+            if apply_timestamp_correction:
+                gap_map = load_gap_map(project_id, video_id)
+                if not gap_map:
+                    raise RuntimeError(
+                        "timestamp gap map not available — run timestamp scan first"
+                    )
+                tracks_df, rows_excluded = filter_tracks_by_gaps(tracks_df, gap_map["gaps"])
+                log.info(
+                    "xlsx job %s: timestamp correction applied, excluded %d track rows",
+                    job_id,
+                    rows_excluded,
+                )
 
             # Collect per-hour segment metadata (if any) for the xlsx builder.
             segments = (
@@ -149,12 +169,33 @@ def run_export_job(
                 for s in segments
             ] if segments else None
 
+            raw_tracks_df = None
+            wall_clock_segments = None
+            if apply_timestamp_correction and gap_map:
+                raw_tracks_df = load_tracks_for_video(project_id, video_id)
+                sync_map = gap_map.get("sync_map")
+                fps = float((gap_map.get("stats") or {}).get("fps") or 0.0)
+                if sync_map and fps > 0:
+                    wall_clock_segments = build_wall_clock_segments_for_tracks(
+                        tracks_df, sync_map, fps,
+                    )
+                    if wall_clock_segments:
+                        log.info(
+                            "xlsx job %s: wall-clock export with %d UTC hour segment(s)",
+                            job_id,
+                            len(wall_clock_segments),
+                        )
+
             data = build_xlsx_for_video(
                 project_name=project_name,
                 video_filename=video_filename,
                 tracks_df=tracks_df,
                 lines=lines_dict,
                 segments=segments_dict,
+                gap_map=gap_map,
+                rows_excluded=rows_excluded,
+                raw_tracks_df=raw_tracks_df,
+                wall_clock_segments=wall_clock_segments,
             )
 
             # Persist alongside other artifacts.

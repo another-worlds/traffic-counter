@@ -118,6 +118,29 @@ class CountingLine(Base):
     video = relationship("Video", back_populates="lines")
 
 
+class TimestampScan(Base):
+    """OSD timestamp scan results for gap-corrected counts."""
+    __tablename__ = "timestamp_scans"
+
+    video_id = Column(
+        UUID(as_uuid=False),
+        ForeignKey("videos.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    # pending | processing | done | error
+    status = Column(String(32), nullable=False, default="pending")
+    progress = Column(JSON, nullable=True)
+    region = Column(JSON, nullable=True)
+    gaps = Column(JSON, nullable=True)
+    stats = Column(JSON, nullable=True)
+    timeline_summary = Column(JSON, nullable=True)
+    timeline_viz = Column(JSON, nullable=True)
+    error_message = Column(Text, nullable=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
 class VideoSegment(Base):
     """One hour-sized processing chunk of a video.
 

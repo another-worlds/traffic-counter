@@ -142,10 +142,14 @@ export function startExport(
   cfg: ApiBaseConfig,
   videoId: string,
   lineIds: string[],
+  applyTimestampCorrection = false,
 ): Promise<{ job_id: string; status: string }> {
   return request(cfg, `/videos/${encodeURIComponent(videoId)}/export`, {
     method: 'POST',
-    body: JSON.stringify({ line_ids: lineIds }),
+    body: JSON.stringify({
+      line_ids: lineIds,
+      apply_timestamp_correction: applyTimestampCorrection,
+    }),
   });
 }
 

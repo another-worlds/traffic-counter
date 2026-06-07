@@ -82,6 +82,8 @@ export type HostViewportBootstrap = {
   spec?: Partial<ViewportSpec>;
   /** Base URL the iframe should use for direct FastAPI calls (no Streamlit hop). */
   apiBaseUrl?: string;
+  /** Timestamp-correction service base URL (default :8200). */
+  timestampApiBaseUrl?: string;
   initialLines?: ApiLine[] | LineGeometry[];
   /** Scene-based keyframes from the backend; replaces the single frameUrl. */
   frames?: SceneFrame[];
@@ -90,6 +92,7 @@ export type HostViewportBootstrap = {
   trajectoriesUrl?: string;
   heatmapUrl?: string;
   videoSize?: VideoSize;
+  videoStatus?: string;
   trackStats?: TrackStats;
   counts?: CountsBundle;
   suggestions?: Suggestion[];

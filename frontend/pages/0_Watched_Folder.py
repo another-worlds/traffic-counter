@@ -6,7 +6,10 @@ from pathlib import Path
 
 import streamlit as st
 
+import httpx
+
 import api_client as api
+import timestamp_client as ts_api
 
 st.set_page_config(page_title="Watched Folder", page_icon="📂", layout="wide")
 st.title("📂 Watched Folder")
@@ -182,6 +185,369 @@ mc12.metric("Videos remaining", unstarted + in_queue)
 
 st.progress(analyzed / max(1, total), text=f"Overall completion: {analyzed}/{total} videos")
 
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_video_segments(video_id: str) -> list:
+    return api.get_video_segments(video_id)
+
+
+@st.cache_data(ttl=5, show_spinner=False)
+def _cached_timestamp_statuses(video_keys: tuple) -> dict:
+    """video_keys: tuple of (id, project_id) pairs for cache invalidation."""
+    videos = [{"id": vid, "project_id": pid, "status": "analyzed"} for vid, pid in video_keys]
+    return ts_api.fetch_statuses_for_videos(videos)
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def _cached_region_preview(video_id: str, project_id: str, cache_bust: str) -> bytes | None:
+    return ts_api.get_region_preview_bytes(video_id, project_id)
+
+
+def _region_preview_cache_bust(doc: dict) -> str:
+    progress = doc.get("progress") or {}
+    return str(
+        doc.get("completed_at")
+        or f"{progress.get('phase', '')}-{progress.get('percent', '')}"
+    )
+
+
+def _region_preview_caption(doc: dict) -> str:
+    region = doc.get("region") or {}
+    method = str(region.get("method", ""))
+    if method.startswith("manual"):
+        label = "Manual region"
+    elif "ocr_timestamp" in method:
+        label = "Auto-detected timestamp"
+    elif method:
+        label = f"Auto-detected ({method})"
+    else:
+        label = "Timestamp region"
+    if region.get("w") and region.get("h"):
+        label += f" · {region['w']}×{region['h']}px"
+    return label
+
+
+_DELETABLE_TS_STATUSES = frozenset({"done", "error", "cancelled"})
+
+
+def _clear_ts_dashboard_caches() -> None:
+    _cached_timestamp_statuses.clear()
+    _cached_region_preview.clear()
+
+
+def _delete_timestamp_analysis(v: dict, *, key: str) -> None:
+    try:
+        ts_api.delete_timestamp_scan(str(v["id"]), str(v["project_id"]))
+        _clear_ts_dashboard_caches()
+        st.toast(f"Deleted timestamp analysis for {v['filename']}")
+        st.rerun()
+    except ts_api.TimestampAPIError as exc:
+        st.error(str(exc))
+
+
+def _delete_all_timestamp_analyses(videos: list) -> None:
+    if not videos:
+        return
+    with st.spinner(f"Deleting timestamp analysis for {len(videos)} video(s)…"):
+        result = ts_api.delete_timestamp_scans_bulk(videos)
+    _clear_ts_dashboard_caches()
+    deleted = int(result.get("deleted") or 0)
+    failed = result.get("failed") or []
+    if deleted:
+        st.success(f"Deleted timestamp analysis for {deleted} video(s). Auto-scan will queue again.")
+    if failed:
+        st.warning(f"Could not delete {len(failed)} video(s):")
+        for item in failed[:5]:
+            st.caption(f"{item.get('filename', item.get('id'))}: {item.get('error', 'unknown error')}")
+        if len(failed) > 5:
+            st.caption(f"…and {len(failed) - 5} more")
+    if deleted or failed:
+        st.session_state.pop("ts_delete_all_confirm", None)
+        st.rerun()
+
+
+def _render_ts_region_preview(v: dict, doc: dict) -> None:
+    artifacts = doc.get("artifacts") or {}
+    if not artifacts.get("region_preview"):
+        return
+    preview = _cached_region_preview(
+        str(v["id"]),
+        str(v["project_id"]),
+        _region_preview_cache_bust(doc),
+    )
+    if preview:
+        st.image(preview, caption=_region_preview_caption(doc), width=300)
+
+
+def _render_timestamp_dashboard(videos: list, analyzed_count: int) -> int:
+    """Render OSD timestamp scan dashboard. Returns count of in-progress scans."""
+    st.divider()
+    st.subheader("Timestamp Scan Dashboard")
+    st.caption(
+        "Auto-queued for every analyzed video. Locates burned-in timestamps, "
+        "detects footage gaps, and prepares gap-corrected counts."
+    )
+
+    if analyzed_count == 0:
+        st.info("No analyzed videos yet — timestamp scans start after vehicle tracking completes.")
+        return 0
+
+    if not ts_api.health_check():
+        st.warning("Timestamp API unreachable (port 8200). Start `timestamp-correction-api` and worker.")
+        return 0
+
+    analyzed_videos = [v for v in videos if v["status"] == "analyzed"]
+    keys = tuple((str(v["id"]), str(v["project_id"])) for v in analyzed_videos)
+    ts_by_id = _cached_timestamp_statuses(keys)
+
+    ts_counts = defaultdict(int)
+    for doc in ts_by_id.values():
+        ts_counts[doc.get("status", "pending")] += 1
+
+    ts_done = ts_counts["done"]
+    ts_processing = ts_counts["processing"]
+    ts_pending = ts_counts["pending"]
+    ts_errors = ts_counts["error"] + ts_counts["unreachable"]
+    ts_total = len(analyzed_videos)
+
+    tc1, tc2, tc3, tc4, tc5 = st.columns(5)
+    tc1.metric("Scans complete", ts_done, f"{(ts_done / max(1, ts_total)) * 100:.0f}%")
+    tc2.metric("Scanning now", ts_processing)
+    tc3.metric("Queued", ts_pending)
+    tc4.metric("Scan errors", ts_errors)
+    tc5.metric("Analyzed videos", ts_total)
+
+    st.progress(
+        ts_done / max(1, ts_total),
+        text=f"Timestamp scans: {ts_done}/{ts_total} complete",
+    )
+
+    clearable_all = [
+        v for v in analyzed_videos
+        if ts_by_id.get(v["id"], {}).get("status") in _DELETABLE_TS_STATUSES
+    ]
+    if clearable_all or ts_processing:
+        with st.container(border=True):
+            st.markdown("**Bulk actions**")
+            if clearable_all:
+                st.caption(
+                    f"Clear gap maps, timelines, and region artifacts for "
+                    f"{len(clearable_all)} video(s). Each resets to pending and auto-scan will queue again."
+                )
+            if ts_processing:
+                st.caption(
+                    f"{ts_processing} scan(s) still running — stop those first; they cannot be bulk-deleted."
+                )
+            confirm_col, action_col = st.columns([3, 1])
+            with confirm_col:
+                st.checkbox(
+                    "I understand this permanently removes all saved timestamp corrections",
+                    key="ts_delete_all_confirm",
+                    disabled=not clearable_all,
+                )
+            with action_col:
+                if st.button(
+                    f"Delete all ({len(clearable_all)})",
+                    key="ts_delete_all_btn",
+                    type="secondary",
+                    disabled=not clearable_all or not st.session_state.get("ts_delete_all_confirm"),
+                    use_container_width=True,
+                ):
+                    _delete_all_timestamp_analyses(clearable_all)
+
+    # Aggregate gap stats from completed scans
+    total_gaps = 0
+    total_gap_fraction = 0.0
+    done_with_stats = 0
+    for doc in ts_by_id.values():
+        if doc.get("status") != "done":
+            continue
+        stats = doc.get("stats") or {}
+        if stats:
+            done_with_stats += 1
+            total_gaps += int(stats.get("num_gaps") or 0)
+            total_gap_fraction += float(stats.get("gap_fraction") or 0.0)
+    if done_with_stats:
+        gc1, gc2, gc3 = st.columns(3)
+        gc1.metric("Avg gaps per video", f"{total_gaps / done_with_stats:.1f}")
+        gc2.metric("Avg footage in gaps", f"{(total_gap_fraction / done_with_stats) * 100:.1f}%")
+        gc3.metric("Videos with gap map", done_with_stats)
+
+    # Live processing queue
+    processing_items = []
+    for v in analyzed_videos:
+        doc = ts_by_id.get(v["id"], {})
+        if doc.get("status") != "processing":
+            continue
+        progress = doc.get("progress") or {}
+        processing_items.append({
+            "video": v,
+            "progress": progress,
+            "message": progress.get("message") or progress.get("phase_label") or "Scanning…",
+            "percent": float(progress.get("percent") or 0.0),
+            "phase": progress.get("phase_label") or progress.get("phase") or "processing",
+        })
+
+    if processing_items:
+        st.markdown("### Live Timestamp Scans")
+        for item in processing_items[:8]:
+            v = item["video"]
+            doc = ts_by_id.get(v["id"], {})
+            with st.container(border=True):
+                col_main, col_preview = st.columns([3, 1])
+                with col_main:
+                    col_title, col_stop = st.columns([4, 1])
+                    with col_title:
+                        st.write(f"**{v['filename']}**")
+                        st.caption(f"{_folder_of(v)} · {item['phase']}")
+                    with col_stop:
+                        if st.button("Stop", key=f"ts_stop_{v['id']}", type="secondary"):
+                            try:
+                                ts_api.stop_timestamp_scan(str(v["id"]), str(v["project_id"]))
+                                st.toast(f"Stopped — auto-scan off for {v['filename']}")
+                                st.rerun()
+                            except ts_api.TimestampAPIError as exc:
+                                st.error(str(exc))
+                    st.progress(
+                        min(1.0, item["percent"] / 100.0),
+                        text=f"{item['percent']:.0f}% — {item['message']}",
+                    )
+                with col_preview:
+                    _render_ts_region_preview(v, doc)
+        if len(processing_items) > 8:
+            st.caption(f"…and {len(processing_items) - 8} more scanning")
+
+    done_items = [
+        v for v in analyzed_videos
+        if ts_by_id.get(v["id"], {}).get("status") == "done"
+    ]
+    if done_items:
+        st.markdown("### Completed Timestamp Scans")
+        for v in done_items[:12]:
+            doc = ts_by_id.get(v["id"], {})
+            stats = doc.get("stats") or {}
+            with st.container(border=True):
+                col_main, col_preview = st.columns([3, 1])
+                with col_main:
+                    col_title, col_delete = st.columns([4, 1])
+                    with col_title:
+                        st.write(f"**{v['filename']}**")
+                        st.caption(f"{_folder_of(v)}")
+                        gaps = stats.get("num_gaps")
+                        gap_frac = stats.get("gap_fraction")
+                        stride = stats.get("sample_stride_frames")
+                        fps = stats.get("fps")
+                        interval_min = stats.get("sample_interval_minutes")
+                        if stride and fps:
+                            interval_txt = (
+                                f"{interval_min:g} min"
+                                if interval_min is not None
+                                else f"{stats.get('sample_interval_s', 60):.0f}s"
+                            )
+                            st.caption(f"OCR stride: every {stride} frames ({fps} fps · {interval_txt})")
+                        if gaps is not None:
+                            gap_txt = f"{gaps} gap(s)"
+                            if gap_frac is not None:
+                                gap_txt += f" · {float(gap_frac) * 100:.1f}% footage in gaps"
+                            st.caption(gap_txt)
+                    with col_delete:
+                        if st.button("Delete", key=f"ts_del_done_{v['id']}", type="secondary"):
+                            _delete_timestamp_analysis(v, key=f"ts_del_done_{v['id']}")
+                with col_preview:
+                    _render_ts_region_preview(v, doc)
+        if len(done_items) > 12:
+            st.caption(f"…and {len(done_items) - 12} more completed scans")
+
+    # Pending queue preview
+    pending_items = [
+        v for v in analyzed_videos
+        if ts_by_id.get(v["id"], {}).get("status") in ("pending", None)
+    ]
+    if pending_items and not processing_items:
+        st.markdown("### Timestamp Queue")
+        st.caption(f"{len(pending_items)} analyzed video(s) waiting for auto-scan")
+        for v in pending_items[:5]:
+            col_cap, col_stop = st.columns([4, 1])
+            with col_cap:
+                st.caption(f"⏳ {v['filename']} · {_folder_of(v)}")
+            with col_stop:
+                if st.button("Stop", key=f"ts_stop_pending_{v['id']}", type="secondary"):
+                    try:
+                        ts_api.stop_timestamp_scan(str(v["id"]), str(v["project_id"]))
+                        st.toast(f"Stopped — auto-scan off for {v['filename']}")
+                        st.rerun()
+                    except ts_api.TimestampAPIError as exc:
+                        st.error(str(exc))
+        if len(pending_items) > 5:
+            st.caption(f"…and {len(pending_items) - 5} more")
+
+    # Per-video status table (collapsible)
+    with st.expander(f"All timestamp scan statuses ({ts_total})", expanded=False):
+        status_icon = {
+            "done": "🟩",
+            "processing": "🟧",
+            "pending": "🟨",
+            "cancelled": "⏹",
+            "error": "🟥",
+            "unreachable": "⚫",
+        }
+        rows = []
+        for v in sorted(analyzed_videos, key=lambda x: (ts_by_id.get(x["id"], {}).get("status", "z"), x["filename"])):
+            doc = ts_by_id.get(v["id"], {"status": "pending"})
+            st_key = doc.get("status", "pending")
+            progress = doc.get("progress") or {}
+            stats = doc.get("stats") or {}
+            pct = progress.get("percent")
+            rows.append({
+                "status": f"{status_icon.get(st_key, '❓')} {st_key}",
+                "file": v["filename"],
+                "folder": _folder_of(v),
+                "progress": f"{pct:.0f}%" if pct is not None else "—",
+                "gaps": stats.get("num_gaps", "—"),
+                "gap_%": (
+                    f"{float(stats['gap_fraction']) * 100:.1f}%"
+                    if stats.get("gap_fraction") is not None else "—"
+                ),
+                "phase": progress.get("phase_label") or "—",
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+        clearable = [
+            v for v in analyzed_videos
+            if ts_by_id.get(v["id"], {}).get("status") in _DELETABLE_TS_STATUSES
+        ]
+        if clearable:
+            st.markdown("**Delete timestamp analysis**")
+            st.caption("Removes gap map, timeline, and region artifacts. Auto-scan will queue again.")
+            for v in clearable[:20]:
+                doc = ts_by_id.get(v["id"], {})
+                st_key = doc.get("status", "pending")
+                col_cap, col_del = st.columns([5, 1])
+                with col_cap:
+                    st.caption(f"{v['filename']} · {_folder_of(v)} · {st_key}")
+                with col_del:
+                    if st.button("Delete", key=f"ts_del_tbl_{v['id']}", type="secondary"):
+                        _delete_timestamp_analysis(v, key=f"ts_del_tbl_{v['id']}")
+
+        preview_videos = [
+            v for v in analyzed_videos
+            if ts_by_id.get(v["id"], {}).get("status") in ("processing", "done")
+            and (ts_by_id.get(v["id"], {}).get("artifacts") or {}).get("region_preview")
+        ]
+        if preview_videos:
+            st.markdown("**Region previews**")
+            cols = st.columns(min(4, len(preview_videos[:8])))
+            for i, v in enumerate(preview_videos[:8]):
+                doc = ts_by_id.get(v["id"], {})
+                with cols[i % len(cols)]:
+                    st.caption(v["filename"])
+                    _render_ts_region_preview(v, doc)
+
+    return ts_processing
+
+
+ts_in_progress = _render_timestamp_dashboard(videos, analyzed)
+
 # Folder clustering (used both by dashboard and list)
 folders = defaultdict(list)
 for v in videos:
@@ -262,7 +628,10 @@ with left:
     with c3:
         st.button("⟳ Refresh now", use_container_width=True, on_click=lambda: None)
     with c4:
-        auto_refresh = st.checkbox("Auto-refresh (3s)", value=in_queue > 0)
+        auto_refresh = st.checkbox(
+            "Auto-refresh (3s)",
+            value=in_queue > 0 or ts_in_progress > 0,
+        )
 with right:
     st.markdown("### Live Queue")
     st.caption(f"{len(queue)} item(s) currently queued/running across all workspaces")
@@ -385,12 +754,19 @@ for v in folder_videos:
         if seg_count > 0:
             completed_segs = (q_item or {}).get("completed_segments") or 0
             label = f"Segments ({completed_segs}/{seg_count} done)"
+            seg_cache_key = f"segs_loaded_{v['id']}"
             with st.expander(label, expanded=False):
-                try:
-                    segs = api.get_video_segments(v["id"])
-                except api.APIError:
-                    st.warning("Could not load segment data.")
+                if not st.session_state.get(seg_cache_key):
+                    if st.button("Load segments", key=f"load_segs_{v['id']}", use_container_width=True):
+                        st.session_state[seg_cache_key] = True
+                        st.rerun()
                     segs = []
+                else:
+                    try:
+                        segs = _cached_video_segments(v["id"])
+                    except (api.APIError, httpx.TimeoutException, httpx.ReadTimeout):
+                        st.warning("Could not load segment data (API busy or timed out).")
+                        segs = []
                 if segs:
                     seg_status_icon = {
                         "pending": "⬜",
@@ -432,6 +808,9 @@ for v in folder_videos:
             with st.expander("Full error details", expanded=False):
                 st.code(v["error_message"], language=None)
 
-if auto_refresh and in_queue > 0:
+if auto_refresh and (in_queue > 0 or ts_in_progress > 0):
     time.sleep(3)
+    st.rerun()
+elif auto_refresh and ts_in_progress == 0 and in_queue == 0:
+    time.sleep(10)
     st.rerun()

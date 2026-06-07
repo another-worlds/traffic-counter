@@ -189,3 +189,15 @@ def key_heatmap(project_id: str, video_id: str) -> str:
 
 def key_export(project_id: str, export_id: str) -> str:
     return f"projects/{project_id}/exports/{export_id}.xlsx"
+
+def key_timestamp_gaps(project_id: str, video_id: str) -> str:
+    return f"projects/{project_id}/videos/{video_id}/timestamp_gaps.json"
+
+def key_timestamp_region(project_id: str, video_id: str) -> str:
+    return f"projects/{project_id}/videos/{video_id}/timestamp_region.json"
+
+def key_timestamp_status(project_id: str, video_id: str) -> str:
+    return f"projects/{project_id}/videos/{video_id}/timestamp_status.json"
+
+def key_timestamp_sync_map(project_id: str, video_id: str) -> str:
+    return f"projects/{project_id}/videos/{video_id}/timestamp_sync_map.json"

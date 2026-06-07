@@ -249,7 +249,7 @@ function ImportExportPanel({ model, bootstrap, dispatch }: PanelSectionProps) {
     e.target.value = '';
   }
 
-  async function handleXlsxExport() {
+  async function runXlsxExport(applyCorrection: boolean) {
     const videoId = bootstrap?.spec?.videoId;
     if (!videoId || model.lines.length === 0) return;
     if (pollRef.current) clearInterval(pollRef.current);
@@ -260,7 +260,7 @@ function ImportExportPanel({ model, bootstrap, dispatch }: PanelSectionProps) {
 
     let jobId: string;
     try {
-      const resp = await startExport(cfg, videoId, model.lines.map((l) => l.id));
+      const resp = await startExport(cfg, videoId, model.lines.map((l) => l.id), applyCorrection);
       jobId = resp.job_id;
     } catch (err) {
       setXlsxState('error');
@@ -296,6 +296,14 @@ function ImportExportPanel({ model, bootstrap, dispatch }: PanelSectionProps) {
     }, 1000);
   }
 
+  function handleXlsxExport() {
+    runXlsxExport(false);
+  }
+
+  function handleCorrectedXlsxExport() {
+    runXlsxExport(true);
+  }
+
   const xlsxBusy = xlsxState === 'pending' || xlsxState === 'running';
   const xlsxLabel =
     xlsxState === 'pending' ? '⏳ Preparing…' :
@@ -317,6 +325,15 @@ function ImportExportPanel({ model, bootstrap, dispatch }: PanelSectionProps) {
           disabled={xlsxBusy || model.lines.length === 0 || !bootstrap?.spec?.videoId}
         >
           {xlsxLabel}
+        </button>
+        <button
+          type="button"
+          className="toolbar-button small primary"
+          onClick={handleCorrectedXlsxExport}
+          disabled={xlsxBusy || model.lines.length === 0 || !bootstrap?.spec?.videoId}
+          title="Export with timestamp gap correction and inconsistency log sheet"
+        >
+          {xlsxBusy ? xlsxLabel : '📊 Corrected XLSX'}
         </button>
         <button type="button" className="toolbar-button small" onClick={() => fileRef.current?.click()}>
           📥 Import JSON

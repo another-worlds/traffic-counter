@@ -95,6 +95,8 @@ class CountRequest(BaseModel):
     # Single-video scope. Server validates that every line_id belongs to the
     # path-param video.
     line_ids: List[str]
+    # When true, exclude track rows inside timestamp-correction gap intervals.
+    apply_timestamp_correction: bool = False
 
 
 class LineCountResult(BaseModel):

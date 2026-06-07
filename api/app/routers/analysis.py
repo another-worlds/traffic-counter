@@ -16,7 +16,8 @@ from ..schemas import (
     SuggestLineOut,
 )
 from ..services.tracks import load_materialized_tracks, load_tracks_for_video
-from ..services.counting import compute_counts_for_lines
+from ..services.counting import compute_counts_for_lines, materialize_tracks
+from ..services.timestamp_gaps import load_gap_map, filter_tracks_by_gaps
 from ..services.suggest import suggest_lines as _suggest_lines
 from ..services import xlsx_jobs
 
@@ -67,11 +68,22 @@ async def counts(video_id: str, body: CountRequest, db: Session = Depends(get_db
             raise HTTPException(409, "video must be analyzed first")
 
         lines = _load_lines_for_video(db, video_id, body.line_ids)
-        # MaterializedTracks: sort + groupby + modal-class precomputed once per
-        # video, shared across every line in this request and every subsequent
-        # request for the same video until re-analysis bumps the cache key.
-        mt = load_materialized_tracks(v.project_id, video_id)
-        result = compute_counts_for_lines(mt, _lines_to_dict(lines))
+        lines_dict = _lines_to_dict(lines)
+
+        if body.apply_timestamp_correction:
+            gap_data = load_gap_map(v.project_id, video_id)
+            if not gap_data:
+                raise HTTPException(
+                    409,
+                    "timestamp gap map not available — run timestamp scan first",
+                )
+            tracks_df = load_tracks_for_video(v.project_id, video_id)
+            filtered, _ = filter_tracks_by_gaps(tracks_df, gap_data["gaps"])
+            mt = materialize_tracks(filtered)
+        else:
+            mt = load_materialized_tracks(v.project_id, video_id)
+
+        result = compute_counts_for_lines(mt, lines_dict)
 
         return CountResponse(
             total_unique_tracks=result["total_unique_tracks"],
@@ -99,11 +111,18 @@ def export_start(
     # Validate lines belong to the video before scheduling work.
     _load_lines_for_video(db, video_id, body.line_ids)
 
+    if body.apply_timestamp_correction and not load_gap_map(str(v.project_id), video_id):
+        raise HTTPException(
+            409,
+            "timestamp gap map not available — run timestamp scan first",
+        )
+
     safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in v.filename)
     project_name = v.project.name if v.project else "project"
+    suffix = "-corrected" if body.apply_timestamp_correction else ""
     job = xlsx_jobs.start_job(
         video_id=video_id,
-        filename=f"counts-{safe_name}.xlsx",
+        filename=f"counts-{safe_name}{suffix}.xlsx",
     )
     background.add_task(
         xlsx_jobs.run_export_job,
@@ -113,6 +132,7 @@ def export_start(
         video_id=video_id,
         video_filename=v.filename,
         line_ids=body.line_ids,
+        apply_timestamp_correction=body.apply_timestamp_correction,
     )
     return {"job_id": job.job_id, "status": job.status}
 

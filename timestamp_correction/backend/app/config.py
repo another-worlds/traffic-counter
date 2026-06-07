@@ -20,7 +20,11 @@ class Settings(BaseSettings):
     use_sync_map: bool = True
     sync_bin_duration_s: float = 60.0
     sync_tolerance_s: float = 5.0
-    sync_stable_bins_required: int = 3
+    sync_stable_bins_required: int = 2
+
+    # seek = decode only sample frames (fast); sequential = grab every frame (slow, HEVC-safe).
+    timeline_sample_mode: str = "seek"
+    progress_write_interval_s: float = 3.0
 
     @model_validator(mode="before")
     @classmethod
@@ -40,7 +44,7 @@ class Settings(BaseSettings):
     jump_threshold_s: float = 15.0
     frozen_threshold_s: float = 30.0
     region_locator_weights: str = "/app/models/region_locator.pt"
-    device: str = "cpu"
+    device: str = "cuda:0"
     cors_origins: str = "*"
 
     class Config:

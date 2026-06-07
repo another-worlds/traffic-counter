@@ -25,8 +25,15 @@ def test_build_timeline_visualization_includes_presence():
         "present": [True, False, True, True],
     })
     gaps = [{"start_frame": 80, "end_frame": 120, "start_t_s": 3.2, "end_t_s": 4.8, "reason": "missing_osd"}]
-    stats = {"total_duration_s": 12.0, "total_frames": 300, "gap_duration_s": 1.6, "num_gaps": 1, "by_reason": {"missing_osd": 1}}
+    stats = {
+        "total_duration_s": 12.0,
+        "total_frames": 300,
+        "gap_duration_s": 1.6,
+        "num_gaps": 1,
+        "by_reason": {"sync_recovery+missing_osd": 1},
+    }
     viz = build_timeline_visualization(gaps, stats, df, max_points=10)
     assert viz["num_gaps"] == 1
     assert len(viz["segments"]) >= 2
     assert len(viz["presence"]) == 4
+    assert viz["gap_breakdown"] == {"missing_osd": 1}

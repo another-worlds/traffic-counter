@@ -5,15 +5,17 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from worker.gap_detector import normalize_by_reason, primary_gap_reason
+
 GAP_KINDS = frozenset({
     "missing_osd", "time_jump", "time_reverse", "frozen_osd", "sync_recovery",
 })
 
 
 def _gap_kind(reason: str) -> str:
-    for kind in GAP_KINDS:
-        if kind in reason:
-            return kind
+    primary = primary_gap_reason(reason)
+    if primary in GAP_KINDS:
+        return primary
     return "gap"
 
 
@@ -100,7 +102,7 @@ def build_timeline_visualization(
 ) -> Dict[str, Any]:
     total_duration_s = float(stats.get("total_duration_s") or 0)
     total_frames = int(stats.get("total_frames") or 0)
-    by_reason = stats.get("by_reason") or {}
+    by_reason = normalize_by_reason(stats.get("by_reason") or {})
     segments = build_coverage_segments(gaps, total_duration_s)
     presence = (
         build_presence_track(timeline_df, gaps, max_points=max_points)

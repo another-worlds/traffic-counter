@@ -1,4 +1,4 @@
-from worker.gap_detector import detect_gaps, gap_stats
+from worker.gap_detector import GapInterval, detect_gaps, gap_stats, normalize_by_reason, primary_gap_reason
 from worker.timestamp_reader import TimestampSample
 
 
@@ -57,3 +57,47 @@ def test_gap_stats():
     stats = gap_stats(gaps, total_frames=900, fps=30)
     assert stats["num_gaps"] == 1
     assert stats["gap_fraction"] > 0
+
+
+def test_merge_adjacent_same_reason_extends_interval():
+    from worker.gap_detector import _merge_overlapping
+
+    gaps = _merge_overlapping([
+        GapInterval(0, 100, 0.0, 3.0, "sync_recovery"),
+        GapInterval(100, 200, 3.0, 6.0, "sync_recovery"),
+    ])
+    assert len(gaps) == 1
+    assert gaps[0].reason == "sync_recovery"
+    assert gaps[0].end_frame == 200
+
+
+def test_merge_adjacent_different_reasons_stay_separate():
+    from worker.gap_detector import _merge_overlapping
+
+    gaps = _merge_overlapping([
+        GapInterval(0, 100, 0.0, 3.0, "sync_recovery"),
+        GapInterval(100, 200, 3.0, 6.0, "missing_osd"),
+    ])
+    assert len(gaps) == 2
+    assert gaps[0].reason == "sync_recovery"
+    assert gaps[1].reason == "missing_osd"
+
+
+def test_merge_true_overlap_uses_primary_reason():
+    from worker.gap_detector import _merge_overlapping
+
+    gaps = _merge_overlapping([
+        GapInterval(0, 150, 0.0, 5.0, "sync_recovery"),
+        GapInterval(100, 200, 3.0, 6.0, "missing_osd"),
+    ])
+    assert len(gaps) == 1
+    assert gaps[0].reason == "missing_osd"
+
+
+def test_normalize_by_reason_collapses_legacy_compound_keys():
+    assert primary_gap_reason("sync_recovery+missing_osd+time_jump") == "missing_osd"
+    assert normalize_by_reason({
+        "sync_recovery+missing_osd": 3,
+        "time_jump": 7,
+        "missing_osd": 22,
+    }) == {"missing_osd": 25, "time_jump": 7}

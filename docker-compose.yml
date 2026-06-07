@@ -235,6 +235,7 @@ services:
   timestamp-correction-api:
     build:
       context: ./timestamp_correction/backend
+    runtime: nvidia
     command: ./start.sh
     environment:
       TRAFFIC_COUNTER_API_URL: http://api:8000
@@ -242,13 +243,16 @@ services:
       STORAGE_BACKEND: local
       LOCAL_STORAGE_ROOT: /data
       ENV: dev
-      DEVICE: cpu
+      DEVICE: cuda:0
+      NVIDIA_VISIBLE_DEVICES: all
       CORS_ORIGINS: "*"
       SAMPLE_INTERVAL_MINUTES: "1"
       USE_SYNC_MAP: "true"
       SYNC_BIN_DURATION_S: "60"
       SYNC_TOLERANCE_S: "5"
-      SYNC_STABLE_BINS_REQUIRED: "3"
+      SYNC_STABLE_BINS_REQUIRED: "2"
+      TIMELINE_SAMPLE_MODE: "seek"
+      PROGRESS_WRITE_INTERVAL_S: "3"
     ports: ["8200:8200"]
     volumes:
       - storage:/data
@@ -264,6 +268,7 @@ services:
   timestamp-correction-worker:
     build:
       context: ./timestamp_correction/backend
+    runtime: nvidia
     command: ./start_worker.sh
     environment:
       TRAFFIC_COUNTER_API_URL: http://api:8000
@@ -271,15 +276,18 @@ services:
       STORAGE_BACKEND: local
       LOCAL_STORAGE_ROOT: /data
       WORKER_MODE: poll
-      AUTO_SCAN_ENABLED: "true"
-      DEVICE: cpu
+      AUTO_SCAN_ENABLED: "false"
+      DEVICE: cuda:0
+      NVIDIA_VISIBLE_DEVICES: all
       POLL_INTERVAL_S: "30"
       STALE_PROCESSING_S: "7200"
       SAMPLE_INTERVAL_MINUTES: "1"
       USE_SYNC_MAP: "true"
       SYNC_BIN_DURATION_S: "60"
       SYNC_TOLERANCE_S: "5"
-      SYNC_STABLE_BINS_REQUIRED: "3"
+      SYNC_STABLE_BINS_REQUIRED: "2"
+      TIMELINE_SAMPLE_MODE: "seek"
+      PROGRESS_WRITE_INTERVAL_S: "3"
     volumes:
       - storage:/data
       - ./timestamp_correction/backend:/app

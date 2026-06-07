@@ -1,15 +1,25 @@
-FROM python:3.11-slim
+# CUDA runtime for EasyOCR + RegionLocatorNet GPU inference.
+FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04
 
-ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip python3-venv \
         libgl1 libglib2.0-0 libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf /usr/bin/python3 /usr/local/bin/python \
+    && ln -sf /usr/bin/pip3 /usr/local/bin/pip
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-# Bake EasyOCR weights so the first scan doesn't block on a runtime download.
+# CUDA-enabled PyTorch first; remaining deps reuse this wheel.
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121 \
+    && pip install -r requirements.txt
+# Bake EasyOCR weights (CPU init at build — GPU enabled at runtime when available).
 RUN python -c "import easyocr; easyocr.Reader(['en'], gpu=False, verbose=False)"
 
 COPY . .

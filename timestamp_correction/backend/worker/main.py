@@ -14,6 +14,8 @@ import traceback
 from datetime import datetime, timezone
 
 from app import counter_client
+from app.config import settings
+from app.device import log_device_status
 from app.db import load_scan
 from app.services.gap_map import write_video_index
 from app.services.scan_control import is_auto_scan_enabled
@@ -108,6 +110,7 @@ def _process_one(video: dict) -> None:
 
 
 def run_poll() -> None:
+    log_device_status(settings.device)
     if not AUTO_SCAN_ENABLED:
         log.info("AUTO_SCAN_ENABLED=false — worker idle")
         while True:
@@ -132,6 +135,7 @@ def run_poll() -> None:
 
 
 def run_single() -> None:
+    log_device_status(settings.device)
     if not VIDEO_ID:
         raise SystemExit("VIDEO_ID required for WORKER_MODE=single")
     video = counter_client.get_video(VIDEO_ID)

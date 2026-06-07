@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Optional
@@ -22,6 +23,7 @@ import pandas as pd
 
 from app import counter_client
 from app.config import settings
+from app.device import log_device_status, resolve_torch_device
 from app.services.gap_map import _artifact_flags, persist_scan, write_video_index
 from app.services.scan_control import ScanCancelled, check_cancelled, merge_processing_status
 from app.services.timeline_viz import build_timeline_visualization
@@ -39,12 +41,13 @@ from .gap_detector import detect_gaps, gap_stats
 from .sync_map import build_sync_map
 from .region_locator import Region, locate_region
 from .roi import crop_region, region_area_fraction, tighten_region, validate_region_size
+from .timestamp_parse import enrich_samples
 from .timestamp_reader import (
     compute_sample_stride_frames,
     ocr_success_score,
     sample_timeline,
 )
-from .video_decode import configure_quiet_decode
+from .video_decode import configure_quiet_decode, read_frame_at
 
 log = logging.getLogger("timestamp_correction.pipeline")
 
@@ -99,23 +102,37 @@ def _sample_frames_for_locator(
     cap,
     total_frames: int,
     n: int,
+    fps: float,
+    sample_mode: str = "seek",
     should_cancel: Optional[Callable[[], None]] = None,
 ) -> list:
-    """Sequential stride sampling — more reliable on stitched HEVC than random seeks."""
-    frames = []
+    """Collect *n* spread frames for OSD detection."""
     if total_frames <= 0:
-        return frames
+        return []
+
     stride = max(1, total_frames // max(n, 1))
-    frame_idx = 0
-    while len(frames) < n and frame_idx < total_frames:
+    frames = []
+
+    if sample_mode == "sequential":
+        frame_idx = 0
+        while len(frames) < n and frame_idx < total_frames:
+            if should_cancel:
+                should_cancel()
+            ok, frame = cap.read()
+            if not ok:
+                break
+            if frame_idx % stride == 0:
+                frames.append(frame)
+            frame_idx += 1
+        return frames
+
+    for i in range(n):
         if should_cancel:
             should_cancel()
-        ok, frame = cap.read()
-        if not ok:
-            break
-        if frame_idx % stride == 0:
+        frame_idx = min(i * stride, max(0, total_frames - 1))
+        ok, frame = read_frame_at(cap, frame_idx, fps)
+        if ok and frame is not None:
             frames.append(frame)
-        frame_idx += 1
     return frames
 
 
@@ -158,6 +175,7 @@ def process_video(
     region_override: Optional[Dict] = None,
 ) -> dict:
     configure_quiet_decode()
+    torch_device = log_device_status(settings.device)
     storage = get_storage()
     status_key = key_timestamp_status(project_id, video_id)
     started_at = datetime.now(timezone.utc).isoformat()
@@ -237,7 +255,12 @@ def process_video(
             _write_status("locating", 0.1, "Sampling frames for OSD detection")
             cancel_cb = lambda: check_cancelled(project_id, video_id)
             locator_frames = _sample_frames_for_locator(
-                cap, total_frames, REGION_SAMPLE_COUNT, should_cancel=cancel_cb,
+                cap,
+                total_frames,
+                REGION_SAMPLE_COUNT,
+                fps=fps,
+                sample_mode=settings.timeline_sample_mode,
+                should_cancel=cancel_cb,
             )
             if not locator_frames:
                 raise RuntimeError("could not read any frames for region location")
@@ -246,7 +269,7 @@ def process_video(
             region = locate_region(
                 locator_frames,
                 weights_path=settings.region_locator_weights,
-                device=settings.device,
+                device=torch_device,
                 ocr_scorer=ocr_success_score,
             )
             ref_frame = locator_frames[len(locator_frames) // 2]
@@ -278,13 +301,23 @@ def process_video(
         )
         _write_status("locating", 1.0, f"Region locked ({region.w}×{region.h}px)")
 
+        last_progress_write = 0.0
+
         def _ocr_progress(done: int, total: int, frame_idx: int) -> None:
-            sub = done / max(total, 1)
-            _write_status(
-                "ocr",
-                sub,
-                f"OCR sample {done}/{total} · frame {frame_idx}",
-            )
+            nonlocal last_progress_write
+            now = time.monotonic()
+            if (
+                done <= 1
+                or done >= total
+                or (now - last_progress_write) >= settings.progress_write_interval_s
+            ):
+                sub = done / max(total, 1)
+                _write_status(
+                    "ocr",
+                    sub,
+                    f"OCR sample {done}/{total} · frame {frame_idx}",
+                )
+                last_progress_write = now
 
         _write_status("ocr", 0.0, "Starting timeline OCR")
         decode_stats: dict = {}
@@ -298,8 +331,16 @@ def process_video(
             progress_cb=_ocr_progress,
             stats_out=decode_stats,
             should_cancel=lambda: check_cancelled(project_id, video_id),
+            sample_mode=settings.timeline_sample_mode,
         )
         cap.release()
+
+        samples = enrich_samples(samples)
+        present_n = sum(1 for s in samples if s.present)
+        log.info(
+            "timestamp OCR parse: %d/%d samples with wall clock (%.0f%%)",
+            present_n, len(samples), 100.0 * present_n / max(len(samples), 1),
+        )
 
         _write_status("gaps", 0.2, f"Scanned {len(samples)} timeline points")
         timeline_df = pd.DataFrame([
@@ -359,6 +400,11 @@ def process_video(
         if decode_stats:
             stats["decode_errors"] = decode_stats.get("decode_errors", 0)
             stats["decode_error_fraction"] = decode_stats.get("decode_error_fraction", 0.0)
+            stats["sample_mode"] = decode_stats.get("sample_mode")
+            stats["ocr_elapsed_s"] = decode_stats.get("ocr_elapsed_s")
+            if decode_stats.get("seek_errors") is not None:
+                stats["seek_errors"] = decode_stats.get("seek_errors")
+        stats["device"] = torch_device
         gaps_payload = {
             "gaps": gap_list,
             "stats": stats,

@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from . import counter_client
 from .config import settings
+from .device import log_device_status
 from .schemas import (
     CorrectedCountsOut,
     CorrectedCountsRequest,
@@ -56,6 +57,7 @@ def _resolve_video(video_id: str, project_id: Optional[str]) -> dict:
 
 
 def create_app() -> FastAPI:
+    log_device_status(settings.device)
     app = FastAPI(
         title="Timestamp Correction API",
         version="0.1.0",

@@ -232,20 +232,51 @@ export function PresenceCoherenceTrack({ viz }: { viz?: TimelineViz | null }) {
   );
 }
 
+const GAP_REASON_PRIORITY: Record<string, number> = {
+  missing_osd: 5,
+  time_reverse: 4,
+  time_jump: 3,
+  frozen_osd: 2,
+  sync_recovery: 1,
+};
+
+function primaryGapReason(reason: string): string {
+  let best = 'sync_recovery';
+  let bestPri = -1;
+  for (const part of reason.split('+')) {
+    const pri = GAP_REASON_PRIORITY[part] ?? 0;
+    if (pri > bestPri) {
+      bestPri = pri;
+      best = part;
+    }
+  }
+  return best;
+}
+
+function normalizeGapBreakdown(breakdown: Record<string, number>): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const [reason, count] of Object.entries(breakdown)) {
+    if (count <= 0) continue;
+    const primary = primaryGapReason(reason);
+    counts[primary] = (counts[primary] ?? 0) + count;
+  }
+  return counts;
+}
+
 export function GapBreakdownPanel({ viz, stats }: { viz?: TimelineViz | null; stats?: Record<string, unknown> }) {
-  const breakdown = viz?.gap_breakdown ?? (stats?.by_reason as Record<string, number> | undefined) ?? {};
-  const entries = Object.entries(breakdown).filter(([, n]) => n > 0);
+  const raw = viz?.gap_breakdown ?? (stats?.by_reason as Record<string, number> | undefined) ?? {};
+  const entries = Object.entries(normalizeGapBreakdown(raw)).sort((a, b) => b[1] - a[1]);
   if (entries.length === 0) return null;
 
   return (
     <div className="ts-gap-breakdown">
-      <h4>Fragment types</h4>
+      <h4>Gap breakdown</h4>
       <div className="ts-gap-breakdown-grid">
         {entries.map(([reason, count]) => (
           <div key={reason} className="ts-gap-breakdown-item">
             <span
               className="ts-legend-swatch"
-              style={{ background: SEGMENT_COLORS[_gapKind(reason)] ?? SEGMENT_COLORS.gap }}
+              style={{ background: SEGMENT_COLORS[reason] ?? SEGMENT_COLORS.gap }}
             />
             <span className="ts-gap-breakdown-count">{count}</span>
             <span className="ts-gap-breakdown-label">{GAP_REASON_LABELS[reason] ?? reason}</span>
@@ -254,13 +285,6 @@ export function GapBreakdownPanel({ viz, stats }: { viz?: TimelineViz | null; st
       </div>
     </div>
   );
-}
-
-function _gapKind(reason: string): string {
-  for (const k of Object.keys(GAP_REASON_LABELS)) {
-    if (reason.includes(k)) return k;
-  }
-  return 'gap';
 }
 
 export function CountsCorrectionStatus({

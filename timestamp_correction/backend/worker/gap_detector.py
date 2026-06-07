@@ -21,6 +21,28 @@ class GapInterval:
     reason: str
 
 
+REASON_PRIORITY = {
+    "missing_osd": 5,
+    "time_reverse": 4,
+    "time_jump": 3,
+    "frozen_osd": 2,
+    "sync_recovery": 1,
+}
+
+
+def primary_gap_reason(*reasons: str) -> str:
+    """Pick the most severe reason when intervals overlap (legacy compound keys too)."""
+    best = "sync_recovery"
+    best_pri = -1
+    for reason in reasons:
+        for part in str(reason).split("+"):
+            pri = REASON_PRIORITY.get(part, 0)
+            if pri > best_pri:
+                best_pri = pri
+                best = part
+    return best
+
+
 def _expand_missing_run(
     samples: List[TimestampSample],
     start_i: int,
@@ -121,13 +143,21 @@ def _merge_overlapping(gaps: List[GapInterval]) -> List[GapInterval]:
     merged = [sorted_gaps[0]]
     for g in sorted_gaps[1:]:
         last = merged[-1]
-        if g.start_frame <= last.end_frame:
+        if g.start_frame < last.end_frame:
             merged[-1] = GapInterval(
                 start_frame=last.start_frame,
                 end_frame=max(last.end_frame, g.end_frame),
                 start_t_s=last.start_t_s,
                 end_t_s=max(last.end_t_s, g.end_t_s),
-                reason=last.reason if last.reason == g.reason else f"{last.reason}+{g.reason}",
+                reason=primary_gap_reason(last.reason, g.reason),
+            )
+        elif g.start_frame == last.end_frame and last.reason == g.reason:
+            merged[-1] = GapInterval(
+                start_frame=last.start_frame,
+                end_frame=max(last.end_frame, g.end_frame),
+                start_t_s=last.start_t_s,
+                end_t_s=max(last.end_t_s, g.end_t_s),
+                reason=last.reason,
             )
         else:
             merged.append(g)
@@ -152,5 +182,15 @@ def gap_stats(gaps: List[GapInterval], total_frames: int, fps: float) -> dict:
 def _count_by_reason(gaps: List[GapInterval]) -> dict:
     counts: dict = {}
     for g in gaps:
-        counts[g.reason] = counts.get(g.reason, 0) + 1
+        reason = primary_gap_reason(g.reason)
+        counts[reason] = counts.get(reason, 0) + 1
+    return counts
+
+
+def normalize_by_reason(by_reason: dict) -> dict:
+    """Collapse legacy compound reason keys from older scans."""
+    counts: dict = {}
+    for reason, count in (by_reason or {}).items():
+        primary = primary_gap_reason(str(reason))
+        counts[primary] = counts.get(primary, 0) + int(count)
     return counts

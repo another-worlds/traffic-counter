@@ -15,7 +15,6 @@ __pycache__/
 .vscode/
 *.egg-info/
 build/
-dist/
 node_modules/
 .DS_Store
 

@@ -9,6 +9,7 @@ from worker.gap_detector import normalize_by_reason, primary_gap_reason
 
 GAP_KINDS = frozenset({
     "missing_osd", "time_jump", "time_reverse", "frozen_osd", "sync_recovery",
+    "timestamp_drift",
 })
 
 
@@ -74,7 +75,7 @@ def build_presence_track(
     gaps: List[Dict[str, Any]],
     max_points: int = 180,
 ) -> List[Dict[str, Any]]:
-    """Downsampled OSD presence + gap membership for the coherence strip."""
+    """Downsampled OSD presence + unparsed gap membership for the presence strip."""
     if df.empty:
         return []
     work = df
@@ -99,10 +100,16 @@ def build_timeline_visualization(
     stats: Dict[str, Any],
     timeline_df: Optional[pd.DataFrame],
     max_points: int = 180,
+    hour_presence: Optional[List[Dict[str, Any]]] = None,
+    hour_coherence: Optional[List[Dict[str, Any]]] = None,
+    ideal_day: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     total_duration_s = float(stats.get("total_duration_s") or 0)
     total_frames = int(stats.get("total_frames") or 0)
+    presence_enabled = bool(stats.get("hour_presence_map_enabled") or stats.get("coherence_map_enabled"))
     by_reason = normalize_by_reason(stats.get("by_reason") or {})
+    if presence_enabled:
+        by_reason = {k: v for k, v in by_reason.items() if k == "missing_osd"}
     segments = build_coverage_segments(gaps, total_duration_s)
     presence = (
         build_presence_track(timeline_df, gaps, max_points=max_points)
@@ -110,6 +117,8 @@ def build_timeline_visualization(
         else []
     )
     valid_duration_s = max(0.0, total_duration_s - float(stats.get("gap_duration_s") or 0))
+    resolved_hour_presence = hour_presence or stats.get("hour_presence") or []
+    resolved_hour_coherence = hour_coherence or stats.get("hour_coherence") or []
     return {
         "total_duration_s": total_duration_s,
         "total_frames": total_frames,
@@ -119,4 +128,9 @@ def build_timeline_visualization(
         "presence": presence,
         "gap_breakdown": by_reason,
         "num_gaps": int(stats.get("num_gaps") or len(gaps)),
+        "hour_presence": resolved_hour_presence,
+        "hour_coherence": resolved_hour_coherence,
+        "ideal_day": ideal_day or stats.get("ideal_day"),
+        "hour_presence_map_enabled": presence_enabled,
+        "coherence_map_enabled": presence_enabled,
     }

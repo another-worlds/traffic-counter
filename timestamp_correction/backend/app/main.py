@@ -250,6 +250,9 @@ def create_app() -> FastAPI:
             timeline_summary=data.get("timeline_summary"),
             timeline_viz=data.get("timeline_viz"),
             wall_clock_buckets=data.get("wall_clock_buckets"),
+            hour_presence=data.get("hour_presence"),
+            hour_coherence=data.get("hour_coherence"),
+            ideal_day=data.get("ideal_day"),
             num_segments=data.get("num_segments"),
         )
 

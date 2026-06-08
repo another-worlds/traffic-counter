@@ -37,3 +37,17 @@ def test_build_timeline_visualization_includes_presence():
     assert len(viz["segments"]) >= 2
     assert len(viz["presence"]) == 4
     assert viz["gap_breakdown"] == {"missing_osd": 1}
+
+
+def test_presence_map_hides_non_missing_gap_breakdown():
+    stats = {
+        "total_duration_s": 60.0,
+        "total_frames": 1500,
+        "gap_duration_s": 10.0,
+        "num_gaps": 2,
+        "by_reason": {"missing_osd": 1, "timestamp_drift": 3},
+        "hour_presence_map_enabled": True,
+    }
+    viz = build_timeline_visualization([], stats, None)
+    assert viz["hour_presence_map_enabled"] is True
+    assert viz["gap_breakdown"] == {"missing_osd": 1}

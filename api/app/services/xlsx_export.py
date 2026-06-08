@@ -163,7 +163,63 @@ REASON_LABELS = {
     "time_reverse": "Обратный ход времени",
     "frozen_osd": "Замороженная метка",
     "sync_recovery": "Стабилизация после склейки",
+    "timestamp_drift": "Расхождение с идеальной шкалой",
 }
+
+
+def _write_hour_presence_sheet(wb, gap_map: Dict, existing_titles: set) -> None:
+    """Per-hour OSD presence on the ideal day."""
+    hours = gap_map.get("hour_presence") or gap_map.get("hour_coherence") or []
+    if not hours:
+        return
+    title = "Часы OSD"
+    if title in existing_titles:
+        title = "Часы OSD_2"
+    existing_titles.add(title)
+    ws = wb.create_sheet(title=title)
+    ws.cell(row=1, column=1, value="Присутствие меток времени по часам").font = Font(bold=True, size=14)
+    ideal = gap_map.get("ideal_day") or {}
+    if ideal:
+        ws.cell(row=2, column=1, value=(
+            f"Идеальный день: {ideal.get('date', '—')} "
+            f"{ideal.get('start', '')}–{ideal.get('end', '')}"
+        ))
+    headers = [
+        "Час (UTC)",
+        "Минут видео в часе",
+        "Минут с OSD",
+        "% распознано в фрагменте",
+        "% покрытия идеального часа",
+        "% OSD от 60 мин идеала",
+    ]
+    _write_header(ws, headers, row=4)
+    r = 5
+    for h in hours:
+        sampled = int(h.get("minutes_sampled") or 0)
+        present = int(h.get("minutes_present") or 0)
+        parsed_pct = h.get("parsed_percent")
+        if parsed_pct is None and sampled > 0:
+            parsed_pct = round(100.0 * present / sampled, 1)
+        ideal_pct = h.get("parsed_of_ideal_hour_percent", h.get("coherence_of_hour_percent"))
+        if ideal_pct is None:
+            ideal_pct = round(100.0 * present / 60.0, 1)
+        row_vals = [
+            h.get("hour_label"),
+            sampled,
+            present,
+            parsed_pct,
+            h.get("coverage_percent"),
+            ideal_pct,
+        ]
+        for j, val in enumerate(row_vals, start=1):
+            ws.cell(row=r, column=j, value=val)
+        r += 1
+    _autosize(ws)
+
+
+def _write_hour_coherence_sheet(wb, gap_map: Dict, existing_titles: set) -> None:
+    """Deprecated alias."""
+    _write_hour_presence_sheet(wb, gap_map, existing_titles)
 
 
 def _write_gaps_sheet(wb, gap_map: Dict, rows_excluded: int, existing_titles: set) -> None:
@@ -184,14 +240,16 @@ def _write_gaps_sheet(wb, gap_map: Dict, rows_excluded: int, existing_titles: se
         ("Длительность разрывов (с)", stats.get("gap_duration_s", 0)),
         ("Исключено строк треков", rows_excluded),
     ]
-    if stats.get("sync_map_enabled"):
+    if stats.get("hour_presence_map_enabled") or stats.get("coherence_map_enabled") or stats.get("sync_map_enabled"):
+        parsed_frac = stats.get("parsed_fraction", stats.get("coherent_fraction", stats.get("trusted_fraction")))
+        parsed_bins = stats.get("parsed_bins", stats.get("coherent_bins", stats.get("trusted_bins", "—")))
         summary_rows.extend([
-            ("Сегментов OSD (sync map)", stats.get("num_segments", gap_map.get("num_segments", "—"))),
-            ("Доверенных 1-мин интервалов", stats.get("trusted_bins", "—")),
-            ("Доля доверенного timeline", (
-                f"{100 * float(stats.get('trusted_fraction', 0)):.1f}%"
-                if stats.get("trusted_fraction") is not None else "—"
+            ("Распознанных 1-мин интервалов", parsed_bins),
+            ("Доля распознанного timeline", (
+                f"{100 * float(parsed_frac or 0):.1f}%"
+                if parsed_frac is not None else "—"
             )),
+            ("Часов с покрытием", stats.get("hours_with_coverage", "—")),
         ])
     by_reason = stats.get("by_reason", {})
     for reason, count in by_reason.items():
@@ -320,6 +378,7 @@ def build_xlsx_for_video(
     existing_titles: set = {ws.title}
     if gap_map:
         _write_gaps_sheet(wb, gap_map, rows_excluded, existing_titles)
+        _write_hour_presence_sheet(wb, gap_map, existing_titles)
 
     # Pre-pass: 1 materialization per segment (O(S) total, independent of line count).
     export_segments = wall_clock_segments if wall_clock_segments else segments

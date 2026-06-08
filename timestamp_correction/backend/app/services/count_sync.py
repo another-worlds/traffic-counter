@@ -13,7 +13,15 @@ from .. import counter_client
 from ..storage import get_storage, key_timestamp_gaps, key_tracks, key_tracks_segment
 from ..storage import get_storage, key_timestamp_sync_map
 from .gap_map import load_gap_map
-from worker.sync_map import frame_to_wall_epoch
+from worker.coherence_map import frame_to_wall_epoch as coherence_frame_to_wall
+from worker.sync_map import frame_to_wall_epoch as sync_frame_to_wall
+
+
+def _frame_to_wall_epoch(frame_idx: int, sync_map: Dict, fps: float) -> Optional[float]:
+    model = sync_map.get("model")
+    if model in ("ideal_day_hour_presence_1m", "ideal_day_vs_detected_1m"):
+        return coherence_frame_to_wall(frame_idx, sync_map, fps)
+    return sync_frame_to_wall(frame_idx, sync_map, fps)
 
 _TRACK_ID_SEGMENT_OFFSET = 1_000_000
 _DTYPES = {
@@ -184,7 +192,7 @@ def compute_wall_clock_bucket_counts(
 
     filtered = filtered.copy()
     epochs = [
-        frame_to_wall_epoch(int(f), sync_map, fps)
+        _frame_to_wall_epoch(int(f), sync_map, fps)
         for f in filtered["frame_idx"].tolist()
     ]
     filtered["_wall_epoch"] = epochs

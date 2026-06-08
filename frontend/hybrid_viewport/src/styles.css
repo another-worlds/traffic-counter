@@ -1163,3 +1163,80 @@ h2 { font-size: 15px; margin: 0 0 10px; }
   color: var(--muted);
   font-weight: 600;
 }
+
+.ts-hour-coherence {
+  margin-top: 12px;
+}
+
+.ts-hour-coherence-caption {
+  font-size: 11px;
+  margin: 0 0 8px;
+}
+
+.ts-hour-coherence-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.ts-hour-coherence-table th,
+.ts-hour-coherence-table td {
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.ts-hour-coherence-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.ts-hour-empty td {
+  opacity: 0.45;
+}
+
+.ts-hour-good { color: #2dd4bf; font-weight: 600; }
+.ts-hour-warn { color: #f59e0b; font-weight: 600; }
+.ts-hour-bad { color: #ef4444; font-weight: 600; }
+
+.ts-ideal-day-bar {
+  display: flex;
+  gap: 2px;
+  height: 36px;
+  margin: 8px 0;
+}
+
+.ts-ideal-day-cell {
+  flex: 1;
+  min-width: 0;
+  border-radius: 2px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding-bottom: 2px;
+}
+
+.ts-ideal-day-cell-label {
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.85);
+  font-weight: 600;
+}
+
+.ts-rescan-notice {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: 6px;
+  background: rgba(251, 191, 36, 0.08);
+}
+
+.ts-rescan-notice strong {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+
+.ts-rescan-notice p {
+  margin: 0;
+  font-size: 11px;
+}

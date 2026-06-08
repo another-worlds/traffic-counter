@@ -37,6 +37,7 @@ from app.storage import (
     key_timestamp_timeline,
 )
 
+from .coherence_map import build_hour_presence_map
 from .gap_detector import detect_gaps, gap_stats
 from .sync_map import build_sync_map
 from .region_locator import Region, locate_region
@@ -57,7 +58,7 @@ PHASES = {
     "opening": ("Opening video", 0.0, 0.05),
     "locating": ("Detecting timestamp region", 0.05, 0.20),
     "ocr": ("Reading timestamps (OCR)", 0.20, 0.70),
-    "gaps": ("Analyzing coherence & gaps", 0.70, 0.90),
+    "gaps": ("Building hour presence map", 0.70, 0.90),
     "finalize": ("Saving results", 0.90, 1.0),
 }
 
@@ -359,7 +360,26 @@ def process_video(
             Path(tmp.name).unlink(missing_ok=True)
 
         sync_map_doc = None
-        if settings.use_sync_map:
+        hour_presence: list = []
+        hour_coherence: list = []
+        if settings.use_hour_presence_map:
+            sync_map_doc = build_hour_presence_map(
+                samples,
+                fps=fps,
+                total_frames=total_frames,
+                ideal_day_start=settings.ideal_day_start,
+                ideal_day_end=settings.ideal_day_end,
+                date_mode=settings.ideal_day_date_mode,
+                fixed_date=settings.ideal_day_date or None,
+                bin_duration_s=settings.sync_bin_duration_s,
+                map_mode=settings.ideal_map_mode,
+            )
+            storage.write_json(key_timestamp_sync_map(project_id, video_id), sync_map_doc)
+            stats = dict(sync_map_doc.get("stats") or {})
+            gap_list = list(sync_map_doc.get("gaps") or [])
+            hour_presence = list(sync_map_doc.get("hour_presence") or [])
+            hour_coherence = list(sync_map_doc.get("hour_coherence") or [])
+        elif settings.use_sync_map:
             sync_map_doc = build_sync_map(
                 samples,
                 fps=fps,
@@ -396,7 +416,9 @@ def process_video(
         stats["sample_interval_minutes"] = settings.sample_interval_minutes
         stats["sample_interval_s"] = settings.sample_interval_s
         stats["sample_stride_frames"] = stride_frames
-        stats["sync_map_enabled"] = settings.use_sync_map
+        stats["hour_presence_map_enabled"] = settings.use_hour_presence_map
+        stats["coherence_map_enabled"] = settings.use_hour_presence_map
+        stats["sync_map_enabled"] = settings.use_sync_map or settings.use_hour_presence_map
         if decode_stats:
             stats["decode_errors"] = decode_stats.get("decode_errors", 0)
             stats["decode_error_fraction"] = decode_stats.get("decode_error_fraction", 0.0)
@@ -412,10 +434,20 @@ def process_video(
         if sync_map_doc:
             gaps_payload["wall_clock_buckets"] = sync_map_doc.get("wall_clock_buckets", [])
             gaps_payload["num_segments"] = sync_map_doc.get("num_segments", 0)
+            gaps_payload["hour_presence"] = hour_presence or sync_map_doc.get("hour_presence", [])
+            gaps_payload["hour_coherence"] = hour_coherence or sync_map_doc.get("hour_coherence", [])
+            if sync_map_doc.get("ideal_day"):
+                gaps_payload["ideal_day"] = sync_map_doc["ideal_day"]
+                stats["ideal_day"] = sync_map_doc["ideal_day"]
+            if gaps_payload.get("hour_presence"):
+                stats["hour_presence"] = gaps_payload["hour_presence"]
+            if gaps_payload.get("hour_coherence"):
+                stats["hour_coherence"] = gaps_payload["hour_coherence"]
         storage.write_json(key_timestamp_gaps(project_id, video_id), gaps_payload)
 
-        num_gaps = int(stats.get("num_gaps") or len(gap_list))
-        _write_status("finalize", 0.8, f"Found {num_gaps} gap fragment(s)")
+        hours_with_coverage = int(stats.get("hours_with_coverage") or 0)
+        parsed_pct = round(float(stats.get("parsed_fraction") or 0) * 100, 1)
+        _write_status("finalize", 0.8, f"Hour presence map ready ({hours_with_coverage}h)")
         region_payload = {
             "x": region.x, "y": region.y, "w": region.w, "h": region.h,
             "confidence": region.confidence,
@@ -433,6 +465,9 @@ def process_video(
         }
         timeline_viz = build_timeline_visualization(
             gaps_payload["gaps"], stats, timeline_df,
+            hour_presence=gaps_payload.get("hour_presence"),
+            hour_coherence=gaps_payload.get("hour_coherence"),
+            ideal_day=gaps_payload.get("ideal_day"),
         )
         result = {
             "status": "done",
@@ -447,14 +482,18 @@ def process_video(
                 "phase": "done",
                 "phase_label": "Complete",
                 "percent": 100.0,
-                "message": f"{num_gaps} gap fragment(s) detected",
+                "message": f"24-hour presence map ready · {parsed_pct:.0f}% parsed",
             },
             "artifacts": _artifact_flags(project_id, video_id),
         }
         storage.write_json(status_key, result)
         persist_scan(video_id, result)
-        log.info("timestamp scan done for %s: %d gaps, %.1f%% gap fraction",
-                 video_id, num_gaps, 100 * float(stats.get("gap_fraction") or 0))
+        log.info(
+            "timestamp scan done for %s: %.1f%% parsed, %d hours with coverage",
+            video_id,
+            100 * float(stats.get("parsed_fraction") or 0),
+            hours_with_coverage,
+        )
         return result
 
     except ScanCancelled:

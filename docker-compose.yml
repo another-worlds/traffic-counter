@@ -160,6 +160,8 @@ services:
     ports: ["8501:8501"]
     volumes:
       - ./frontend:/app
+      # Live Vite build — without this, Streamlit serves the image-baked bundle at /srv/...
+      - ./frontend/hybrid_viewport/dist:/srv/hybrid_viewport_dist:ro
     depends_on:
       - api
       - timestamp-correction-api
@@ -247,9 +249,15 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       CORS_ORIGINS: "*"
       SAMPLE_INTERVAL_MINUTES: "1"
-      USE_SYNC_MAP: "true"
+      USE_COHERENCE_MAP: "true"
+      USE_SYNC_MAP: "false"
       SYNC_BIN_DURATION_S: "60"
+      COHERENCE_TOLERANCE_S: "5"
       SYNC_TOLERANCE_S: "5"
+      IDEAL_DAY_START: "00:00:00"
+      IDEAL_DAY_END: "24:00:00"
+      IDEAL_DAY_DATE_MODE: "first_osd"
+      IDEAL_MAP_MODE: "realtime"
       SYNC_STABLE_BINS_REQUIRED: "2"
       TIMELINE_SAMPLE_MODE: "seek"
       PROGRESS_WRITE_INTERVAL_S: "3"
@@ -282,9 +290,15 @@ services:
       POLL_INTERVAL_S: "30"
       STALE_PROCESSING_S: "7200"
       SAMPLE_INTERVAL_MINUTES: "1"
-      USE_SYNC_MAP: "true"
+      USE_COHERENCE_MAP: "true"
+      USE_SYNC_MAP: "false"
       SYNC_BIN_DURATION_S: "60"
+      COHERENCE_TOLERANCE_S: "5"
       SYNC_TOLERANCE_S: "5"
+      IDEAL_DAY_START: "00:00:00"
+      IDEAL_DAY_END: "24:00:00"
+      IDEAL_DAY_DATE_MODE: "first_osd"
+      IDEAL_MAP_MODE: "realtime"
       SYNC_STABLE_BINS_REQUIRED: "2"
       TIMELINE_SAMPLE_MODE: "seek"
       PROGRESS_WRITE_INTERVAL_S: "3"

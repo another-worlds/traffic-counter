@@ -57,6 +57,11 @@ export type TimelineViz = {
   presence: TimelinePresencePoint[];
   gap_breakdown?: Record<string, number>;
   num_gaps?: number;
+  hour_presence?: HourPresence[];
+  hour_coherence?: HourCoherence[];
+  ideal_day?: Record<string, unknown> | null;
+  hour_presence_map_enabled?: boolean;
+  coherence_map_enabled?: boolean;
 };
 
 export type TimestampRegion = {
@@ -83,6 +88,49 @@ export type TimestampRegionInput = {
   video_height?: number;
 };
 
+export type HourPresence = {
+  hour_start_epoch: number;
+  hour_label: string;
+  minutes_sampled: number;
+  minutes_present: number;
+  minutes_unparsed?: number;
+  coverage_percent: number;
+  parsed_percent: number;
+  parsed_of_ideal_hour_percent?: number;
+};
+
+export type HourCoherence = HourPresence & {
+  minutes_coherent?: number;
+  coherence_of_hour_percent?: number;
+  gaps?: GapInterval[];
+};
+
+export function normalizeHourRows(
+  hours?: Array<HourPresence | HourCoherence> | null,
+): HourPresence[] {
+  if (!hours?.length) return [];
+  return hours.map((h) => {
+    const sampled = h.minutes_sampled ?? 0;
+    const present = h.minutes_present ?? 0;
+    const parsedPercent =
+      h.parsed_percent
+      ?? (sampled > 0 ? Math.round((1000 * present) / sampled) / 10 : 0);
+    return {
+      hour_start_epoch: h.hour_start_epoch,
+      hour_label: h.hour_label,
+      minutes_sampled: sampled,
+      minutes_present: present,
+      minutes_unparsed: h.minutes_unparsed ?? Math.max(0, sampled - present),
+      coverage_percent: h.coverage_percent ?? 0,
+      parsed_percent: parsedPercent,
+      parsed_of_ideal_hour_percent:
+        h.parsed_of_ideal_hour_percent
+        ?? h.coherence_of_hour_percent
+        ?? Math.round((1000 * present) / 60) / 10,
+    };
+  });
+}
+
 export type TimestampMap = {
   region?: {
     x: number;
@@ -101,6 +149,9 @@ export type TimestampMap = {
   timeline_summary?: Record<string, unknown> | null;
   timeline_viz?: TimelineViz | null;
   wall_clock_buckets?: Array<Record<string, unknown>> | null;
+  hour_presence?: HourPresence[] | null;
+  hour_coherence?: HourCoherence[] | null;
+  ideal_day?: Record<string, unknown> | null;
   num_segments?: number | null;
 };
 
@@ -320,4 +371,5 @@ export const GAP_REASON_LABELS: Record<string, string> = {
   time_reverse: 'Time reverse',
   frozen_osd: 'Frozen timestamp',
   sync_recovery: 'Stabilizing after join',
+  timestamp_drift: 'Timestamp drift',
 };

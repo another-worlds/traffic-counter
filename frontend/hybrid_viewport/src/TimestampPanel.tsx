@@ -10,6 +10,7 @@ import {
   type TimestampMap,
   type TimestampStatus,
   GAP_REASON_LABELS,
+  normalizeHourRows,
   getCorrectedCounts,
   getTimestampMap,
   getTimestampStatus,
@@ -17,9 +18,12 @@ import {
   stopTimestampScan,
 } from './timestampApi';
 import {
+  PresenceRescanNotice,
   CountsCorrectionStatus,
   GapBreakdownPanel,
-  PresenceCoherenceTrack,
+  HourPresenceTable,
+  IdealDayHourBar,
+  PresenceTrack,
   ScanProgressPanel,
   SummaryStatsRow,
   TimelineCoverageBar,
@@ -116,7 +120,8 @@ export default function TimestampPanel({
       setStatus(st);
 
       if (st.status === 'done') {
-        if (!mapLoadedRef.current) {
+        if (!mapLoadedRef.current || prev === 'processing') {
+          mapLoadedRef.current = false;
           await loadMapOnce();
         }
         setError(null);
@@ -278,6 +283,20 @@ export default function TimestampPanel({
   const isProcessing = isScanning || busy;
   const autoScanOff = status?.auto_scan_enabled === false;
   const showResults = isDone && map != null;
+  const hourPresence = normalizeHourRows(
+    map?.hour_presence
+    ?? map?.timeline_viz?.hour_presence
+    ?? map?.hour_coherence
+    ?? map?.timeline_viz?.hour_coherence,
+  );
+  const idealDay = map?.ideal_day ?? map?.timeline_viz?.ideal_day ?? null;
+  const presenceMapEnabled = Boolean(
+    map?.stats?.hour_presence_map_enabled
+    ?? map?.stats?.coherence_map_enabled
+    ?? map?.timeline_viz?.hour_presence_map_enabled
+    ?? map?.timeline_viz?.coherence_map_enabled,
+  );
+  const hasHourPresence = hourPresence.length > 0;
   const showProgress = isProcessing || isDone;
   const hasRegionPreview = Boolean(status?.artifacts?.region_preview);
   const previewCacheBust = previewEpoch
@@ -296,7 +315,7 @@ export default function TimestampPanel({
         <div>
           <h3>Timestamp analysis</h3>
           <p className="muted">
-            Auto-queued for analyzed videos. Maps OSD coherence and excludes gap fragments from counts.
+            Maps footage onto the ideal UTC day (00:00–24:00) and reports per-hour OSD parseability.
           </p>
         </div>
         <div className="timestamp-actions">
@@ -388,17 +407,30 @@ export default function TimestampPanel({
         <>
           <SummaryStatsRow map={map} corrected={corrected} />
 
-          <TimelineCoverageBar
-            viz={map.timeline_viz}
-            gaps={map.gaps}
-            onHoverTime={setHoverTime}
-          />
-          {hoverTime != null && (
-            <p className="muted ts-hover-time">Hover: {fmtDuration(hoverTime)}</p>
+          {hasHourPresence ? (
+            <>
+              <IdealDayHourBar hours={hourPresence} idealDay={idealDay} />
+              <HourPresenceTable hours={hourPresence} idealDay={idealDay} />
+            </>
+          ) : (
+            <PresenceRescanNotice />
           )}
 
-          <PresenceCoherenceTrack viz={map.timeline_viz} />
           <GapBreakdownPanel viz={map.timeline_viz} stats={map.stats} />
+
+          {!presenceMapEnabled && (
+            <>
+              <TimelineCoverageBar
+                viz={map.timeline_viz}
+                gaps={map.gaps}
+                onHoverTime={setHoverTime}
+              />
+              {hoverTime != null && (
+                <p className="muted ts-hover-time">Hover: {fmtDuration(hoverTime)}</p>
+              )}
+              <PresenceTrack viz={map.timeline_viz} />
+            </>
+          )}
 
           <CountsCorrectionStatus
             corrected={corrected}
@@ -417,7 +449,7 @@ export default function TimestampPanel({
                 {exportBusy ? '⏳ Building export…' : '📊 Export corrected XLSX'}
               </button>
               <span className="muted">
-                UTC hour rows when sync map available · gap log · raw vs corrected
+                Hour presence sheet · unparsed intervals · raw vs corrected
               </span>
             </div>
           )}

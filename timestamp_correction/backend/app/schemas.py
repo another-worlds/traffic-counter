@@ -63,6 +63,23 @@ class TimestampProgressOut(BaseModel):
     message: Optional[str] = None
 
 
+class HourPresenceOut(BaseModel):
+    hour_start_epoch: int
+    hour_label: str
+    minutes_sampled: int
+    minutes_present: int
+    minutes_unparsed: int = 0
+    coverage_percent: float
+    parsed_percent: float
+    parsed_of_ideal_hour_percent: float = 0.0
+
+
+class HourCoherenceOut(HourPresenceOut):
+    minutes_coherent: int = 0
+    coherence_of_hour_percent: float = 0.0
+    gaps: List[Dict[str, Any]] = []
+
+
 class TimestampMapOut(BaseModel):
     region: Optional[Dict[str, Any]] = None
     gaps: List[GapIntervalOut] = []
@@ -70,6 +87,9 @@ class TimestampMapOut(BaseModel):
     timeline_summary: Optional[Dict[str, Any]] = None
     timeline_viz: Optional[Dict[str, Any]] = None
     wall_clock_buckets: Optional[List[Dict[str, Any]]] = None
+    hour_presence: Optional[List[HourPresenceOut]] = None
+    hour_coherence: Optional[List[HourCoherenceOut]] = None
+    ideal_day: Optional[Dict[str, Any]] = None
     num_segments: Optional[int] = None
 
 

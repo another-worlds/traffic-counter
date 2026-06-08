@@ -184,12 +184,40 @@ def compute_counts(video_id: str, line_ids: List[str]) -> Dict:
         return r.json()
 
 
-def start_export(video_id: str, line_ids: List[str]) -> Dict:
-    """Kick off an async xlsx build. Returns {"job_id", "status"}."""
+def start_export(
+    video_id: str,
+    line_ids: List[str],
+    *,
+    apply_timestamp_correction: bool = False,
+) -> Dict:
+    """Kick off an async xlsx build. Returns {"job_id", "status", "filename"}."""
     with _client(timeout=15.0) as c:
-        r = c.post(f"/videos/{video_id}/export", json={"line_ids": line_ids})
+        r = c.post(
+            f"/videos/{video_id}/export",
+            json={
+                "line_ids": line_ids,
+                "apply_timestamp_correction": apply_timestamp_correction,
+            },
+        )
         _raise(r)
         return r.json()
+
+
+def wait_for_export(job_id: str, *, poll_interval_s: float = 1.0, timeout_s: float = 900.0) -> Dict:
+    """Poll until an export job finishes. Raises APIError on failure or timeout."""
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        status = get_export_status(job_id)
+        state = status.get("status")
+        if state == "done":
+            return status
+        if state == "error":
+            detail = status.get("error") or "export failed"
+            raise APIError(str(detail))
+        time.sleep(poll_interval_s)
+    raise APIError(f"export job {job_id} timed out after {timeout_s:.0f}s")
 
 
 def get_export_status(job_id: str) -> Dict:

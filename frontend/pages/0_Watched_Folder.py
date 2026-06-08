@@ -1,5 +1,8 @@
+import io
 import os
+import re
 import time
+import zipfile
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -85,6 +88,105 @@ def _fmt_speed(ratio: float) -> str:
     if ratio >= 1:
         return f"{ratio:.1f}× speed"
     return f"1/{1/ratio:.1f}× speed"
+
+
+def _safe_zip_part(text: str) -> str:
+    cleaned = re.sub(r"[^\w.\-]+", "_", str(text).strip())
+    return cleaned.strip("._") or "item"
+
+
+def _xlsx_folder_path(video: dict) -> str:
+    local_path = video.get("local_source_path") or ""
+    if local_path:
+        parent = Path(local_path).parent
+        try:
+            rel = parent.relative_to(Path(WATCH_PATH))
+            parts = [_safe_zip_part(part) for part in rel.parts if part not in ("", ".")]
+            if parts:
+                return "/".join(parts)
+        except ValueError:
+            pass
+        return _safe_zip_part(parent.name or "root")
+    return _safe_zip_part(Path(_folder_of(video)).name or "root")
+
+
+def _xlsx_archive_name(video: dict, export_filename: str) -> str:
+    folder = _xlsx_folder_path(video)
+    base = _safe_zip_part(Path(export_filename).name or video.get("filename", "counts.xlsx"))
+    if not base.lower().endswith(".xlsx"):
+        base = f"{base}.xlsx"
+    return f"{folder}/{base}"
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_video_lines(video_id: str) -> list:
+    return api.list_lines(video_id)
+
+
+def _bulk_export_xlsx_zip(
+    videos: list,
+    *,
+    apply_timestamp_correction: bool,
+    progress_cb=None,
+) -> tuple[bytes, dict]:
+    """Build one XLSX per analyzed video (with lines) and return a ZIP archive."""
+    analyzed = [v for v in videos if v.get("status") == "analyzed"]
+    summary = {
+        "requested": len(analyzed),
+        "exported": 0,
+        "skipped_no_lines": [],
+        "failed": [],
+        "files": [],
+    }
+    if not analyzed:
+        return b"", summary
+
+    buffer = io.BytesIO()
+    used_names: set[str] = set()
+
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for idx, video in enumerate(analyzed, start=1):
+            if progress_cb:
+                progress_cb(idx, len(analyzed), video)
+
+            try:
+                lines = _cached_video_lines(str(video["id"]))
+            except api.APIError as exc:
+                summary["failed"].append({
+                    "filename": video.get("filename"),
+                    "error": str(exc),
+                })
+                continue
+
+            if not lines:
+                summary["skipped_no_lines"].append(video.get("filename") or video.get("id"))
+                continue
+
+            line_ids = [str(ln["id"]) for ln in lines]
+            try:
+                job = api.start_export(
+                    str(video["id"]),
+                    line_ids,
+                    apply_timestamp_correction=apply_timestamp_correction,
+                )
+                status = api.wait_for_export(str(job["job_id"]))
+                data = api.download_export(str(job["job_id"]))
+                arcname = _xlsx_archive_name(video, str(status.get("filename") or "counts.xlsx"))
+                if arcname in used_names:
+                    stem, suffix = arcname.rsplit(".", 1)
+                    arcname = f"{stem}_{_safe_zip_part(video['id'][:8])}.{suffix}"
+                used_names.add(arcname)
+                zf.writestr(arcname, data)
+                summary["exported"] += 1
+                summary["files"].append(arcname)
+            except (api.APIError, TimeoutError) as exc:
+                summary["failed"].append({
+                    "filename": video.get("filename"),
+                    "error": str(exc),
+                })
+
+    buffer.seek(0)
+    return buffer.getvalue(), summary
 
 
 try:
@@ -445,6 +547,13 @@ def _render_timestamp_dashboard(videos: list, analyzed_count: int) -> int:
                                 else f"{stats.get('sample_interval_s', 60):.0f}s"
                             )
                             st.caption(f"OCR stride: every {stride} frames ({fps} fps · {interval_txt})")
+                        parsed_frac = stats.get("parsed_fraction", stats.get("coherent_fraction", stats.get("trusted_fraction")))
+                        hours_cov = stats.get("hours_with_coverage")
+                        if parsed_frac is not None:
+                            st.caption(
+                                f"Parsed: {float(parsed_frac) * 100:.0f}% of 1-min bins"
+                                + (f" · {hours_cov}h covered" if hours_cov is not None else "")
+                            )
                         if gaps is not None:
                             gap_txt = f"{gaps} gap(s)"
                             if gap_frac is not None:
@@ -689,6 +798,113 @@ if selected_row["eta_s"] > 0:
 else:
     fc4.metric("Folder ETA", "—")
 st.progress(selected_row["completion"], text=f"{status_icon} Folder completion {selected_row['completion']*100:.1f}%")
+
+st.markdown("### Bulk Excel Export")
+st.caption(
+    "Build the current count workbooks for every analyzed video that already has counting lines. "
+    "Videos without lines are skipped — draw lines on Count & Export first."
+)
+
+export_scope = st.radio(
+    "Export scope",
+    options=["current_folder", "all_analyzed"],
+    format_func=lambda key: {
+        "current_folder": f"Current folder only ({selected_row['analyzed']} analyzed)",
+        "all_analyzed": f"All analyzed videos ({analyzed})",
+    }[key],
+    horizontal=True,
+    key="bulk_xlsx_scope",
+)
+apply_ts_correction = st.checkbox(
+    "Apply timestamp gap correction",
+    value=False,
+    help="Requires a completed timestamp scan per video. Videos without a gap map are skipped.",
+    key="bulk_xlsx_corrected",
+)
+
+export_targets = (
+    [v for v in folders[sel_folder] if v.get("status") == "analyzed"]
+    if export_scope == "current_folder"
+    else [v for v in videos if v.get("status") == "analyzed"]
+)
+
+ready_count = 0
+for v in export_targets:
+    try:
+        if _cached_video_lines(str(v["id"])):
+            ready_count += 1
+    except api.APIError:
+        pass
+
+ex1, ex2, ex3 = st.columns([2, 2, 2])
+ex1.metric("Analyzed in scope", len(export_targets))
+ex2.metric("Ready to export", ready_count)
+ex3.metric("Missing lines", max(0, len(export_targets) - ready_count))
+
+build_col, download_col = st.columns([2, 2])
+with build_col:
+    build_disabled = ready_count == 0
+    if st.button(
+        f"Build {ready_count} workbook(s)",
+        key="bulk_xlsx_build_btn",
+        type="primary",
+        disabled=build_disabled,
+        use_container_width=True,
+    ):
+        progress = st.progress(0.0, text="Starting exports…")
+        status_box = st.empty()
+
+        def _on_export_progress(done: int, total: int, video: dict) -> None:
+            progress.progress(
+                done / max(total, 1),
+                text=f"Exporting {done}/{total}: {video.get('filename', '')}",
+            )
+            status_box.caption(f"Building workbook for {video.get('filename', '')}")
+
+        with st.spinner("Building Excel workbooks…"):
+            zip_bytes, summary = _bulk_export_xlsx_zip(
+                export_targets,
+                apply_timestamp_correction=apply_ts_correction,
+                progress_cb=_on_export_progress,
+            )
+        st.session_state["bulk_xlsx_zip"] = zip_bytes
+        st.session_state["bulk_xlsx_summary"] = summary
+        st.session_state["bulk_xlsx_label"] = (
+            f"counts-{_safe_zip_part(Path(sel_folder).name if export_scope == 'current_folder' else 'all')}"
+            f"{'-corrected' if apply_ts_correction else ''}.zip"
+        )
+        progress.empty()
+        status_box.empty()
+        if summary["exported"]:
+            st.success(f"Built {summary['exported']} workbook(s).")
+        else:
+            st.warning("No workbooks were built.")
+        if summary["skipped_no_lines"]:
+            st.caption(
+                f"Skipped {len(summary['skipped_no_lines'])} video(s) without counting lines."
+            )
+        if summary["failed"]:
+            st.warning(f"{len(summary['failed'])} export(s) failed:")
+            for item in summary["failed"][:5]:
+                st.caption(f"{item.get('filename')}: {item.get('error')}")
+            if len(summary["failed"]) > 5:
+                st.caption(f"…and {len(summary['failed']) - 5} more")
+
+with download_col:
+    zip_payload = st.session_state.get("bulk_xlsx_zip")
+    zip_label = st.session_state.get("bulk_xlsx_label", "counts-export.zip")
+    st.download_button(
+        "Download ZIP",
+        data=zip_payload or b"",
+        file_name=zip_label,
+        mime="application/zip",
+        disabled=not zip_payload,
+        use_container_width=True,
+        key="bulk_xlsx_download_btn",
+    )
+    last_summary = st.session_state.get("bulk_xlsx_summary")
+    if last_summary and last_summary.get("files"):
+        st.caption(f"Last build: {last_summary['exported']} file(s) in archive")
 
 st.markdown("### Folder Video List")
 folder_videos = sorted(folders[sel_folder], key=lambda v: (v["status"], v["filename"]))

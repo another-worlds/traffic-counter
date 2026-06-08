@@ -143,7 +143,15 @@ def _load_gap_map_from_storage(project_id: str, video_id: str) -> Optional[Dict[
     sync_map_key = key_timestamp_sync_map(project_id, video_id)
     if storage.exists(sync_map_key):
         sync_map = storage.read_json(sync_map_key)
-    timeline_viz = build_timeline_visualization(gap_list, gap_stats, timeline_df)
+    hour_presence = gaps.get("hour_presence") or (sync_map or {}).get("hour_presence")
+    hour_coherence = gaps.get("hour_coherence") or (sync_map or {}).get("hour_coherence")
+    ideal_day = gaps.get("ideal_day") or (sync_map or {}).get("ideal_day")
+    timeline_viz = build_timeline_visualization(
+        gap_list, gap_stats, timeline_df,
+        hour_presence=hour_presence,
+        hour_coherence=hour_coherence,
+        ideal_day=ideal_day,
+    )
     return {
         "region": region,
         "gaps": gap_list,
@@ -151,6 +159,9 @@ def _load_gap_map_from_storage(project_id: str, video_id: str) -> Optional[Dict[
         "timeline_summary": timeline_summary,
         "timeline_viz": timeline_viz,
         "wall_clock_buckets": gaps.get("wall_clock_buckets") or (sync_map or {}).get("wall_clock_buckets"),
+        "hour_presence": hour_presence,
+        "hour_coherence": hour_coherence,
+        "ideal_day": ideal_day,
         "sync_map": sync_map,
         "num_segments": gaps.get("num_segments") or (sync_map or {}).get("num_segments"),
     }
@@ -191,7 +202,48 @@ def _artifact_flags(project_id: str, video_id: str) -> Dict[str, bool]:
     }
 
 
+def _merge_presence_fields(result: Dict[str, Any], fresh: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Prefer hour_presence / ideal_day from storage when DB snapshot is stale."""
+    if not fresh:
+        return result
+    if not result.get("hour_presence") and fresh.get("hour_presence"):
+        result["hour_presence"] = fresh["hour_presence"]
+    if not result.get("hour_coherence") and fresh.get("hour_coherence"):
+        result["hour_coherence"] = fresh["hour_coherence"]
+    if not result.get("ideal_day") and fresh.get("ideal_day"):
+        result["ideal_day"] = fresh["ideal_day"]
+    stats = dict(result.get("stats") or {})
+    fresh_stats = fresh.get("stats") or {}
+    if (
+        fresh_stats.get("hour_presence_map_enabled") or fresh_stats.get("coherence_map_enabled")
+    ) and not (stats.get("hour_presence_map_enabled") or stats.get("coherence_map_enabled")):
+        stats.update({
+            k: fresh_stats[k]
+            for k in (
+                "hour_presence_map_enabled", "coherence_map_enabled",
+                "parsed_fraction", "parsed_bins", "coherent_fraction", "coherent_bins",
+                "hours_with_coverage", "hour_presence", "hour_coherence", "ideal_day",
+            )
+            if k in fresh_stats
+        })
+        result["stats"] = stats
+    if result.get("timeline_viz"):
+        viz = dict(result["timeline_viz"])
+        if result.get("hour_presence"):
+            viz["hour_presence"] = result["hour_presence"]
+        if result.get("hour_coherence"):
+            viz["hour_coherence"] = result["hour_coherence"]
+        viz["ideal_day"] = result.get("ideal_day")
+        viz["hour_presence_map_enabled"] = bool(
+            stats.get("hour_presence_map_enabled") or stats.get("coherence_map_enabled")
+        )
+        viz["coherence_map_enabled"] = viz["hour_presence_map_enabled"]
+        result["timeline_viz"] = viz
+    return result
+
+
 def load_gap_map(project_id: str, video_id: str) -> Optional[Dict[str, Any]]:
+    fresh = _load_gap_map_from_storage(project_id, video_id)
     db_row = load_scan(video_id)
     if db_row is None:
         db_row = _backfill_db_from_storage(project_id, video_id)
@@ -199,17 +251,22 @@ def load_gap_map(project_id: str, video_id: str) -> Optional[Dict[str, Any]]:
         gaps_list = db_row.get("gaps") or []
         if isinstance(gaps_list, dict):
             gaps_list = gaps_list.get("gaps", [])
-        return {
+        stats = db_row.get("stats") or {}
+        return _merge_presence_fields({
             "region": db_row.get("region"),
             "gaps": gaps_list,
-            "stats": db_row.get("stats") or {},
+            "stats": stats,
             "timeline_summary": db_row.get("timeline_summary"),
             "timeline_viz": db_row.get("timeline_viz"),
-            "wall_clock_buckets": (db_row.get("stats") or {}).get("wall_clock_buckets"),
-            "num_segments": (db_row.get("stats") or {}).get("num_segments"),
-        }
+            "wall_clock_buckets": stats.get("wall_clock_buckets"),
+            "hour_presence": stats.get("hour_presence") or (fresh or {}).get("hour_presence"),
+            "hour_coherence": stats.get("hour_coherence") or (fresh or {}).get("hour_coherence"),
+            "ideal_day": stats.get("ideal_day") or (fresh or {}).get("ideal_day"),
+            "num_segments": stats.get("num_segments"),
+            "sync_map": (fresh or {}).get("sync_map"),
+        }, fresh)
 
-    return _load_gap_map_from_storage(project_id, video_id)
+    return fresh
 
 
 def gap_frame_mask(gaps: List[Dict], total_frames: int) -> List[bool]:

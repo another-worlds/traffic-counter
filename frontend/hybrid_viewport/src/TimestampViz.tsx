@@ -14,6 +14,7 @@ export const SEGMENT_COLORS: Record<string, string> = {
   time_reverse: '#a855f7',
   frozen_osd: '#eab308',
   sync_recovery: '#64748b',
+  timestamp_drift: '#f59e0b',
   gap: '#fb7185',
 };
 
@@ -21,7 +22,7 @@ const SCAN_PHASES = [
   { id: 'opening', label: 'Open' },
   { id: 'locating', label: 'Region' },
   { id: 'ocr', label: 'OCR' },
-  { id: 'gaps', label: 'Gaps' },
+  { id: 'gaps', label: 'Hours' },
   { id: 'finalize', label: 'Save' },
 ] as const;
 
@@ -171,31 +172,31 @@ export function TimelineCoverageBar({
         {Object.entries(SEGMENT_COLORS).filter(([k]) => k !== 'gap').map(([kind, color]) => (
           <span key={kind} className="ts-legend-item">
             <span className="ts-legend-swatch" style={{ background: color }} />
-            {kind === 'valid' ? 'Coherent' : (GAP_REASON_LABELS[kind] ?? kind)}
+            {kind === 'valid' ? 'Parsed' : (GAP_REASON_LABELS[kind] ?? kind)}
           </span>
         ))}
       </div>
       {(gaps?.length ?? 0) > 0 && (
         <p className="muted ts-viz-caption">
-          {gaps!.length} incoherent fragment{gaps!.length === 1 ? '' : 's'} highlighted on the bar above.
+          {gaps!.length} unparsed fragment{gaps!.length === 1 ? '' : 's'} highlighted on the bar above.
         </p>
       )}
     </div>
   );
 }
 
-export function PresenceCoherenceTrack({ viz }: { viz?: TimelineViz | null }) {
+export function PresenceTrack({ viz }: { viz?: TimelineViz | null }) {
   const total = viz?.total_duration_s ?? 0;
   const points = viz?.presence ?? [];
   if (total <= 0 || points.length === 0) return null;
 
-  const presentPct = points.filter((p) => p.present && !p.in_gap).length / points.length;
+  const presentPct = points.filter((p) => p.present).length / points.length;
 
   return (
     <div className="ts-viz-block">
       <div className="ts-viz-header">
-        <h4>OSD coherence map</h4>
-        <span className="muted">{(presentPct * 100).toFixed(0)}% readable &amp; coherent</span>
+        <h4>OSD presence</h4>
+        <span className="muted">{(presentPct * 100).toFixed(0)}% parsed along timeline</span>
       </div>
       <div className="ts-presence-bar">
         {points.map((p, i) => {
@@ -203,13 +204,12 @@ export function PresenceCoherenceTrack({ viz }: { viz?: TimelineViz | null }) {
           const { left, width } = pctOf(p.t_s, tNext, total);
           let color = SEGMENT_COLORS.valid;
           if (!p.present) color = '#475569';
-          else if (p.in_gap && p.gap_kind) color = SEGMENT_COLORS[p.gap_kind] ?? SEGMENT_COLORS.gap;
           return (
             <div
               key={`${p.t_s}-${i}`}
               className="ts-presence-cell"
               style={{ left: `${left}%`, width: `${width}%`, background: color }}
-              title={`${fmtDuration(p.t_s)} · ${p.present ? 'OSD read' : 'OSD missing'}${p.in_gap ? ' · in gap' : ''}`}
+              title={`${fmtDuration(p.t_s)} · ${p.present ? 'OSD parsed' : 'OSD missing'}`}
             />
           );
         })}
@@ -223,19 +223,18 @@ export function PresenceCoherenceTrack({ viz }: { viz?: TimelineViz | null }) {
           <span className="ts-legend-swatch" style={{ background: '#475569' }} />
           OSD missing
         </span>
-        <span className="ts-legend-item">
-          <span className="ts-legend-swatch" style={{ background: SEGMENT_COLORS.time_jump }} />
-          Incoherent
-        </span>
       </div>
     </div>
   );
 }
 
+export const PresenceCoherenceTrack = PresenceTrack;
+
 const GAP_REASON_PRIORITY: Record<string, number> = {
   missing_osd: 5,
   time_reverse: 4,
   time_jump: 3,
+  timestamp_drift: 3,
   frozen_osd: 2,
   sync_recovery: 1,
 };
@@ -263,7 +262,161 @@ function normalizeGapBreakdown(breakdown: Record<string, number>): Record<string
   return counts;
 }
 
+function hourBarColor(parsedPct: number, sampled: number): string {
+  if (sampled <= 0) return '#334155';
+  if (parsedPct >= 80) return '#2dd4bf';
+  if (parsedPct >= 50) return '#f59e0b';
+  return '#ef4444';
+}
+
+function shortHourLabel(hourLabel: string): string {
+  const m = hourLabel.match(/(\d{2}):00 UTC$/);
+  return m ? m[1] : hourLabel.slice(-8, -6) || '?';
+}
+
+export function IdealDayHourBar({
+  hours,
+  idealDay,
+}: {
+  hours?: Array<{
+    hour_label: string;
+    minutes_sampled: number;
+    parsed_percent: number;
+    coverage_percent: number;
+  }> | null;
+  idealDay?: Record<string, unknown> | null;
+}) {
+  if (!hours?.length) return null;
+
+  return (
+    <div className="ts-viz-block">
+      <div className="ts-viz-header">
+        <h4>Ideal day presence (UTC hours)</h4>
+        {idealDay && (
+          <span className="muted">
+            {String(idealDay.date ?? '')} {String(idealDay.start ?? '00:00')}–{String(idealDay.end ?? '24:00')}
+          </span>
+        )}
+      </div>
+      <div className="ts-ideal-day-bar">
+        {hours.map((h) => (
+          <div
+            key={h.hour_label}
+            className="ts-ideal-day-cell"
+            style={{ background: hourBarColor(h.parsed_percent, h.minutes_sampled) }}
+            title={`${h.hour_label}\nFootage in hour ${h.coverage_percent.toFixed(0)}% · Parsed ${h.parsed_percent.toFixed(0)}%`}
+          >
+            <span className="ts-ideal-day-cell-label">{shortHourLabel(h.hour_label)}</span>
+          </div>
+        ))}
+      </div>
+      <div className="ts-legend compact">
+        <span className="ts-legend-item">
+          <span className="ts-legend-swatch" style={{ background: '#334155' }} />
+          No footage
+        </span>
+        <span className="ts-legend-item">
+          <span className="ts-legend-swatch" style={{ background: '#2dd4bf' }} />
+          ≥80% parsed
+        </span>
+        <span className="ts-legend-item">
+          <span className="ts-legend-swatch" style={{ background: '#f59e0b' }} />
+          50–79%
+        </span>
+        <span className="ts-legend-item">
+          <span className="ts-legend-swatch" style={{ background: '#ef4444' }} />
+          &lt;50%
+        </span>
+      </div>
+    </div>
+  );
+}
+
+export function PresenceRescanNotice() {
+  return (
+    <div className="ts-rescan-notice">
+      <strong>UTC hour map not available</strong>
+      <p className="muted">
+        This scan uses the older video-time format. Re-run timestamp scan to generate the
+        24-hour ideal-day presence report.
+      </p>
+    </div>
+  );
+}
+
+export const CoherenceRescanNotice = PresenceRescanNotice;
+
+export function HourPresenceTable({
+  hours,
+  idealDay,
+}: {
+  hours?: Array<{
+    hour_label: string;
+    minutes_sampled: number;
+    minutes_present: number;
+    coverage_percent: number;
+    parsed_percent: number;
+  }> | null;
+  idealDay?: Record<string, unknown> | null;
+}) {
+  if (!hours?.length) return null;
+
+  return (
+    <div className="ts-hour-presence ts-hour-coherence">
+      <h4>Hour presence</h4>
+      {idealDay && (
+        <p className="muted ts-hour-presence-caption ts-hour-coherence-caption">
+          Ideal day {String(idealDay.date ?? '')} {String(idealDay.start ?? '00:00')}–{String(idealDay.end ?? '24:00')}
+        </p>
+      )}
+      <table className="ts-hour-presence-table ts-hour-coherence-table">
+        <thead>
+          <tr>
+            <th>Hour (UTC)</th>
+            <th>Footage in hour</th>
+            <th>Parsed</th>
+            <th>% parsed</th>
+            <th>Ideal hour fill</th>
+          </tr>
+        </thead>
+        <tbody>
+          {hours.map((h) => (
+            <tr
+              key={h.hour_label}
+              className={h.minutes_sampled === 0 ? 'ts-hour-empty' : ''}
+            >
+              <td>{h.hour_label}</td>
+              <td>{h.minutes_sampled} min</td>
+              <td className="muted">{h.minutes_present}/{h.minutes_sampled}</td>
+              <td>
+                <span
+                  className={
+                    h.parsed_percent >= 80
+                      ? 'ts-hour-good'
+                      : h.parsed_percent >= 50
+                        ? 'ts-hour-warn'
+                        : 'ts-hour-bad'
+                  }
+                >
+                  {h.parsed_percent.toFixed(0)}%
+                </span>
+              </td>
+              <td>{h.coverage_percent.toFixed(0)}%</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export const HourCoherenceTable = HourPresenceTable;
+
 export function GapBreakdownPanel({ viz, stats }: { viz?: TimelineViz | null; stats?: Record<string, unknown> }) {
+  const presenceEnabled = Boolean(
+    stats?.hour_presence_map_enabled ?? stats?.coherence_map_enabled,
+  );
+  if (presenceEnabled) return null;
   const raw = viz?.gap_breakdown ?? (stats?.by_reason as Record<string, number> | undefined) ?? {};
   const entries = Object.entries(normalizeGapBreakdown(raw)).sort((a, b) => b[1] - a[1]);
   if (entries.length === 0) return null;
@@ -363,44 +516,46 @@ export function SummaryStatsRow({
 }) {
   const stats = map.stats ?? {};
   const viz = map.timeline_viz;
-  const numGaps = Number(viz?.num_gaps ?? stats.num_gaps ?? map.gaps?.length ?? 0);
-  const gapFraction = Number(stats.gap_fraction ?? 0);
-  const presentFrac = Number(map.timeline_summary?.present_fraction ?? 0);
+  const presentFrac = Number(
+    stats.parsed_fraction ?? map.timeline_summary?.present_fraction ?? 0,
+  );
+  const hoursWithCoverage = Number(stats.hours_with_coverage ?? 0);
+  const unparsedFrac = Number(stats.gap_fraction ?? 0);
   const numSegments = Number(map.num_segments ?? stats.num_segments ?? 0);
-  const trustedFrac = Number(stats.trusted_fraction ?? 0);
   const syncEnabled = Boolean(stats.sync_map_enabled);
+  const presenceEnabled = Boolean(
+    stats.hour_presence_map_enabled ?? stats.coherence_map_enabled ?? syncEnabled,
+  );
 
   return (
     <div className="timestamp-stats-grid">
-      {syncEnabled && numSegments > 0 && (
+      {syncEnabled && numSegments > 0 && !presenceEnabled && (
         <div className="timestamp-stat">
           <span className="timestamp-stat-val">{numSegments}</span>
           <span className="timestamp-stat-label">Trusted OSD segments</span>
         </div>
       )}
-      {syncEnabled && trustedFrac > 0 && (
+      {presenceEnabled && (
         <div className="timestamp-stat">
-          <span className="timestamp-stat-val">{(trustedFrac * 100).toFixed(0)}%</span>
-          <span className="timestamp-stat-label">Trusted 1-min bins</span>
+          <span className="timestamp-stat-val">{(presentFrac * 100).toFixed(0)}%</span>
+          <span className="timestamp-stat-label">1-min bins parsed</span>
+        </div>
+      )}
+      {presenceEnabled && hoursWithCoverage > 0 && (
+        <div className="timestamp-stat">
+          <span className="timestamp-stat-val">{hoursWithCoverage}</span>
+          <span className="timestamp-stat-label">UTC hours with footage</span>
+        </div>
+      )}
+      {presenceEnabled && (
+        <div className="timestamp-stat">
+          <span className="timestamp-stat-val">{(unparsedFrac * 100).toFixed(1)}%</span>
+          <span className="timestamp-stat-label">Unparsed footage</span>
         </div>
       )}
       <div className="timestamp-stat">
-        <span className="timestamp-stat-val">{numGaps}</span>
-        <span className="timestamp-stat-label">Missing / incoherent fragments</span>
-      </div>
-      <div className="timestamp-stat">
-        <span className="timestamp-stat-val">{(gapFraction * 100).toFixed(1)}%</span>
-        <span className="timestamp-stat-label">Timeline in gaps</span>
-      </div>
-      <div className="timestamp-stat">
         <span className="timestamp-stat-val">{(presentFrac * 100).toFixed(0)}%</span>
-        <span className="timestamp-stat-label">OSD readable</span>
-      </div>
-      <div className="timestamp-stat">
-        <span className="timestamp-stat-val">
-          {fmtDuration(Number(viz?.gap_duration_s ?? stats.gap_duration_s ?? 0))}
-        </span>
-        <span className="timestamp-stat-label">Gap duration</span>
+        <span className="timestamp-stat-label">OSD parsed (samples)</span>
       </div>
       {corrected && (
         <div className="timestamp-stat">

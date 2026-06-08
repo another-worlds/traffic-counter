@@ -32,9 +32,38 @@ def load_timestamp_status(project_id: str, video_id: str) -> Dict[str, Any]:
 
 
 def frame_to_wall_epoch(frame_idx: int, sync_map: Dict[str, Any], fps: float) -> Optional[float]:
-    """Map frame index to wall-clock epoch using trusted sync-map segments."""
-    if fps <= 0:
+    """Map frame index to wall-clock epoch using coherence or legacy sync-map."""
+    if fps <= 0 or not sync_map:
         return None
+
+    model = sync_map.get("model")
+    if model in ("ideal_day_hour_presence_1m", "ideal_day_vs_detected_1m"):
+        ideal_day = sync_map.get("ideal_day") or {}
+        map_mode = str(ideal_day.get("map_mode") or "realtime")
+        day_start = float(ideal_day.get("day_start_epoch") or 0)
+        window_s = float(ideal_day.get("window_s") or 86400)
+        video_duration_s = float(sync_map.get("video_duration_s") or 0)
+        t_s = frame_idx / fps
+        anchor_video_t, anchor_epoch = 0.0, day_start
+        for b in sync_map.get("bins", []):
+            if b.get("present") and b.get("detected_epoch") is not None:
+                anchor_video_t = float(b.get("start_t_s") or 0)
+                anchor_epoch = float(b["detected_epoch"])
+                break
+        for b in sync_map.get("bins", []):
+            usable = (
+                bool(b.get("present"))
+                if model == "ideal_day_hour_presence_1m"
+                else bool(b.get("coherent"))
+            )
+            if not usable:
+                continue
+            if int(b["start_frame"]) <= frame_idx < int(b["end_frame"]):
+                if map_mode == "stretch" and video_duration_s > 0:
+                    return day_start + t_s * (window_s / video_duration_s)
+                return anchor_epoch + (t_s - anchor_video_t)
+        return None
+
     t_s = frame_idx / fps
     for seg in sync_map.get("segments", []):
         start_f = int(seg["start_frame"])
@@ -102,6 +131,9 @@ def load_gap_map(project_id: str, video_id: str) -> Optional[Dict[str, Any]]:
         "gaps": gaps_doc.get("gaps", []),
         "stats": gaps_doc.get("stats", {}),
         "wall_clock_buckets": gaps_doc.get("wall_clock_buckets") or (sync_map or {}).get("wall_clock_buckets"),
+        "hour_presence": gaps_doc.get("hour_presence") or (sync_map or {}).get("hour_presence"),
+        "hour_coherence": gaps_doc.get("hour_coherence") or (sync_map or {}).get("hour_coherence"),
+        "ideal_day": gaps_doc.get("ideal_day") or (sync_map or {}).get("ideal_day"),
         "num_segments": gaps_doc.get("num_segments") or (sync_map or {}).get("num_segments"),
         "sync_map": sync_map,
     }

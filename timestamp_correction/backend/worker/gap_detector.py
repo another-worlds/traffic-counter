@@ -25,6 +25,7 @@ REASON_PRIORITY = {
     "missing_osd": 5,
     "time_reverse": 4,
     "time_jump": 3,
+    "timestamp_drift": 3,
     "frozen_osd": 2,
     "sync_recovery": 1,
 }

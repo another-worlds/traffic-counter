@@ -4,6 +4,10 @@
 **Date:** 2026-06-11
 **Scope:** `macromodel` subsystem (the "lightweight cousin of PTV Visum")
 **Supersedes:** nothing — this is the first ADR
+**Expanded by:** [`../architecture/tooling-landscape.md`](../architecture/tooling-landscape.md) (2026-06-12) —
+a ground-up, ~20-segment open-source tool/gap landscape + integration diagram. It **completes the §7
+verification pass** this ADR flagged as unfinished, and **corrects §4.2's "no engine provides ODME"**: a
+turnkey OSS ODME *does* exist in the GMNS lane (Path4GMNS), now used as a reference oracle.
 
 ---
 
@@ -193,6 +197,12 @@ noted as "[Nx]" = corroborated by N independent agents. See §7 for the verifica
 ---
 
 ## 7. Verification status (honesty note)
+
+> **Update (2026-06-12):** the verification pass has since been **run** — see
+> [`tooling-landscape.md` §8](../architecture/tooling-landscape.md). All eight load-bearing claims were
+> re-checked against primary source code (verdicts: 7× CONFIRMED, 1× PARTIAL). The one correction: "no
+> engine provides ODME" holds for the AequilibraE/OMX lane but **not** for the GMNS lane — Path4GMNS ships
+> a turnkey `conduct_odme`. The original honesty note is retained below for the record.
 
 The formal adversarial verification pass **was killed by a session limit before producing output**.
 The decision-critical claims in §3 are instead supported by **natural cross-corroboration** (the

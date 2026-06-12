@@ -1,0 +1,74 @@
+flowchart LR
+  classDef ours fill:#ffe3b3,stroke:#cc7a00,stroke-width:2px,color:#111;
+  classDef tool fill:#e6f2ff,stroke:#3377bb,color:#111;
+  classDef src  fill:#eeeeee,stroke:#888888,color:#111;
+
+  subgraph SRC[External data sources]
+    TC["traffic-counter API<br/>(CCTV to YOLO counts)"]:::src
+    OSM[("OpenStreetMap")]:::src
+    GTFS[("GTFS feeds")]:::src
+  end
+
+  subgraph ACQ[Acquisition - OSS]
+    O2G["osm2gmns<br/>OSM to GMNS (+capacity defaults)"]:::tool
+  end
+
+  subgraph STORE[Single source of truth]
+    PG[("PostGIS<br/>native geom - GiST - pgRouting")]:::tool
+  end
+
+  subgraph ENG[Modelling engine - OSS]
+    AEQ["AequilibraE<br/>BFW assign - gravity/IPF - skims - select-link"]:::tool
+    P4G["Path4GMNS / DTALite<br/>native ODME (reference oracle)"]:::tool
+  end
+
+  subgraph BACK[Backend - OSS]
+    API["FastAPI<br/>REST + OpenAPI"]:::tool
+    PROC["Procrastinate<br/>Postgres job queue"]:::tool
+  end
+
+  subgraph WEB[Tiles + web client - OSS]
+    MARTIN["Martin<br/>PostGIS to MVT"]:::tool
+    ML["MapLibre GL JS<br/>data-driven link styling"]:::tool
+    DECK["deck.gl + flowmap.gl<br/>OD desire lines / arcs"]:::tool
+    VEGA["Vega-Lite<br/>GEH - convergence"]:::tool
+    SHELL["React shell<br/>Dockview - AG Grid - Glide - cmdk"]:::tool
+    DRAW["MapLibre + terra-draw<br/>(draw / handle surface)"]:::tool
+  end
+
+  GEOREF[["Georef bridge<br/>counts to link (KNN) - PCU/vph"]]:::ours
+  MAT[["PostGIS to engine materialisation<br/>(GMNS / OMX)"]]:::ours
+  ODME[["ODME module<br/>select-link incidence - GEH"]]:::ours
+  TOPO[["Topology edit service<br/>split / merge / snap / move-node"]]:::ours
+  PANELS[["Visum panels<br/>Lists - Matrix editor - Procedure sequence"]]:::ours
+
+  QGIS["QGIS Desktop"]:::tool
+
+  TC -->|"REST /counts"| GEOREF
+  GEOREF -->|"SQL (PostGIS KNN snap)"| PG
+  OSM -->|"PBF / Overpass"| O2G
+  O2G -->|"GMNS CSV"| MAT
+  GTFS -.->|"GTFS (transit, later)"| MAT
+
+  PG <-->|"SQL / GeoAlchemy2"| API
+  API -->|"enqueue (same txn)"| PROC
+  PROC -->|"run"| MAT
+  MAT -->|"GMNS / OMX"| AEQ
+  AEQ -->|"select-link OD-link (OMX)"| ODME
+  ODME -->|"calibrated matrix (OMX)"| MAT
+  MAT -->|"write flows / matrices"| PG
+  P4G -.->|"reference / validation (GMNS)"| ODME
+
+  PG -->|"MVT (ST_AsMVT)"| MARTIN
+  MARTIN -->|"MVT / TileJSON"| ML
+  ML --- SHELL
+  DECK --- SHELL
+  VEGA --- SHELL
+  DRAW --- SHELL
+  PANELS --- SHELL
+  SHELL <-->|"REST (OpenAPI)"| API
+  API -->|"results JSON"| VEGA
+
+  DRAW -->|"GeoJSON edits"| TOPO
+  TOPO -->|"SQL (graph ops)"| PG
+  QGIS -.->|"direct PostGIS (power-user side door)"| PG

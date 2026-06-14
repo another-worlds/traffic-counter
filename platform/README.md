@@ -6,6 +6,10 @@ architecture from
 It is **independent** of the legacy `macromodel/` app (Solara + UXsim + GeoJSON-in-JSON) —
 nothing here imports or depends on it; they run as separate containers.
 
+> **Why this exists** → [`../macromodel/docs/adr/0002-clean-slate-rewrite-on-target-architecture.md`](../macromodel/docs/adr/0002-clean-slate-rewrite-on-target-architecture.md)
+> · **What's done / next** → [`ROADMAP.md`](ROADMAP.md)
+> · **The contract** → [`docs/data-contract.md`](docs/data-contract.md)
+
 ## Services
 
 | Service | What it is | Port | Status |

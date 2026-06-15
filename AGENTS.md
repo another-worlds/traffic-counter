@@ -25,6 +25,20 @@
 - Never commit to `main`. Work on a feature branch; open a PR only when asked.
 - Don't bake secrets or model identifiers into committed files.
 
+## Guardrails (enforced, not just advice)
+
+The rules above are backed by committed tooling — details in `.claude/hooks/README.md`:
+
+- **`.claude/settings.json`** denies `Edit`/`Write` into `macromodel/**` and registers a
+  **PreToolUse** hook (`.claude/hooks/guard.py`) that blocks edits to the frozen `macromodel/` or
+  the counter core (`api/ worker/ watcher/ frontend/ config/ infra/ scripts/`), commits/pushes to
+  `main`/`master`, and secrets/model-ids in written content. Override when explicitly asked:
+  `GUARD_ALLOW=macromodel|core|all` (or `GUARD_DISABLE=1`).
+- **CI** (`.github/workflows/platform-ci.yml`) runs the `platform/core-api` contract tests on real
+  PostGIS, flags diffs into frozen areas (bypass: `[allow-legacy]` in a commit message), and scans
+  for committed model identifiers.
+- **`.claude/hooks/session-start.sh`** — optional, **unwired** web bring-up (opt in deliberately).
+
 ## Build / run / test
 
 ### platform/ (the rewrite) — needs Docker + PostGIS
@@ -81,6 +95,6 @@ cd platform/core-api && \
 > **Why a host venv:** the host trusts the proxy CA (so host `pip`/`git`/`npx` work), but an
 > in-container `pip install` fails cert verification unless the proxy CA is added to the image.
 > The committed `platform/core-api/Dockerfile` builds normally wherever PyPI is directly
-> reachable (real CI/deploy). These steps can be automated with a **SessionStart hook** + cloud
-> **Setup Script** (not enabled by default — it auto-runs code each session, so opt in
-> deliberately): https://code.claude.com/docs/en/claude-code-on-the-web
+> reachable (real CI/deploy). These steps are scripted in **`.claude/hooks/session-start.sh`** (a
+> **SessionStart** hook) + an optional cloud **Setup Script** — unwired by default; it auto-runs
+> code each session, so opt in deliberately: https://code.claude.com/docs/en/claude-code-on-the-web

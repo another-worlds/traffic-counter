@@ -1,0 +1,78 @@
+# Contract tests for platform/core-api against real PostGIS, plus repo guardrails
+# (frozen-area diff check + committed model-identifier scan). Mirrors the dev setup
+# in AGENTS.md: postgis/postgis:16-3.4, user/pw/db = model, Python 3.11.
+name: platform-ci
+
+on:
+  push:
+    branches-ignore: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  contract-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgis:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: model
+          POSTGRES_PASSWORD: model
+          POSTGRES_DB: model
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U model"
+          --health-interval 3s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: platform/core-api/requirements.txt
+      - name: Install deps
+        working-directory: platform/core-api
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Contract tests (real PostGIS — native geometry + GiST KNN)
+        working-directory: platform/core-api
+        env:
+          DATABASE_URL: postgresql+psycopg://model:model@localhost:5432/model
+        run: python -m pytest -q tests
+
+  guardrails:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: No Claude model identifiers in committed files
+        run: |
+          if git grep -nIE 'claude-(opus|sonnet|haiku|fable)-[0-9]|anthropic\.claude-' \
+               -- . ':(exclude).github/**' ':(exclude).claude/**'; then
+            echo "::error::A Claude model identifier appears in a committed file (AGENTS.md)."
+            exit 1
+          fi
+          echo "ok: no model identifiers found"
+      - name: No edits to frozen / core areas (PRs; bypass with [allow-legacy])
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git log --format=%B "$BASE..$HEAD" | grep -q '\[allow-legacy\]'; then
+            echo "::notice::[allow-legacy] present — skipping frozen-area check"; exit 0
+          fi
+          changed="$(git diff --name-only "$BASE" "$HEAD")"
+          echo "Changed files:"; echo "$changed"
+          if echo "$changed" | grep -E '^(macromodel|api|worker|watcher|frontend|config|infra|scripts)/'; then
+            echo "::error::Diff touches frozen/core areas. Active work is in platform/."
+            echo "::error::If intentional and authorized, add [allow-legacy] to a commit message."
+            exit 1
+          fi
+          echo "ok: no frozen/core files changed"

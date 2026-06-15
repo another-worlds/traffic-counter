@@ -9,6 +9,7 @@ nothing here imports or depends on it; they run as separate containers.
 > **Why this exists** → [`../macromodel/docs/adr/0002-clean-slate-rewrite-on-target-architecture.md`](../macromodel/docs/adr/0002-clean-slate-rewrite-on-target-architecture.md)
 > · **What's done / next** → [`ROADMAP.md`](ROADMAP.md)
 > · **The contract** → [`docs/data-contract.md`](docs/data-contract.md)
+> · **How to build next** → [`docs/implementation-plan.md`](docs/implementation-plan.md) (per-module specs in [`docs/modules/`](docs/modules/))
 
 ## Services
 

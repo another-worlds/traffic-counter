@@ -74,6 +74,43 @@ Interactive OpenAPI at `/docs`.
 - **Async** SQLAlchemy under psycopg3 (the report flags GeoAlchemy2 async as under-documented —
   the foundation uses proven **sync** sessions).
 - **Alembic** migrations (greenfield uses `create_all`; no JSON-legacy to migrate).
-- **Topology operations** (split/merge/snap-node/move-node) — the dedicated topology edit
-  service, the largest "build" gap, comes next.
-- Engine materialisation (PostGIS → GMNS/OMX → AequilibraE) and the ODME module.
+- **Topology operations** (split/merge/snap-node/move-node) → [`modules/02-topology-edit.md`](modules/02-topology-edit.md) — the largest "build" gap, comes next.
+- Engine materialisation → [`modules/03-engine-materialisation.md`](modules/03-engine-materialisation.md) and the ODME module → [`modules/05-odme-calibration.md`](modules/05-odme-calibration.md).
+
+## Planned contract surface (not yet built)
+
+> Full per-module specs: [`modules/`](modules/), sequenced by
+> [`implementation-plan.md`](implementation-plan.md). These entries **graduate into the tables
+> above** as each module ships — this section shrinks as the as-built contract grows.
+
+### Forthcoming endpoints
+
+| Method | Path | Module |
+|---|---|---|
+| `POST/GET/DELETE` | `/scenarios/{sid}/{link,node,zone}-types` | 01 |
+| `POST` | `/scenarios/{sid}/seed-demo` | 01 |
+| `POST` | `/scenarios/{sid}/links/{id}/split`, `/links/merge`, `/nodes/{id}/move`, `/nodes/{id}/split` | 02 |
+| `POST/GET` | `/scenarios/{sid}/assign`, `/scenarios/{sid}/assignment-results` | 03 |
+| `POST` | `/scenarios/{sid}/counters/ingest`, `/counters/{id}/resnap` | 04 |
+| `POST/GET` | `/scenarios/{sid}/calibrate`, `/scenarios/{sid}/calibration-runs` | 05 |
+| *(tiles)* | Martin MVT layers — a separate service, not `core-api` | 06 |
+
+### Artefact formats (out-of-row, referenced by `storage_ref`)
+
+Storage contracts, so they are canonical **here** rather than in a module spec.
+
+**OMX demand/skim matrix** — `Matrix.storage_ref`
+- OMX (HDF5). One named matrix per `DemandLayer` (and `Mode` where mode-split applies), e.g. `HW`,
+  `WH`. Shape `n_zones × n_zones`, `float32`, row = origin, col = destination.
+- Zone axis: an OMX `mapping` `index → Zone.id` (string UUIDs) so matrices survive zone reordering;
+  `n_zones` mirrors `Matrix.n_zones`.
+- Root attrs: `scenario_id`, `kind` (`demand|skim`), `step` (`seed|distributed|calibrated|skim|loaded`), `created_at`.
+
+**Per-link assignment volumes** — `AssignmentResult.storage_ref`
+- Tidy table, **Parquet** preferred (CSV fallback). One row per directed `Link`: `link_id` (FK),
+  `volume_vph`, `voc` (volume/capacity), `speed_kmh`, `tt_min`.
+- Summary scalars (`total_vkt`, later `mean_geh`) are denormalised onto the `AssignmentResult` row
+  for cheap listing; the table holds the detail, joined into `/network` features on demand.
+
+**Storage location:** `storage_ref` is an object-storage key (GCS in deploy; a local artefacts dir
+in dev). Large blobs stay out of the DB (principle 4).

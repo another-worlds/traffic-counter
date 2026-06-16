@@ -19,7 +19,7 @@ from worker.sync_map import frame_to_wall_epoch as sync_frame_to_wall
 
 def _frame_to_wall_epoch(frame_idx: int, sync_map: Dict, fps: float) -> Optional[float]:
     model = sync_map.get("model")
-    if model in ("ideal_day_hour_presence_1m", "ideal_day_vs_detected_1m"):
+    if model in ("clock_hour_presence_1m", "ideal_day_hour_presence_1m", "ideal_day_vs_detected_1m"):
         return coherence_frame_to_wall(frame_idx, sync_map, fps)
     return sync_frame_to_wall(frame_idx, sync_map, fps)
 

@@ -59,6 +59,8 @@ export type TimelineViz = {
   num_gaps?: number;
   hour_presence?: HourPresence[];
   hour_coherence?: HourCoherence[];
+  ideal_day_hours?: HourPresence[];
+  clock_hour_video_coverage?: ClockHourVideoCoverage[];
   ideal_day?: Record<string, unknown> | null;
   hour_presence_map_enabled?: boolean;
   coherence_map_enabled?: boolean;
@@ -97,7 +99,12 @@ export type HourPresence = {
   coverage_percent: number;
   parsed_percent: number;
   parsed_of_ideal_hour_percent?: number;
+  hour_index?: number;
+  minutes_ideal?: number;
+  parsed_fraction?: string;
 };
+
+export const CLOCK_HOUR_PRESENCE_MODEL = 'clock_hour_presence_1m';
 
 export type HourCoherence = HourPresence & {
   minutes_coherent?: number;
@@ -105,7 +112,52 @@ export type HourCoherence = HourPresence & {
   gaps?: GapInterval[];
 };
 
-export function normalizeHourRows(
+export type ClockHourVideoFragment = {
+  start_t_s: number;
+  end_t_s: number;
+  start_frame: number;
+  end_frame: number;
+  duration_s: number;
+};
+
+export type ClockHourVideoCoverage = {
+  hour_index: number;
+  hour_start_epoch: number;
+  hour_label: string;
+  video_duration_s: number;
+  video_duration_min: number;
+  video_duration_label: string;
+  fragment_count: number;
+  fragments: ClockHourVideoFragment[];
+};
+
+export function normalizeClockHourRows(
+  hours?: Array<HourPresence | HourCoherence> | null,
+): HourPresence[] {
+  if (!hours?.length) return [];
+  return hours.map((h) => {
+    const present = h.minutes_present ?? 0;
+    const ideal = h.minutes_ideal ?? 60;
+    const parsedPercent =
+      h.parsed_percent ?? Math.round((1000 * present) / ideal) / 10;
+    return {
+      hour_start_epoch: h.hour_start_epoch,
+      hour_label: h.hour_label,
+      hour_index: h.hour_index,
+      minutes_ideal: ideal,
+      minutes_sampled: h.minutes_sampled ?? ideal,
+      minutes_present: present,
+      minutes_unparsed: h.minutes_unparsed ?? Math.max(0, ideal - present),
+      parsed_fraction: h.parsed_fraction ?? `${present}/${ideal}`,
+      coverage_percent: h.coverage_percent ?? parsedPercent,
+      parsed_percent: parsedPercent,
+      parsed_of_ideal_hour_percent:
+        h.parsed_of_ideal_hour_percent ?? parsedPercent,
+    };
+  });
+}
+
+export function normalizeIdealDayHourRows(
   hours?: Array<HourPresence | HourCoherence> | null,
 ): HourPresence[] {
   if (!hours?.length) return [];
@@ -131,6 +183,17 @@ export function normalizeHourRows(
   });
 }
 
+/** @deprecated Use normalizeClockHourRows or normalizeIdealDayHourRows */
+export function normalizeHourRows(
+  hours?: Array<HourPresence | HourCoherence> | null,
+): HourPresence[] {
+  return normalizeClockHourRows(hours);
+}
+
+export function isClockHourPresenceModel(stats?: Record<string, unknown> | null): boolean {
+  return stats?.presence_model === CLOCK_HOUR_PRESENCE_MODEL;
+}
+
 export type TimestampMap = {
   region?: {
     x: number;
@@ -151,6 +214,8 @@ export type TimestampMap = {
   wall_clock_buckets?: Array<Record<string, unknown>> | null;
   hour_presence?: HourPresence[] | null;
   hour_coherence?: HourCoherence[] | null;
+  ideal_day_hours?: HourPresence[] | null;
+  clock_hour_video_coverage?: ClockHourVideoCoverage[] | null;
   ideal_day?: Record<string, unknown> | null;
   num_segments?: number | null;
 };

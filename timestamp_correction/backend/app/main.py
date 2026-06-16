@@ -252,6 +252,8 @@ def create_app() -> FastAPI:
             wall_clock_buckets=data.get("wall_clock_buckets"),
             hour_presence=data.get("hour_presence"),
             hour_coherence=data.get("hour_coherence"),
+            ideal_day_hours=data.get("ideal_day_hours"),
+            clock_hour_video_coverage=data.get("clock_hour_video_coverage"),
             ideal_day=data.get("ideal_day"),
             num_segments=data.get("num_segments"),
         )

@@ -8,7 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -18,6 +19,7 @@ from ..schemas import VideoOut
 from ..services.jobs import get_job_runner
 from ..services.sources import find_workspace_for_path
 from ..services.storage import key_video
+from ..services import workspace_backup
 
 router = APIRouter(tags=["local-folder"])
 
@@ -164,6 +166,42 @@ def update_local_video_metadata(body: MetadataUpdateRequest, db: Session = Depen
     db.commit()
     db.refresh(v)
     return v
+def _safe_backup_slug(text: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(text).strip())
+    return cleaned.strip("_") or "workspace"
+
+
+@router.get("/local-folder/backup")
+def download_workspace_backup(
+    background_tasks: BackgroundTasks,
+    scope: str = Query("all", pattern="^(all|folder)$"),
+    folder: str | None = Query(None, description="Parent path key from the Watched Folder UI"),
+    db: Session = Depends(get_db),
+):
+    """Download DB rows + derived artifacts for watched-folder workspace(s).
+
+    Does not include Yandex source video files — only analysis artifacts and metadata.
+    """
+    try:
+        tmp_path, summary = workspace_backup.build_workspace_backup_zip(
+            db, scope=scope, folder=folder,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(500, f"backup failed: {exc}") from exc
+
+    stamp = summary["scope"]["folder"] if scope == "folder" else "all-workspaces"
+    filename = f"workspace-backup-{_safe_backup_slug(stamp)}.zip"
+    background_tasks.add_task(Path(tmp_path).unlink, missing_ok=True)
+    return FileResponse(
+        tmp_path,
+        media_type="application/zip",
+        filename=filename,
+        headers={"X-Backup-Video-Count": str(summary["video_count"])},
+    )
+
+
 @router.post("/local-folder/analyze-pending", response_model=AnalyzePendingResponse)
 def analyze_pending(db: Session = Depends(get_db)):
     """Queue all local-folder videos that have not been analyzed yet."""

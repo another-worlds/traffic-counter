@@ -72,12 +72,34 @@ class HourPresenceOut(BaseModel):
     coverage_percent: float
     parsed_percent: float
     parsed_of_ideal_hour_percent: float = 0.0
+    hour_index: Optional[int] = None
+    minutes_ideal: Optional[int] = None
+    parsed_fraction: Optional[str] = None
 
 
 class HourCoherenceOut(HourPresenceOut):
     minutes_coherent: int = 0
     coherence_of_hour_percent: float = 0.0
     gaps: List[Dict[str, Any]] = []
+
+
+class ClockHourVideoFragmentOut(BaseModel):
+    start_t_s: float
+    end_t_s: float
+    start_frame: int
+    end_frame: int
+    duration_s: float
+
+
+class ClockHourVideoCoverageOut(BaseModel):
+    hour_index: int
+    hour_start_epoch: int
+    hour_label: str
+    video_duration_s: float
+    video_duration_min: float
+    video_duration_label: str
+    fragment_count: int
+    fragments: List[ClockHourVideoFragmentOut] = []
 
 
 class TimestampMapOut(BaseModel):
@@ -89,6 +111,8 @@ class TimestampMapOut(BaseModel):
     wall_clock_buckets: Optional[List[Dict[str, Any]]] = None
     hour_presence: Optional[List[HourPresenceOut]] = None
     hour_coherence: Optional[List[HourCoherenceOut]] = None
+    ideal_day_hours: Optional[List[HourPresenceOut]] = None
+    clock_hour_video_coverage: Optional[List[ClockHourVideoCoverageOut]] = None
     ideal_day: Optional[Dict[str, Any]] = None
     num_segments: Optional[int] = None
 

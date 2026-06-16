@@ -270,8 +270,11 @@ function hourBarColor(parsedPct: number, sampled: number): string {
 }
 
 function shortHourLabel(hourLabel: string): string {
-  const m = hourLabel.match(/(\d{2}):00 UTC$/);
-  return m ? m[1] : hourLabel.slice(-8, -6) || '?';
+  const interval = hourLabel.match(/^(\d{2}):00/);
+  if (interval) return interval[1];
+  const utc = hourLabel.match(/(\d{2}):00 UTC$/);
+  if (utc) return utc[1];
+  return hourLabel.slice(-8, -6) || '?';
 }
 
 export function IdealDayHourBar({
@@ -291,7 +294,7 @@ export function IdealDayHourBar({
   return (
     <div className="ts-viz-block">
       <div className="ts-viz-header">
-        <h4>Ideal day presence (UTC hours)</h4>
+        <h4>Ideal day footage map</h4>
         {idealDay && (
           <span className="muted">
             {String(idealDay.date ?? '')} {String(idealDay.start ?? '00:00')}–{String(idealDay.end ?? '24:00')}
@@ -332,21 +335,7 @@ export function IdealDayHourBar({
   );
 }
 
-export function PresenceRescanNotice() {
-  return (
-    <div className="ts-rescan-notice">
-      <strong>UTC hour map not available</strong>
-      <p className="muted">
-        This scan uses the older video-time format. Re-run timestamp scan to generate the
-        24-hour ideal-day presence report.
-      </p>
-    </div>
-  );
-}
-
-export const CoherenceRescanNotice = PresenceRescanNotice;
-
-export function HourPresenceTable({
+export function IdealDayHourTable({
   hours,
   idealDay,
 }: {
@@ -356,27 +345,28 @@ export function HourPresenceTable({
     minutes_present: number;
     coverage_percent: number;
     parsed_percent: number;
+    parsed_of_ideal_hour_percent?: number;
   }> | null;
   idealDay?: Record<string, unknown> | null;
 }) {
   if (!hours?.length) return null;
 
   return (
-    <div className="ts-hour-presence ts-hour-coherence">
-      <h4>Hour presence</h4>
+    <div className="ts-hour-presence ts-ideal-day-hours">
+      <h4>Ideal day hour presence</h4>
       {idealDay && (
-        <p className="muted ts-hour-presence-caption ts-hour-coherence-caption">
+        <p className="muted ts-hour-presence-caption ts-ideal-day-hours-caption">
           Ideal day {String(idealDay.date ?? '')} {String(idealDay.start ?? '00:00')}–{String(idealDay.end ?? '24:00')}
         </p>
       )}
-      <table className="ts-hour-presence-table ts-hour-coherence-table">
+      <table className="ts-hour-presence-table ts-ideal-day-hours-table">
         <thead>
           <tr>
-            <th>Hour (UTC)</th>
-            <th>Footage in hour</th>
+            <th className="ts-ideal-day-col-light">Hour (UTC)</th>
+            <th className="ts-ideal-day-col-light">Footage in hour</th>
             <th>Parsed</th>
             <th>% parsed</th>
-            <th>Ideal hour fill</th>
+            <th className="ts-ideal-day-col-light">Ideal hour fill</th>
           </tr>
         </thead>
         <tbody>
@@ -385,8 +375,8 @@ export function HourPresenceTable({
               key={h.hour_label}
               className={h.minutes_sampled === 0 ? 'ts-hour-empty' : ''}
             >
-              <td>{h.hour_label}</td>
-              <td>{h.minutes_sampled} min</td>
+              <td className="ts-ideal-day-col-light">{h.hour_label}</td>
+              <td className="ts-ideal-day-col-light">{h.minutes_sampled} min</td>
               <td className="muted">{h.minutes_present}/{h.minutes_sampled}</td>
               <td>
                 <span
@@ -401,7 +391,9 @@ export function HourPresenceTable({
                   {h.parsed_percent.toFixed(0)}%
                 </span>
               </td>
-              <td>{h.coverage_percent.toFixed(0)}%</td>
+              <td className="ts-ideal-day-col-light">
+                {(h.parsed_of_ideal_hour_percent ?? h.coverage_percent).toFixed(0)}%
+              </td>
             </tr>
           ))}
         </tbody>
@@ -410,7 +402,137 @@ export function HourPresenceTable({
   );
 }
 
+export function PresenceRescanNotice() {
+  return (
+    <div className="ts-rescan-notice">
+      <strong>Clock-hour presence report not available</strong>
+      <p className="muted">
+        This scan predates the clock-hour report format. Re-run timestamp scan to generate
+        per-hour parsed-minute completeness (e.g. 57/60).
+      </p>
+    </div>
+  );
+}
+
+export const CoherenceRescanNotice = PresenceRescanNotice;
+
+export function HourPresenceTable({
+  hours,
+}: {
+  hours?: Array<{
+    hour_label: string;
+    minutes_present: number;
+    minutes_ideal?: number;
+    parsed_fraction?: string;
+    parsed_percent: number;
+  }> | null;
+}) {
+  if (!hours?.length) return null;
+
+  return (
+    <div className="ts-hour-presence ts-hour-coherence">
+      <h4>Clock-hour OSD presence</h4>
+      <p className="muted ts-hour-presence-caption ts-hour-coherence-caption">
+        Distinct parsed minutes per clock hour (60 ideal slots per hour).
+      </p>
+      <table className="ts-hour-presence-table ts-hour-coherence-table">
+        <thead>
+          <tr>
+            <th>Hour</th>
+            <th>Parsed</th>
+            <th>%</th>
+          </tr>
+        </thead>
+        <tbody>
+          {hours.map((h) => {
+            const ideal = h.minutes_ideal ?? 60;
+            const fraction = h.parsed_fraction ?? `${h.minutes_present}/${ideal}`;
+            const empty = h.minutes_present === 0;
+            return (
+              <tr
+                key={h.hour_label}
+                className={empty ? 'ts-hour-empty' : ''}
+              >
+                <td>{h.hour_label}</td>
+                <td className="ts-hour-fraction">{fraction}</td>
+                <td>
+                  <span
+                    className={
+                      h.parsed_percent >= 80
+                        ? 'ts-hour-good'
+                        : h.parsed_percent >= 50
+                          ? 'ts-hour-warn'
+                          : 'ts-hour-bad'
+                    }
+                  >
+                    {h.parsed_percent.toFixed(0)}%
+                  </span>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 export const HourCoherenceTable = HourPresenceTable;
+
+export function ClockHourVideoCoverageTable({
+  hours,
+}: {
+  hours?: Array<{
+    hour_label: string;
+    video_duration_s: number;
+    video_duration_label: string;
+    fragment_count: number;
+    fragments?: Array<{ start_t_s: number; end_t_s: number; duration_s: number }>;
+  }> | null;
+}) {
+  if (!hours?.length) return null;
+
+  return (
+    <div className="ts-hour-presence ts-clock-hour-video">
+      <h4>Clock-hour video coverage</h4>
+      <p className="muted ts-hour-presence-caption ts-clock-hour-video-caption">
+        Video time attributed to each parsed wall-clock hour (contiguous fragments, no minute dedup).
+      </p>
+      <table className="ts-hour-presence-table ts-clock-hour-video-table">
+        <thead>
+          <tr>
+            <th>Hour</th>
+            <th>Video time</th>
+            <th>Fragments</th>
+          </tr>
+        </thead>
+        <tbody>
+          {hours.map((h) => {
+            const empty = h.video_duration_s <= 0;
+            const fragHint = h.fragments?.length
+              ? h.fragments
+                .map((f) => `${fmtDuration(f.start_t_s)}–${fmtDuration(f.end_t_s)}`)
+                .join(', ')
+              : '';
+            return (
+              <tr
+                key={h.hour_label}
+                className={empty ? 'ts-hour-empty' : ''}
+                title={fragHint || undefined}
+              >
+                <td>{h.hour_label}</td>
+                <td className="ts-hour-fraction">
+                  {empty ? '—' : (h.video_duration_label || `${h.video_duration_s.toFixed(0)}s`)}
+                </td>
+                <td>{empty ? '—' : h.fragment_count}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
 
 export function GapBreakdownPanel({ viz, stats }: { viz?: TimelineViz | null; stats?: Record<string, unknown> }) {
   const presenceEnabled = Boolean(

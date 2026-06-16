@@ -799,6 +799,64 @@ else:
     fc4.metric("Folder ETA", "—")
 st.progress(selected_row["completion"], text=f"{status_icon} Folder completion {selected_row['completion']*100:.1f}%")
 
+st.markdown("### Workspace Backup")
+st.caption(
+    "Download database rows (projects, videos, lines, segments, timestamp scans) and all "
+    "derived artifacts (tracks, frames, exports, timestamp maps). Source videos on Yandex Disk "
+    "are not included — paths are preserved in the backup for restore on the same mount."
+)
+
+backup_scope = st.radio(
+    "Backup scope",
+    options=["current_folder", "all_workspaces"],
+    format_func=lambda key: {
+        "current_folder": f"Current folder only ({selected_row['count']} videos)",
+        "all_workspaces": f"All watched-folder workspaces ({total} videos)",
+    }[key],
+    horizontal=True,
+    key="workspace_backup_scope",
+)
+
+bk_build_col, bk_download_col = st.columns([2, 2])
+with bk_build_col:
+    if st.button(
+        "Build workspace backup",
+        key="workspace_backup_build_btn",
+        type="primary",
+        use_container_width=True,
+    ):
+        scope_arg = "folder" if backup_scope == "current_folder" else "all"
+        folder_arg = sel_folder if backup_scope == "current_folder" else None
+        with st.spinner("Packaging database and artifacts…"):
+            try:
+                zip_bytes, zip_name = api.download_workspace_backup(
+                    scope=scope_arg,
+                    folder=folder_arg,
+                )
+            except api.APIError as exc:
+                st.error(str(exc))
+            else:
+                st.session_state["workspace_backup_zip"] = zip_bytes
+                st.session_state["workspace_backup_label"] = zip_name
+                size_mb = len(zip_bytes) / (1024 * 1024)
+                st.success(f"Backup ready ({size_mb:.1f} MB).")
+
+with bk_download_col:
+    backup_payload = st.session_state.get("workspace_backup_zip")
+    backup_label = st.session_state.get(
+        "workspace_backup_label",
+        "workspace-backup.zip",
+    )
+    st.download_button(
+        "Download backup ZIP",
+        data=backup_payload or b"",
+        file_name=backup_label,
+        mime="application/zip",
+        disabled=not backup_payload,
+        use_container_width=True,
+        key="workspace_backup_download_btn",
+    )
+
 st.markdown("### Bulk Excel Export")
 st.caption(
     "Build the current count workbooks for every analyzed video that already has counting lines. "

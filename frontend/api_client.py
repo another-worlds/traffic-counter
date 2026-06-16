@@ -296,3 +296,22 @@ def analyze_pending_local_folder() -> Dict:
         r = c.post("/local-folder/analyze-pending")
         _raise(r)
         return r.json()
+
+
+def download_workspace_backup(
+    *,
+    scope: str = "all",
+    folder: str | None = None,
+) -> tuple[bytes, str]:
+    """Download ZIP backup of DB rows + artifacts for watched-folder workspace(s)."""
+    params: Dict[str, str] = {"scope": scope}
+    if folder:
+        params["folder"] = folder
+    with _client(timeout=None) as c:
+        r = c.get("/local-folder/backup", params=params)
+        _raise(r)
+        filename = "workspace-backup.zip"
+        cd = r.headers.get("content-disposition") or ""
+        if "filename=" in cd:
+            filename = cd.split("filename=", 1)[-1].strip().strip('"')
+        return r.content, filename

@@ -168,7 +168,7 @@ REASON_LABELS = {
 
 
 def _write_hour_presence_sheet(wb, gap_map: Dict, existing_titles: set) -> None:
-    """Per-hour OSD presence on the ideal day."""
+    """Clock-hour OSD completeness (distinct parsed minutes per hour)."""
     hours = gap_map.get("hour_presence") or gap_map.get("hour_coherence") or []
     if not hours:
         return
@@ -178,6 +178,64 @@ def _write_hour_presence_sheet(wb, gap_map: Dict, existing_titles: set) -> None:
     existing_titles.add(title)
     ws = wb.create_sheet(title=title)
     ws.cell(row=1, column=1, value="Присутствие меток времени по часам").font = Font(bold=True, size=14)
+    ws.cell(row=2, column=1, value="Уникальные распознанные минуты в каждом часовом интервале (из 60).")
+    headers = ["Час", "Распознано", "%"]
+    _write_header(ws, headers, row=4)
+    r = 5
+    for h in hours:
+        ideal = int(h.get("minutes_ideal") or h.get("minutes_sampled") or 60)
+        present = int(h.get("minutes_present") or 0)
+        parsed_pct = h.get("parsed_percent")
+        if parsed_pct is None:
+            parsed_pct = round(100.0 * present / max(ideal, 1), 1)
+        fraction = h.get("parsed_fraction") or f"{present}/{ideal}"
+        row_vals = [h.get("hour_label"), fraction, parsed_pct]
+        for j, val in enumerate(row_vals, start=1):
+            ws.cell(row=r, column=j, value=val)
+        r += 1
+    _autosize(ws)
+
+
+def _write_clock_hour_video_sheet(wb, gap_map: Dict, existing_titles: set) -> None:
+    """Video-time spans per parsed wall-clock hour."""
+    hours = gap_map.get("clock_hour_video_coverage") or []
+    if not hours:
+        return
+    title = "Видео по часам"
+    if title in existing_titles:
+        title = "Видео по часам_2"
+    existing_titles.add(title)
+    ws = wb.create_sheet(title=title)
+    ws.cell(row=1, column=1, value="Видеовремя по часам OSD").font = Font(bold=True, size=14)
+    ws.cell(row=2, column=1, value="Сумма длительности видео в непрерывных фрагментах с одним часом OSD.")
+    headers = ["Час", "Видеовремя (мин)", "Фрагментов"]
+    _write_header(ws, headers, row=4)
+    r = 5
+    for h in hours:
+        if float(h.get("video_duration_s") or 0) <= 0:
+            continue
+        row_vals = [
+            h.get("hour_label"),
+            h.get("video_duration_min"),
+            h.get("fragment_count"),
+        ]
+        for j, val in enumerate(row_vals, start=1):
+            ws.cell(row=r, column=j, value=val)
+        r += 1
+    _autosize(ws)
+
+
+def _write_ideal_day_hours_sheet(wb, gap_map: Dict, existing_titles: set) -> None:
+    """Ideal-day footage placement per hour."""
+    hours = gap_map.get("ideal_day_hours") or []
+    if not hours:
+        return
+    title = "Идеальный день"
+    if title in existing_titles:
+        title = "Идеальный день_2"
+    existing_titles.add(title)
+    ws = wb.create_sheet(title=title)
+    ws.cell(row=1, column=1, value="Размещение видео на идеальном дне").font = Font(bold=True, size=14)
     ideal = gap_map.get("ideal_day") or {}
     if ideal:
         ws.cell(row=2, column=1, value=(
@@ -185,7 +243,7 @@ def _write_hour_presence_sheet(wb, gap_map: Dict, existing_titles: set) -> None:
             f"{ideal.get('start', '')}–{ideal.get('end', '')}"
         ))
     headers = [
-        "Час (UTC)",
+        "Час",
         "Минут видео в часе",
         "Минут с OSD",
         "% распознано в фрагменте",
@@ -379,6 +437,8 @@ def build_xlsx_for_video(
     if gap_map:
         _write_gaps_sheet(wb, gap_map, rows_excluded, existing_titles)
         _write_hour_presence_sheet(wb, gap_map, existing_titles)
+        _write_clock_hour_video_sheet(wb, gap_map, existing_titles)
+        _write_ideal_day_hours_sheet(wb, gap_map, existing_titles)
 
     # Pre-pass: 1 materialization per segment (O(S) total, independent of line count).
     export_segments = wall_clock_segments if wall_clock_segments else segments

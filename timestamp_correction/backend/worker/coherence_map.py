@@ -10,7 +10,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, TypedDict
 
 from .gap_detector import GapInterval, _merge_overlapping, gap_stats
 from .sync_map import _bins_from_samples
@@ -18,7 +18,8 @@ from .timestamp_reader import TimestampSample
 
 _TIME_RE = re.compile(r"^(\d{1,2}):(\d{2})(?::(\d{2}))?$")
 
-PRESENCE_MODEL = "ideal_day_hour_presence_1m"
+PRESENCE_MODEL = "clock_hour_presence_1m"
+LEGACY_IDEAL_DAY_MODEL = "ideal_day_hour_presence_1m"
 LEGACY_COHERENCE_MODEL = "ideal_day_vs_detected_1m"
 
 
@@ -74,6 +75,7 @@ class PresenceBin:
     present: bool
     ideal_epoch: Optional[float] = None
     hour_key: Optional[int] = None
+    detected_clock_hour: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -87,6 +89,7 @@ class PresenceBin:
             "ocr_text": self.ocr_text,
             "present": self.present,
             "hour_key": self.hour_key,
+            "detected_clock_hour": self.detected_clock_hour,
         }
 
 
@@ -136,7 +139,126 @@ def _hour_slots(day_start_epoch: float, window_s: float) -> List[int]:
     return [int(day_start_epoch + i * 3600) for i in range(n_hours)]
 
 
-def build_hour_presence(
+def _clock_hour_label(hour: int) -> str:
+    end = (hour + 1) % 24
+    return f"{hour:02d}:00–{end:02d}:00"
+
+
+class _VideoFragment(TypedDict):
+    start_t_s: float
+    end_t_s: float
+    start_frame: int
+    end_frame: int
+    duration_s: float
+
+
+def _detected_clock_hour(bin_: PresenceBin) -> Optional[int]:
+    if not bin_.present or bin_.detected_epoch is None:
+        return None
+    return datetime.fromtimestamp(float(bin_.detected_epoch), tz=timezone.utc).hour
+
+
+def _assign_detected_clock_hours(bins: List[PresenceBin]) -> None:
+    for b in bins:
+        b.detected_clock_hour = _detected_clock_hour(b)
+
+
+def _build_clock_hour_video_fragments(bins: List[PresenceBin]) -> Dict[int, List[_VideoFragment]]:
+    """Merge consecutive 1-min bins with the same parsed clock hour into video spans."""
+    by_hour: Dict[int, List[_VideoFragment]] = {h: [] for h in range(24)}
+    current_hour: Optional[int] = None
+    frag_start_t: Optional[float] = None
+    frag_end_t: Optional[float] = None
+    frag_start_frame: Optional[int] = None
+    frag_end_frame: Optional[int] = None
+
+    def flush() -> None:
+        nonlocal current_hour, frag_start_t, frag_end_t, frag_start_frame, frag_end_frame
+        if current_hour is None or frag_start_t is None or frag_end_t is None:
+            return
+        by_hour[current_hour].append({
+            "start_t_s": round(frag_start_t, 3),
+            "end_t_s": round(frag_end_t, 3),
+            "start_frame": int(frag_start_frame or 0),
+            "end_frame": int(frag_end_frame or 0),
+            "duration_s": round(frag_end_t - frag_start_t, 3),
+        })
+        current_hour = None
+        frag_start_t = None
+        frag_end_t = None
+        frag_start_frame = None
+        frag_end_frame = None
+
+    for b in sorted(bins, key=lambda x: x.start_t_s):
+        hour = b.detected_clock_hour
+        if hour is None:
+            flush()
+            continue
+        if current_hour == hour:
+            frag_end_t = b.end_t_s
+            frag_end_frame = b.end_frame
+        else:
+            flush()
+            current_hour = hour
+            frag_start_t = b.start_t_s
+            frag_end_t = b.end_t_s
+            frag_start_frame = b.start_frame
+            frag_end_frame = b.end_frame
+    flush()
+    return by_hour
+
+
+def build_clock_hour_video_coverage(bins: List[PresenceBin]) -> List[Dict[str, Any]]:
+    """Per clock-hour totals from contiguous video spans sharing one parsed wall-clock hour."""
+    fragments_by_hour = _build_clock_hour_video_fragments(bins)
+    rows: List[Dict[str, Any]] = []
+    for hour in range(24):
+        fragments = fragments_by_hour.get(hour, [])
+        video_s = round(sum(f["duration_s"] for f in fragments), 3)
+        video_min = round(video_s / 60.0, 1)
+        rows.append({
+            "hour_index": hour,
+            "hour_start_epoch": hour * 3600,
+            "hour_label": _clock_hour_label(hour),
+            "video_duration_s": video_s,
+            "video_duration_min": video_min,
+            "video_duration_label": f"{video_min:.1f} min",
+            "fragment_count": len(fragments),
+            "fragments": fragments,
+        })
+    return rows
+
+
+def build_clock_hour_presence(bins: List[PresenceBin]) -> List[Dict[str, Any]]:
+    """Per clock-hour OSD completeness from parsed timestamps (time-of-day only)."""
+    minute_sets: Dict[int, set] = {h: set() for h in range(24)}
+    for b in bins:
+        if not b.present or b.detected_epoch is None:
+            continue
+        dt = datetime.fromtimestamp(float(b.detected_epoch), tz=timezone.utc)
+        minute_sets[dt.hour].add(dt.minute)
+
+    rows: List[Dict[str, Any]] = []
+    for hour in range(24):
+        present = len(minute_sets[hour])
+        parsed_pct = round(100.0 * present / 60.0, 1)
+        rows.append({
+            "hour_index": hour,
+            "hour_start_epoch": hour * 3600,
+            "hour_label": _clock_hour_label(hour),
+            "minutes_ideal": 60,
+            "minutes_sampled": 60,
+            "minutes_present": present,
+            "minutes_unparsed": 60 - present,
+            "parsed_fraction": f"{present}/60",
+            "parsed_percent": parsed_pct,
+            "parsed_of_ideal_hour_percent": parsed_pct,
+            "coverage_percent": parsed_pct,
+        })
+    return rows
+
+
+def build_ideal_day_hours(
     bins: List[PresenceBin],
     *,
     day_start_epoch: float,
@@ -170,14 +292,26 @@ def build_hour_presence(
     return rows
 
 
+def build_hour_presence(
+    bins: List[PresenceBin],
+    *,
+    day_start_epoch: float,
+    window_s: float,
+) -> List[Dict[str, Any]]:
+    """Deprecated alias for build_ideal_day_hours."""
+    return build_ideal_day_hours(
+        bins, day_start_epoch=day_start_epoch, window_s=window_s,
+    )
+
+
 def build_hour_coherence(
     bins: List[PresenceBin],
     *,
     day_start_epoch: float,
     window_s: float,
 ) -> List[Dict[str, Any]]:
-    """Legacy alias — returns hour_presence rows with coherence fields for old consumers."""
-    rows = build_hour_presence(bins, day_start_epoch=day_start_epoch, window_s=window_s)
+    """Legacy alias — returns clock hour_presence rows with coherence fields."""
+    rows = [dict(r) for r in build_clock_hour_presence(bins)]
     for row in rows:
         row["minutes_coherent"] = row["minutes_present"]
         row["coherence_of_hour_percent"] = row["parsed_of_ideal_hour_percent"]
@@ -233,6 +367,17 @@ def _bin_usable_for_wall_clock(b: Dict[str, Any], model: str) -> bool:
     if model == LEGACY_COHERENCE_MODEL:
         return bool(b.get("coherent"))
     return bool(b.get("present"))
+
+
+def _coherence_from_clock_hours(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        r = dict(row)
+        r["minutes_coherent"] = r["minutes_present"]
+        r["coherence_of_hour_percent"] = r["parsed_of_ideal_hour_percent"]
+        r["gaps"] = []
+        out.append(r)
+    return out
 
 
 def frame_to_wall_epoch(
@@ -315,14 +460,17 @@ def build_hour_presence_map(
         video_duration_s=video_duration_s,
         map_mode=map_mode,
     )
+    _assign_detected_clock_hours(bins)
 
-    hour_presence = build_hour_presence(
+    hour_presence = build_clock_hour_presence(bins)
+    clock_hour_video_coverage = build_clock_hour_video_coverage(bins)
+    ideal_day_hours = build_ideal_day_hours(
         bins, day_start_epoch=day_start_epoch, window_s=window_s,
     )
     gaps = gaps_from_unparsed_bins(bins)
     gap_stats_dict = gap_stats(gaps, total_frames, fps)
     parsed_bins = sum(1 for b in bins if b.present)
-    hours_with_coverage = sum(1 for h in hour_presence if h["minutes_sampled"] > 0)
+    hours_with_coverage = sum(1 for h in hour_presence if h["minutes_present"] > 0)
     wall_buckets = _wall_clock_buckets_from_present_bins(bins, fps)
 
     gap_dicts = [
@@ -350,9 +498,9 @@ def build_hour_presence_map(
         "video_duration_s": round(video_duration_s, 3),
         "bins": [b.to_dict() for b in bins],
         "hour_presence": hour_presence,
-        "hour_coherence": build_hour_coherence(
-            bins, day_start_epoch=day_start_epoch, window_s=window_s,
-        ),
+        "clock_hour_video_coverage": clock_hour_video_coverage,
+        "ideal_day_hours": ideal_day_hours,
+        "hour_coherence": _coherence_from_clock_hours(hour_presence),
         "gaps": gap_dicts,
         "wall_clock_buckets": wall_buckets,
         "stats": {
@@ -363,6 +511,7 @@ def build_hour_presence_map(
             "hours_with_coverage": hours_with_coverage,
             "hour_presence_map_enabled": True,
             "coherence_map_enabled": True,
+            "presence_model": PRESENCE_MODEL,
         },
     }
 

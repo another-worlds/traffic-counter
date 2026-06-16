@@ -37,7 +37,7 @@ def frame_to_wall_epoch(frame_idx: int, sync_map: Dict[str, Any], fps: float) ->
         return None
 
     model = sync_map.get("model")
-    if model in ("ideal_day_hour_presence_1m", "ideal_day_vs_detected_1m"):
+    if model in ("clock_hour_presence_1m", "ideal_day_hour_presence_1m", "ideal_day_vs_detected_1m"):
         ideal_day = sync_map.get("ideal_day") or {}
         map_mode = str(ideal_day.get("map_mode") or "realtime")
         day_start = float(ideal_day.get("day_start_epoch") or 0)
@@ -53,7 +53,7 @@ def frame_to_wall_epoch(frame_idx: int, sync_map: Dict[str, Any], fps: float) ->
         for b in sync_map.get("bins", []):
             usable = (
                 bool(b.get("present"))
-                if model == "ideal_day_hour_presence_1m"
+                if model in ("clock_hour_presence_1m", "ideal_day_hour_presence_1m")
                 else bool(b.get("coherent"))
             )
             if not usable:
@@ -133,6 +133,10 @@ def load_gap_map(project_id: str, video_id: str) -> Optional[Dict[str, Any]]:
         "wall_clock_buckets": gaps_doc.get("wall_clock_buckets") or (sync_map or {}).get("wall_clock_buckets"),
         "hour_presence": gaps_doc.get("hour_presence") or (sync_map or {}).get("hour_presence"),
         "hour_coherence": gaps_doc.get("hour_coherence") or (sync_map or {}).get("hour_coherence"),
+        "ideal_day_hours": gaps_doc.get("ideal_day_hours") or (sync_map or {}).get("ideal_day_hours"),
+        "clock_hour_video_coverage": (
+            gaps_doc.get("clock_hour_video_coverage") or (sync_map or {}).get("clock_hour_video_coverage")
+        ),
         "ideal_day": gaps_doc.get("ideal_day") or (sync_map or {}).get("ideal_day"),
         "num_segments": gaps_doc.get("num_segments") or (sync_map or {}).get("num_segments"),
         "sync_map": sync_map,

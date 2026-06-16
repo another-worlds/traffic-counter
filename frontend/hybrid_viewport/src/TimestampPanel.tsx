@@ -10,7 +10,9 @@ import {
   type TimestampMap,
   type TimestampStatus,
   GAP_REASON_LABELS,
-  normalizeHourRows,
+  normalizeClockHourRows,
+  normalizeIdealDayHourRows,
+  isClockHourPresenceModel,
   getCorrectedCounts,
   getTimestampMap,
   getTimestampStatus,
@@ -22,7 +24,9 @@ import {
   CountsCorrectionStatus,
   GapBreakdownPanel,
   HourPresenceTable,
+  ClockHourVideoCoverageTable,
   IdealDayHourBar,
+  IdealDayHourTable,
   PresenceTrack,
   ScanProgressPanel,
   SummaryStatsRow,
@@ -283,12 +287,6 @@ export default function TimestampPanel({
   const isProcessing = isScanning || busy;
   const autoScanOff = status?.auto_scan_enabled === false;
   const showResults = isDone && map != null;
-  const hourPresence = normalizeHourRows(
-    map?.hour_presence
-    ?? map?.timeline_viz?.hour_presence
-    ?? map?.hour_coherence
-    ?? map?.timeline_viz?.hour_coherence,
-  );
   const idealDay = map?.ideal_day ?? map?.timeline_viz?.ideal_day ?? null;
   const presenceMapEnabled = Boolean(
     map?.stats?.hour_presence_map_enabled
@@ -296,7 +294,29 @@ export default function TimestampPanel({
     ?? map?.timeline_viz?.hour_presence_map_enabled
     ?? map?.timeline_viz?.coherence_map_enabled,
   );
-  const hasHourPresence = hourPresence.length > 0;
+  const isClockHourModel = isClockHourPresenceModel(map?.stats);
+  const hourPresence = isClockHourModel
+    ? normalizeClockHourRows(
+      map?.hour_presence ?? map?.timeline_viz?.hour_presence,
+    )
+    : [];
+  const idealDayHours = normalizeIdealDayHourRows(
+    map?.ideal_day_hours
+    ?? map?.timeline_viz?.ideal_day_hours
+    ?? (!isClockHourModel
+      ? (map?.hour_presence
+        ?? map?.timeline_viz?.hour_presence
+        ?? map?.hour_coherence
+        ?? map?.timeline_viz?.hour_coherence)
+      : null),
+  );
+  const clockHourVideoCoverage =
+    map?.clock_hour_video_coverage
+    ?? map?.timeline_viz?.clock_hour_video_coverage
+    ?? [];
+  const hasClockHourPresence = isClockHourModel && hourPresence.length > 0;
+  const hasClockHourVideoCoverage = isClockHourModel && clockHourVideoCoverage.length > 0;
+  const hasIdealDayBar = idealDayHours.length > 0;
   const showProgress = isProcessing || isDone;
   const hasRegionPreview = Boolean(status?.artifacts?.region_preview);
   const previewCacheBust = previewEpoch
@@ -315,7 +335,7 @@ export default function TimestampPanel({
         <div>
           <h3>Timestamp analysis</h3>
           <p className="muted">
-            Maps footage onto the ideal UTC day (00:00–24:00) and reports per-hour OSD parseability.
+            Reports clock-hour OSD completeness (parsed minutes per hour) and ideal-day footage placement.
           </p>
         </div>
         <div className="timestamp-actions">
@@ -407,13 +427,19 @@ export default function TimestampPanel({
         <>
           <SummaryStatsRow map={map} corrected={corrected} />
 
-          {hasHourPresence ? (
+          {hasIdealDayBar && (
             <>
-              <IdealDayHourBar hours={hourPresence} idealDay={idealDay} />
-              <HourPresenceTable hours={hourPresence} idealDay={idealDay} />
+              <IdealDayHourBar hours={idealDayHours} idealDay={idealDay} />
+              <IdealDayHourTable hours={idealDayHours} idealDay={idealDay} />
             </>
-          ) : (
+          )}
+          {hasClockHourPresence ? (
+            <HourPresenceTable hours={hourPresence} />
+          ) : presenceMapEnabled ? (
             <PresenceRescanNotice />
+          ) : null}
+          {hasClockHourVideoCoverage && (
+            <ClockHourVideoCoverageTable hours={clockHourVideoCoverage} />
           )}
 
           <GapBreakdownPanel viz={map.timeline_viz} stats={map.stats} />

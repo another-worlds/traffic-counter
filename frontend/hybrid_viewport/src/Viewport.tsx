@@ -45,6 +45,9 @@ export default function Viewport({
   const { width, height } = videoSize;
   const showLines = model.visibleLayers['saved-lines'];
   const cursor = getCursor(model);
+  const labelFontSize = model.lineLabelFontSize ?? 24;
+  const sideCountFontSize = Math.round(labelFontSize * 0.72);
+  const labelOffsetY = Math.round(labelFontSize * 0.78);
 
   const layerCtx: LayerRenderContext = { model, bootstrap, videoSize };
 
@@ -145,9 +148,9 @@ export default function Viewport({
                     <g style={{ pointerEvents: 'none' }}>
                       <text
                         x={midX + 1}
-                        y={midY - 13}
+                        y={midY - labelOffsetY + 1}
                         fill="rgba(0,0,0,0.85)"
-                        fontSize={18}
+                        fontSize={labelFontSize}
                         fontWeight={600}
                         textAnchor="middle"
                       >
@@ -155,9 +158,9 @@ export default function Viewport({
                       </text>
                       <text
                         x={midX}
-                        y={midY - 14}
+                        y={midY - labelOffsetY}
                         fill={line.color}
-                        fontSize={18}
+                        fontSize={labelFontSize}
                         fontWeight={600}
                         textAnchor="middle"
                       >
@@ -237,6 +240,8 @@ export default function Viewport({
                           x={textX}
                           y={textY}
                           fill={line.color}
+                          fontSize={sideCountFontSize}
+                          strokeWidth={Math.max(2, labelFontSize * 0.17)}
                           transform={`rotate(${deg} ${textX} ${textY})`}
                         >
                           {count}

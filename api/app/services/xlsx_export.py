@@ -7,8 +7,10 @@ xlsx export. One workbook per export request:
 """
 from __future__ import annotations
 import io
+import logging
 from typing import List, Dict, Optional, Tuple
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XLImage
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
@@ -20,7 +22,13 @@ from .counting import (
     COCO_VEHICLE_CLASSES,
 )
 from .tracks import load_materialized_tracks, load_tracks_for_video, load_tracks_for_videos
+from .viewport_render import (
+    EXCEL_MAX_WIDTH,
+    load_preview_frame_bytes,
+    render_line_viewport_snapshot,
+)
 
+log = logging.getLogger("api.xlsx_export")
 
 HEADER_FONT = Font(bold=True, color="FFFFFF")
 HEADER_FILL = PatternFill("solid", fgColor="0C447C")
@@ -50,6 +58,21 @@ def _autosize(ws):
         col_letter = get_column_letter(col_cells[0].column)
         width = max((len(str(c.value)) if c.value is not None else 0) for c in col_cells)
         ws.column_dimensions[col_letter].width = min(max(width + 2, 10), 40)
+
+
+def _insert_snapshot(ws, start_row: int, png_bytes: bytes, *, col: int = 1) -> int:
+    """Place a viewport snapshot and return the next free row."""
+    img = XLImage(io.BytesIO(png_bytes))
+    if img.width > EXCEL_MAX_WIDTH:
+        ratio = EXCEL_MAX_WIDTH / img.width
+        img.width = EXCEL_MAX_WIDTH
+        img.height = int(img.height * ratio)
+    anchor = f"{get_column_letter(col)}{start_row}"
+    ws.add_image(img, anchor)
+    rows_needed = max(2, int(img.height / 18) + 1)
+    for r in range(start_row, start_row + rows_needed):
+        ws.row_dimensions[r].height = 18
+    return start_row + rows_needed + 1
 
 
 def _fmt_time(secs: float) -> str:
@@ -196,35 +219,6 @@ def _write_hour_presence_sheet(wb, gap_map: Dict, existing_titles: set) -> None:
     _autosize(ws)
 
 
-def _write_clock_hour_video_sheet(wb, gap_map: Dict, existing_titles: set) -> None:
-    """Video-time spans per parsed wall-clock hour."""
-    hours = gap_map.get("clock_hour_video_coverage") or []
-    if not hours:
-        return
-    title = "Видео по часам"
-    if title in existing_titles:
-        title = "Видео по часам_2"
-    existing_titles.add(title)
-    ws = wb.create_sheet(title=title)
-    ws.cell(row=1, column=1, value="Видеовремя по часам OSD").font = Font(bold=True, size=14)
-    ws.cell(row=2, column=1, value="Сумма длительности видео в непрерывных фрагментах с одним часом OSD.")
-    headers = ["Час", "Видеовремя (мин)", "Фрагментов"]
-    _write_header(ws, headers, row=4)
-    r = 5
-    for h in hours:
-        if float(h.get("video_duration_s") or 0) <= 0:
-            continue
-        row_vals = [
-            h.get("hour_label"),
-            h.get("video_duration_min"),
-            h.get("fragment_count"),
-        ]
-        for j, val in enumerate(row_vals, start=1):
-            ws.cell(row=r, column=j, value=val)
-        r += 1
-    _autosize(ws)
-
-
 def _write_ideal_day_hours_sheet(wb, gap_map: Dict, existing_titles: set) -> None:
     """Ideal-day footage placement per hour."""
     hours = gap_map.get("ideal_day_hours") or []
@@ -350,6 +344,11 @@ def build_xlsx_for_video(
     rows_excluded: int = 0,
     raw_tracks_df=None,
     wall_clock_segments: Optional[List[Dict]] = None,
+    *,
+    project_id: Optional[str] = None,
+    video_id: Optional[str] = None,
+    video_width: Optional[int] = None,
+    video_height: Optional[int] = None,
 ) -> bytes:
     """Generate per-line workbook bytes.
 
@@ -437,12 +436,19 @@ def build_xlsx_for_video(
     if gap_map:
         _write_gaps_sheet(wb, gap_map, rows_excluded, existing_titles)
         _write_hour_presence_sheet(wb, gap_map, existing_titles)
-        _write_clock_hour_video_sheet(wb, gap_map, existing_titles)
         _write_ideal_day_hours_sheet(wb, gap_map, existing_titles)
 
     # Pre-pass: 1 materialization per segment (O(S) total, independent of line count).
     export_segments = wall_clock_segments if wall_clock_segments else segments
     seg_entries = _build_seg_entries(tracks_df, lines, export_segments, full_counts["per_line"])
+
+    counts_by_line = {ln["line_id"]: ln for ln in full_counts["per_line"]}
+    frame_bytes: Optional[bytes] = None
+    if project_id and video_id:
+        try:
+            frame_bytes = load_preview_frame_bytes(project_id, video_id)
+        except Exception:
+            log.exception("failed to load preview frame for xlsx snapshots")
 
     # ── Sheets per line — no materialization in this loop ────────────────────
     for line in lines:
@@ -453,7 +459,26 @@ def build_xlsx_for_video(
         wsv.cell(row=1, column=1, value=line.get("name", title)).font = Font(bold=True, size=12)
 
         next_row = 3
+        line_counts = counts_by_line.get(line["id"], {})
         for direction in ("positive", "negative"):
+            if frame_bytes and video_width and video_height:
+                try:
+                    snap = render_line_viewport_snapshot(
+                        frame_bytes,
+                        line=line,
+                        line_counts=line_counts,
+                        video_width=video_width,
+                        video_height=video_height,
+                        direction=direction,
+                    )
+                    next_row = _insert_snapshot(wsv, next_row, snap)
+                except Exception:
+                    log.exception(
+                        "viewport snapshot failed for line %s direction %s",
+                        line.get("id"),
+                        direction,
+                    )
+
             seg_rows = [
                 {
                     "label": label,

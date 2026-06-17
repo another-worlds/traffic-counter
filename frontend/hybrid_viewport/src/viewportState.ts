@@ -61,6 +61,15 @@ export type InteractionState =
   | { kind: 'moving'; lineId: string; anchor: Point; original: Point[] }
   | { kind: 'resizing'; lineId: string; handleIndex: number };
 
+export const LINE_LABEL_FONT_SIZES = [
+  { id: 'sm', label: 'S', size: 18 },
+  { id: 'md', label: 'M', size: 24 },
+  { id: 'lg', label: 'L', size: 30 },
+  { id: 'xl', label: 'XL', size: 38 },
+] as const;
+
+export const DEFAULT_LINE_LABEL_FONT_SIZE = LINE_LABEL_FONT_SIZES[1].size;
+
 export type OverlayModel = {
   spec: ViewportSpec;
   currentFrame: number;
@@ -70,6 +79,8 @@ export type OverlayModel = {
   interaction: InteractionState;
   activeTool: string;
   drawingColor: string;
+  /** SVG font size (px) for line name + total count labels on the viewport. */
+  lineLabelFontSize: number;
 };
 
 export type SceneFrame = {
@@ -125,7 +136,8 @@ export type OverlayAction =
   | { type: 'update-resize-handle'; point: Point }
   | { type: 'commit-resize-handle' }
   | { type: 'set-active-tool'; toolId: string }
-  | { type: 'set-drawing-color'; color: string };
+  | { type: 'set-drawing-color'; color: string }
+  | { type: 'set-line-label-font-size'; size: number };
 
 function cloneLine(line: LineGeometry): LineGeometry {
   return {
@@ -178,6 +190,7 @@ export function createDefaultOverlayModel(spec: ViewportSpec, lines: LineGeometr
     interaction: { kind: 'idle' },
     activeTool: 'line',
     drawingColor: '#e24b4a',
+    lineLabelFontSize: DEFAULT_LINE_LABEL_FONT_SIZE,
   };
 }
 
@@ -369,6 +382,12 @@ export function reduceOverlayModel(model: OverlayModel, action: OverlayAction): 
 
     case 'set-drawing-color':
       return { ...model, drawingColor: action.color };
+
+    case 'set-line-label-font-size':
+      return {
+        ...model,
+        lineLabelFontSize: Math.max(12, Math.min(48, Math.round(action.size))),
+      };
 
     default:
       return model;

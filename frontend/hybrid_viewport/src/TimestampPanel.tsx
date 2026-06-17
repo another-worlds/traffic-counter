@@ -24,9 +24,7 @@ import {
   CountsCorrectionStatus,
   GapBreakdownPanel,
   HourPresenceTable,
-  ClockHourVideoCoverageTable,
   IdealDayHourBar,
-  IdealDayHourTable,
   PresenceTrack,
   ScanProgressPanel,
   SummaryStatsRow,
@@ -310,12 +308,7 @@ export default function TimestampPanel({
         ?? map?.timeline_viz?.hour_coherence)
       : null),
   );
-  const clockHourVideoCoverage =
-    map?.clock_hour_video_coverage
-    ?? map?.timeline_viz?.clock_hour_video_coverage
-    ?? [];
   const hasClockHourPresence = isClockHourModel && hourPresence.length > 0;
-  const hasClockHourVideoCoverage = isClockHourModel && clockHourVideoCoverage.length > 0;
   const hasIdealDayBar = idealDayHours.length > 0;
   const showProgress = isProcessing || isDone;
   const hasRegionPreview = Boolean(status?.artifacts?.region_preview);
@@ -428,19 +421,13 @@ export default function TimestampPanel({
           <SummaryStatsRow map={map} corrected={corrected} />
 
           {hasIdealDayBar && (
-            <>
-              <IdealDayHourBar hours={idealDayHours} idealDay={idealDay} />
-              <IdealDayHourTable hours={idealDayHours} idealDay={idealDay} />
-            </>
+            <IdealDayHourBar hours={idealDayHours} idealDay={idealDay} />
           )}
           {hasClockHourPresence ? (
             <HourPresenceTable hours={hourPresence} />
           ) : presenceMapEnabled ? (
             <PresenceRescanNotice />
           ) : null}
-          {hasClockHourVideoCoverage && (
-            <ClockHourVideoCoverageTable hours={clockHourVideoCoverage} />
-          )}
 
           <GapBreakdownPanel viz={map.timeline_viz} stats={map.stats} />
 

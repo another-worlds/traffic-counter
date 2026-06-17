@@ -14,6 +14,8 @@ import {
   buildInitialLinesFromBootstrap,
   buildViewportSpecFromBootstrap,
   createDefaultOverlayModel,
+  DEFAULT_LINE_LABEL_FONT_SIZE,
+  LINE_LABEL_FONT_SIZES,
   reduceOverlayModel,
 } from './viewportState';
 import {
@@ -56,6 +58,19 @@ const CLASS_PRESETS = [
 // per burst — important because /counts loads the full trajectory parquet.
 const COUNTS_DEBOUNCE_MS = 750;
 const CREATE_RETRY_MS = 2000;
+const FONT_SIZE_STORAGE_PREFIX = 'viewport-line-font-size:';
+
+function loadStoredLineLabelFontSize(videoId: string): number | null {
+  if (!videoId) return null;
+  try {
+    const raw = localStorage.getItem(`${FONT_SIZE_STORAGE_PREFIX}${videoId}`);
+    if (!raw) return null;
+    const size = Number(raw);
+    return Number.isFinite(size) ? size : null;
+  } catch {
+    return null;
+  }
+}
 
 function describeFetchErr(err: unknown): string {
   if (err instanceof Error) {
@@ -121,10 +136,12 @@ export default function App({ bootstrap }: AppProps) {
   const apiCfgRef = React.useRef(apiCfg);
   apiCfgRef.current = apiCfg;
 
-  const initialModel = React.useMemo(
-    () => createDefaultOverlayModel(spec, initialLines),
-    [spec, initialLines],
-  );
+  const initialModel = React.useMemo(() => {
+    const base = createDefaultOverlayModel(spec, initialLines);
+    const stored = loadStoredLineLabelFontSize(spec.videoId);
+    if (stored == null) return base;
+    return { ...base, lineLabelFontSize: stored };
+  }, [spec, initialLines]);
 
   const [model, setModel] = React.useState<OverlayModel>(initialModel);
   const [counts, setCounts] = React.useState<CountsBundle | undefined>(bootstrap?.counts);
@@ -184,6 +201,18 @@ export default function App({ bootstrap }: AppProps) {
   React.useEffect(() => {
     if (bootstrap?.suggestions !== undefined) setSuggestions(bootstrap.suggestions);
   }, [bootstrap?.suggestions]);
+
+  React.useEffect(() => {
+    if (!spec.videoId) return;
+    try {
+      localStorage.setItem(
+        `${FONT_SIZE_STORAGE_PREFIX}${spec.videoId}`,
+        String(model.lineLabelFontSize ?? DEFAULT_LINE_LABEL_FONT_SIZE),
+      );
+    } catch {
+      /* ignore quota / private mode */
+    }
+  }, [spec.videoId, model.lineLabelFontSize]);
 
   const dispatch = React.useCallback((action: OverlayAction) => {
     setModel((current) => reduceOverlayModel(current, action));
@@ -491,6 +520,21 @@ export default function App({ bootstrap }: AppProps) {
             onMouseMove={handleMouseMove}
             onMouseUp={handleMouseUp}
           />
+
+          <div className="viewport-font-size-strip" role="group" aria-label="Line label font size">
+            <span className="viewport-font-size-label">Labels</span>
+            {LINE_LABEL_FONT_SIZES.map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                className={`viewport-font-size-btn${model.lineLabelFontSize === opt.size ? ' active' : ''}`}
+                title={`Label size ${opt.label} (${opt.size}px)`}
+                onClick={() => dispatch({ type: 'set-line-label-font-size', size: opt.size })}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
 
           {/* Class preset overlay — top-right of viewport */}
           <div className="class-preset-strip">

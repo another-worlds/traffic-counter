@@ -2,7 +2,7 @@
 from __future__ import annotations
 import os
 import httpx
-from typing import List, Dict, Optional
+from typing import Callable, List, Dict, Optional
 
 API_URL = os.environ.get("API_URL", "http://localhost:8000")
 # URL reachable from the user's browser (differs from API_URL in Docker deployments).
@@ -11,6 +11,10 @@ PUBLIC_API_URL = os.environ.get("PUBLIC_API_URL", API_URL)
 
 class APIError(Exception):
     pass
+
+
+class ExportCancelled(Exception):
+    """Raised when a bulk export is cancelled by the user."""
 
 
 def _client(timeout: float = 3600.0) -> httpx.Client:
@@ -203,12 +207,20 @@ def start_export(
         return r.json()
 
 
-def wait_for_export(job_id: str, *, poll_interval_s: float = 1.0, timeout_s: float = 900.0) -> Dict:
+def wait_for_export(
+    job_id: str,
+    *,
+    poll_interval_s: float = 1.0,
+    timeout_s: float = 900.0,
+    should_cancel: Callable[[], bool] | None = None,
+) -> Dict:
     """Poll until an export job finishes. Raises APIError on failure or timeout."""
     import time
 
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        if should_cancel and should_cancel():
+            raise ExportCancelled(f"export job {job_id} cancelled")
         status = get_export_status(job_id)
         state = status.get("status")
         if state == "done":
@@ -315,3 +327,49 @@ def download_workspace_backup(
         if "filename=" in cd:
             filename = cd.split("filename=", 1)[-1].strip().strip('"')
         return r.content, filename
+
+
+def start_workspace_backup_job(
+    *,
+    scope: str = "all",
+    folder: str | None = None,
+) -> Dict:
+    payload: Dict[str, str] = {"scope": scope}
+    if folder:
+        payload["folder"] = folder
+    with _client(timeout=30.0) as c:
+        r = c.post("/local-folder/backup/jobs", json=payload)
+        _raise(r)
+        return r.json()
+
+
+def get_workspace_backup_job(job_id: str) -> Dict:
+    with _client(timeout=15.0) as c:
+        r = c.get(f"/local-folder/backup/jobs/{job_id}")
+        _raise(r)
+        return r.json()
+
+
+def cancel_workspace_backup_job(job_id: str) -> Dict:
+    with _client(timeout=15.0) as c:
+        r = c.delete(f"/local-folder/backup/jobs/{job_id}")
+        _raise(r)
+        return r.json()
+
+
+def download_workspace_backup_job(job_id: str) -> tuple[bytes, str]:
+    with _client(timeout=None) as c:
+        r = c.get(f"/local-folder/backup/jobs/{job_id}/file")
+        _raise(r)
+        filename = "workspace-backup.zip"
+        cd = r.headers.get("content-disposition") or ""
+        if "filename=" in cd:
+            filename = cd.split("filename=", 1)[-1].strip().strip('"')
+        return r.content, filename
+
+
+def prune_local_folder_video(video_id: str) -> Dict:
+    with _client(timeout=60.0) as c:
+        r = c.post("/local-folder/prune", json={"video_id": video_id})
+        _raise(r)
+        return r.json()

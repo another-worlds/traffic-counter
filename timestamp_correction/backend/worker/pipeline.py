@@ -363,7 +363,6 @@ def process_video(
         hour_presence: list = []
         hour_coherence: list = []
         ideal_day_hours: list = []
-        clock_hour_video_coverage: list = []
         if settings.use_hour_presence_map:
             sync_map_doc = build_hour_presence_map(
                 samples,
@@ -382,7 +381,6 @@ def process_video(
             hour_presence = list(sync_map_doc.get("hour_presence") or [])
             hour_coherence = list(sync_map_doc.get("hour_coherence") or [])
             ideal_day_hours = list(sync_map_doc.get("ideal_day_hours") or [])
-            clock_hour_video_coverage = list(sync_map_doc.get("clock_hour_video_coverage") or [])
         elif settings.use_sync_map:
             sync_map_doc = build_sync_map(
                 samples,
@@ -441,9 +439,6 @@ def process_video(
             gaps_payload["hour_presence"] = hour_presence or sync_map_doc.get("hour_presence", [])
             gaps_payload["hour_coherence"] = hour_coherence or sync_map_doc.get("hour_coherence", [])
             gaps_payload["ideal_day_hours"] = ideal_day_hours or sync_map_doc.get("ideal_day_hours", [])
-            gaps_payload["clock_hour_video_coverage"] = (
-                clock_hour_video_coverage or sync_map_doc.get("clock_hour_video_coverage", [])
-            )
             if sync_map_doc.get("ideal_day"):
                 gaps_payload["ideal_day"] = sync_map_doc["ideal_day"]
                 stats["ideal_day"] = sync_map_doc["ideal_day"]
@@ -453,8 +448,6 @@ def process_video(
                 stats["hour_coherence"] = gaps_payload["hour_coherence"]
             if gaps_payload.get("ideal_day_hours"):
                 stats["ideal_day_hours"] = gaps_payload["ideal_day_hours"]
-            if gaps_payload.get("clock_hour_video_coverage"):
-                stats["clock_hour_video_coverage"] = gaps_payload["clock_hour_video_coverage"]
         storage.write_json(key_timestamp_gaps(project_id, video_id), gaps_payload)
 
         hours_with_coverage = int(stats.get("hours_with_coverage") or 0)
@@ -480,7 +473,6 @@ def process_video(
             hour_presence=gaps_payload.get("hour_presence"),
             hour_coherence=gaps_payload.get("hour_coherence"),
             ideal_day_hours=gaps_payload.get("ideal_day_hours"),
-            clock_hour_video_coverage=gaps_payload.get("clock_hour_video_coverage"),
             ideal_day=gaps_payload.get("ideal_day"),
         )
         result = {

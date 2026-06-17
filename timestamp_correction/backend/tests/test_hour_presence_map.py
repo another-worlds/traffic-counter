@@ -60,9 +60,6 @@ def test_clock_hour_frozen_osd():
     hour = doc["hour_presence"][5]
     assert hour["minutes_present"] == 1
     assert hour["parsed_fraction"] == "1/60"
-    video = doc["clock_hour_video_coverage"][5]
-    assert video["video_duration_s"] == 600.0
-    assert video["fragment_count"] == 1
 
 
 def test_clock_hour_partial_minutes():
@@ -92,40 +89,6 @@ def test_clock_hour_two_hours():
     doc = build_hour_presence_map(samples, fps, total_frames, date_mode="fixed", fixed_date=day)
     assert doc["hour_presence"][7]["minutes_present"] == 1
     assert doc["hour_presence"][8]["minutes_present"] == 1
-
-
-def test_clock_hour_video_fragments_split_on_hour_change():
-    day = "2024-03-15"
-    fps = 30.0
-    samples = [
-        _sample(0, 0.0, _epoch_at(day, 7, 10)),
-        _sample(int(60 * fps), 60.0, _epoch_at(day, 7, 11)),
-        _sample(int(120 * fps), 120.0, _epoch_at(day, 8, 5)),
-    ]
-    total_frames = int(3 * 60 * fps)
-    doc = build_hour_presence_map(samples, fps, total_frames, date_mode="fixed", fixed_date=day)
-    h7 = doc["clock_hour_video_coverage"][7]
-    h8 = doc["clock_hour_video_coverage"][8]
-    assert h7["video_duration_s"] == 120.0
-    assert h7["fragment_count"] == 1
-    assert h8["video_duration_s"] == 60.0
-    assert h8["fragment_count"] == 1
-
-
-def test_clock_hour_video_fragments_split_on_unparsed_gap():
-    day = "2024-03-15"
-    fps = 30.0
-    samples = [
-        _sample(0, 0.0, _epoch_at(day, 9, 0)),
-        _sample(int(60 * fps), 60.0, None, present=False),
-        _sample(int(120 * fps), 120.0, _epoch_at(day, 9, 2)),
-    ]
-    total_frames = int(3 * 60 * fps)
-    doc = build_hour_presence_map(samples, fps, total_frames, date_mode="fixed", fixed_date=day)
-    h9 = doc["clock_hour_video_coverage"][9]
-    assert h9["video_duration_s"] == 120.0
-    assert h9["fragment_count"] == 2
-    assert len(h9["fragments"]) == 2
 
 
 def test_clock_hour_all_24_rows():

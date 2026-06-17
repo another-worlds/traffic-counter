@@ -335,73 +335,6 @@ export function IdealDayHourBar({
   );
 }
 
-export function IdealDayHourTable({
-  hours,
-  idealDay,
-}: {
-  hours?: Array<{
-    hour_label: string;
-    minutes_sampled: number;
-    minutes_present: number;
-    coverage_percent: number;
-    parsed_percent: number;
-    parsed_of_ideal_hour_percent?: number;
-  }> | null;
-  idealDay?: Record<string, unknown> | null;
-}) {
-  if (!hours?.length) return null;
-
-  return (
-    <div className="ts-hour-presence ts-ideal-day-hours">
-      <h4>Ideal day hour presence</h4>
-      {idealDay && (
-        <p className="muted ts-hour-presence-caption ts-ideal-day-hours-caption">
-          Ideal day {String(idealDay.date ?? '')} {String(idealDay.start ?? '00:00')}–{String(idealDay.end ?? '24:00')}
-        </p>
-      )}
-      <table className="ts-hour-presence-table ts-ideal-day-hours-table">
-        <thead>
-          <tr>
-            <th className="ts-ideal-day-col-light">Hour (UTC)</th>
-            <th className="ts-ideal-day-col-light">Footage in hour</th>
-            <th>Parsed</th>
-            <th>% parsed</th>
-            <th className="ts-ideal-day-col-light">Ideal hour fill</th>
-          </tr>
-        </thead>
-        <tbody>
-          {hours.map((h) => (
-            <tr
-              key={h.hour_label}
-              className={h.minutes_sampled === 0 ? 'ts-hour-empty' : ''}
-            >
-              <td className="ts-ideal-day-col-light">{h.hour_label}</td>
-              <td className="ts-ideal-day-col-light">{h.minutes_sampled} min</td>
-              <td className="muted">{h.minutes_present}/{h.minutes_sampled}</td>
-              <td>
-                <span
-                  className={
-                    h.parsed_percent >= 80
-                      ? 'ts-hour-good'
-                      : h.parsed_percent >= 50
-                        ? 'ts-hour-warn'
-                        : 'ts-hour-bad'
-                  }
-                >
-                  {h.parsed_percent.toFixed(0)}%
-                </span>
-              </td>
-              <td className="ts-ideal-day-col-light">
-                {(h.parsed_of_ideal_hour_percent ?? h.coverage_percent).toFixed(0)}%
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 export function PresenceRescanNotice() {
   return (
     <div className="ts-rescan-notice">
@@ -478,61 +411,6 @@ export function HourPresenceTable({
 }
 
 export const HourCoherenceTable = HourPresenceTable;
-
-export function ClockHourVideoCoverageTable({
-  hours,
-}: {
-  hours?: Array<{
-    hour_label: string;
-    video_duration_s: number;
-    video_duration_label: string;
-    fragment_count: number;
-    fragments?: Array<{ start_t_s: number; end_t_s: number; duration_s: number }>;
-  }> | null;
-}) {
-  if (!hours?.length) return null;
-
-  return (
-    <div className="ts-hour-presence ts-clock-hour-video">
-      <h4>Clock-hour video coverage</h4>
-      <p className="muted ts-hour-presence-caption ts-clock-hour-video-caption">
-        Video time attributed to each parsed wall-clock hour (contiguous fragments, no minute dedup).
-      </p>
-      <table className="ts-hour-presence-table ts-clock-hour-video-table">
-        <thead>
-          <tr>
-            <th>Hour</th>
-            <th>Video time</th>
-            <th>Fragments</th>
-          </tr>
-        </thead>
-        <tbody>
-          {hours.map((h) => {
-            const empty = h.video_duration_s <= 0;
-            const fragHint = h.fragments?.length
-              ? h.fragments
-                .map((f) => `${fmtDuration(f.start_t_s)}–${fmtDuration(f.end_t_s)}`)
-                .join(', ')
-              : '';
-            return (
-              <tr
-                key={h.hour_label}
-                className={empty ? 'ts-hour-empty' : ''}
-                title={fragHint || undefined}
-              >
-                <td>{h.hour_label}</td>
-                <td className="ts-hour-fraction">
-                  {empty ? '—' : (h.video_duration_label || `${h.video_duration_s.toFixed(0)}s`)}
-                </td>
-                <td>{empty ? '—' : h.fragment_count}</td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-    </div>
-  );
-}
 
 export function GapBreakdownPanel({ viz, stats }: { viz?: TimelineViz | null; stats?: Record<string, unknown> }) {
   const presenceEnabled = Boolean(

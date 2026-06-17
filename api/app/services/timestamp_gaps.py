@@ -134,9 +134,6 @@ def load_gap_map(project_id: str, video_id: str) -> Optional[Dict[str, Any]]:
         "hour_presence": gaps_doc.get("hour_presence") or (sync_map or {}).get("hour_presence"),
         "hour_coherence": gaps_doc.get("hour_coherence") or (sync_map or {}).get("hour_coherence"),
         "ideal_day_hours": gaps_doc.get("ideal_day_hours") or (sync_map or {}).get("ideal_day_hours"),
-        "clock_hour_video_coverage": (
-            gaps_doc.get("clock_hour_video_coverage") or (sync_map or {}).get("clock_hour_video_coverage")
-        ),
         "ideal_day": gaps_doc.get("ideal_day") or (sync_map or {}).get("ideal_day"),
         "num_segments": gaps_doc.get("num_segments") or (sync_map or {}).get("num_segments"),
         "sync_map": sync_map,

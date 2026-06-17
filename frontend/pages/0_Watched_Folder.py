@@ -1,6 +1,7 @@
 import io
 import os
 import re
+import threading
 import time
 import zipfile
 from collections import defaultdict
@@ -128,6 +129,7 @@ def _bulk_export_xlsx_zip(
     *,
     apply_timestamp_correction: bool,
     progress_cb=None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[bytes, dict]:
     """Build one XLSX per analyzed video (with lines) and return a ZIP archive."""
     analyzed = [v for v in videos if v.get("status") == "analyzed"]
@@ -137,6 +139,7 @@ def _bulk_export_xlsx_zip(
         "skipped_no_lines": [],
         "failed": [],
         "files": [],
+        "cancelled": False,
     }
     if not analyzed:
         return b"", summary
@@ -146,6 +149,9 @@ def _bulk_export_xlsx_zip(
 
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for idx, video in enumerate(analyzed, start=1):
+            if cancel_event and cancel_event.is_set():
+                summary["cancelled"] = True
+                break
             if progress_cb:
                 progress_cb(idx, len(analyzed), video)
 
@@ -169,7 +175,13 @@ def _bulk_export_xlsx_zip(
                     line_ids,
                     apply_timestamp_correction=apply_timestamp_correction,
                 )
-                status = api.wait_for_export(str(job["job_id"]))
+                status = api.wait_for_export(
+                    str(job["job_id"]),
+                    should_cancel=cancel_event.is_set if cancel_event else None,
+                )
+                if cancel_event and cancel_event.is_set():
+                    summary["cancelled"] = True
+                    break
                 data = api.download_export(str(job["job_id"]))
                 arcname = _xlsx_archive_name(video, str(status.get("filename") or "counts.xlsx"))
                 if arcname in used_names:
@@ -179,14 +191,186 @@ def _bulk_export_xlsx_zip(
                 zf.writestr(arcname, data)
                 summary["exported"] += 1
                 summary["files"].append(arcname)
+            except api.ExportCancelled:
+                summary["cancelled"] = True
+                break
             except (api.APIError, TimeoutError) as exc:
                 summary["failed"].append({
                     "filename": video.get("filename"),
                     "error": str(exc),
                 })
 
+    if summary["cancelled"]:
+        return b"", summary
+
     buffer.seek(0)
     return buffer.getvalue(), summary
+
+
+def _start_bulk_xlsx_build(
+    videos: list,
+    *,
+    apply_timestamp_correction: bool,
+) -> None:
+    cancel_event = threading.Event()
+    result_box: dict = {"done": False, "zip": b"", "summary": {}, "error": None}
+    progress_box: dict = {"done": 0, "total": 0, "filename": ""}
+
+    def _progress(done: int, total: int, video: dict) -> None:
+        progress_box["done"] = done
+        progress_box["total"] = total
+        progress_box["filename"] = video.get("filename") or ""
+
+    def _worker() -> None:
+        try:
+            zip_bytes, summary = _bulk_export_xlsx_zip(
+                videos,
+                apply_timestamp_correction=apply_timestamp_correction,
+                progress_cb=_progress,
+                cancel_event=cancel_event,
+            )
+            result_box["zip"] = zip_bytes
+            result_box["summary"] = summary
+        except Exception as exc:
+            result_box["error"] = str(exc)
+        finally:
+            result_box["done"] = True
+
+    st.session_state["bulk_xlsx_building"] = True
+    st.session_state["bulk_xlsx_thread_started"] = True
+    st.session_state["bulk_xlsx_cancel"] = cancel_event
+    st.session_state["bulk_xlsx_result"] = result_box
+    st.session_state["bulk_xlsx_progress"] = progress_box
+    st.session_state.pop("bulk_xlsx_zip", None)
+    st.session_state.pop("bulk_xlsx_summary", None)
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def _poll_backup_job() -> None:
+    job_id = st.session_state.get("workspace_backup_job_id")
+    if not job_id:
+        return
+    try:
+        status = api.get_workspace_backup_job(job_id)
+    except api.APIError as exc:
+        st.session_state.pop("workspace_backup_job_id", None)
+        st.error(str(exc))
+        return
+
+    state = status.get("status")
+    packed = int(status.get("storage_packed") or 0)
+    total = int(status.get("storage_total") or 0)
+    if total > 0:
+        st.progress(
+            packed / total,
+            text=f"Packing artifacts {packed}/{total}…",
+        )
+    elif state in {"pending", "running"}:
+        st.progress(0.0, text="Preparing backup…")
+
+    if state == "done":
+        try:
+            zip_bytes, zip_name = api.download_workspace_backup_job(job_id)
+        except api.APIError as exc:
+            st.error(str(exc))
+        else:
+            st.session_state["workspace_backup_zip"] = zip_bytes
+            st.session_state["workspace_backup_label"] = zip_name
+            size_mb = len(zip_bytes) / (1024 * 1024)
+            st.success(f"Backup ready ({size_mb:.1f} MB).")
+        st.session_state.pop("workspace_backup_job_id", None)
+        return
+
+    if state == "cancelled":
+        st.warning("Backup build cancelled.")
+        st.session_state.pop("workspace_backup_job_id", None)
+        st.session_state.pop("workspace_backup_zip", None)
+        return
+
+    if state == "error":
+        st.error(status.get("error") or "Backup failed.")
+        st.session_state.pop("workspace_backup_job_id", None)
+        return
+
+    time.sleep(0.5)
+    st.rerun()
+
+
+def _poll_bulk_xlsx_build() -> None:
+    result_box = st.session_state.get("bulk_xlsx_result") or {}
+    progress_box = st.session_state.get("bulk_xlsx_progress") or {}
+    if not result_box.get("done"):
+        done = int(progress_box.get("done") or 0)
+        total = int(progress_box.get("total") or 0)
+        filename = progress_box.get("filename") or ""
+        if total > 0:
+            st.progress(done / total, text=f"Exporting {done}/{total}: {filename}")
+        else:
+            st.progress(0.0, text="Starting exports…")
+        time.sleep(0.4)
+        st.rerun()
+        return
+
+    st.session_state["bulk_xlsx_building"] = False
+    st.session_state.pop("bulk_xlsx_thread_started", None)
+    st.session_state.pop("bulk_xlsx_cancel", None)
+    st.session_state.pop("bulk_xlsx_result", None)
+    st.session_state.pop("bulk_xlsx_progress", None)
+
+    if result_box.get("error"):
+        st.error(result_box["error"])
+        return
+
+    summary = result_box.get("summary") or {}
+    if summary.get("cancelled"):
+        st.warning("Excel export cancelled.")
+        return
+
+    zip_bytes = result_box.get("zip") or b""
+    st.session_state["bulk_xlsx_zip"] = zip_bytes
+    st.session_state["bulk_xlsx_summary"] = summary
+    export_scope = st.session_state.get("bulk_xlsx_scope", "current_folder")
+    apply_ts_correction = st.session_state.get("bulk_xlsx_corrected", False)
+    folder_name = st.session_state.get("bulk_xlsx_folder_name", "all")
+    st.session_state["bulk_xlsx_label"] = (
+        f"counts-{_safe_zip_part(folder_name)}"
+        f"{'-corrected' if apply_ts_correction else ''}.zip"
+    )
+    if summary.get("exported"):
+        st.success(f"Built {summary['exported']} workbook(s).")
+    else:
+        st.warning("No workbooks were built.")
+    if summary.get("skipped_no_lines"):
+        st.caption(
+            f"Skipped {len(summary['skipped_no_lines'])} video(s) without counting lines."
+        )
+    if summary.get("failed"):
+        st.warning(f"{len(summary['failed'])} export(s) failed:")
+        for item in summary["failed"][:5]:
+            st.caption(f"{item.get('filename')}: {item.get('error')}")
+        if len(summary["failed"]) > 5:
+            st.caption(f"…and {len(summary['failed']) - 5} more")
+
+
+def _prune_video_record(video: dict) -> None:
+    try:
+        result = api.prune_local_folder_video(str(video["id"]))
+    except api.APIError as exc:
+        st.error(str(exc))
+        return
+    _cached_video_lines.clear()
+    if hasattr(_cached_video_segments, "clear"):
+        _cached_video_segments.clear()
+    deleted = result.get("deleted_id")
+    if result.get("reindexed"):
+        st.toast(
+            f"Pruned {video.get('filename')}; re-indexed as uploaded "
+            f"({result.get('new_video_id', '')[:8]}…)."
+        )
+    else:
+        st.toast(f"Pruned record {deleted[:8]}… (file not found on disk).")
+    st.session_state.pop(f"prune_confirm_{video['id']}", None)
+    st.rerun()
 
 
 try:
@@ -817,29 +1001,43 @@ backup_scope = st.radio(
     key="workspace_backup_scope",
 )
 
-bk_build_col, bk_download_col = st.columns([2, 2])
+backup_job_id = st.session_state.get("workspace_backup_job_id")
+backup_running = bool(backup_job_id)
+
+bk_build_col, bk_cancel_col, bk_download_col = st.columns([2, 1, 2])
 with bk_build_col:
     if st.button(
         "Build workspace backup",
         key="workspace_backup_build_btn",
         type="primary",
+        disabled=backup_running,
         use_container_width=True,
     ):
         scope_arg = "folder" if backup_scope == "current_folder" else "all"
         folder_arg = sel_folder if backup_scope == "current_folder" else None
-        with st.spinner("Packaging database and artifacts…"):
-            try:
-                zip_bytes, zip_name = api.download_workspace_backup(
-                    scope=scope_arg,
-                    folder=folder_arg,
-                )
-            except api.APIError as exc:
-                st.error(str(exc))
-            else:
-                st.session_state["workspace_backup_zip"] = zip_bytes
-                st.session_state["workspace_backup_label"] = zip_name
-                size_mb = len(zip_bytes) / (1024 * 1024)
-                st.success(f"Backup ready ({size_mb:.1f} MB).")
+        try:
+            job = api.start_workspace_backup_job(scope=scope_arg, folder=folder_arg)
+            st.session_state["workspace_backup_job_id"] = job["job_id"]
+            st.session_state.pop("workspace_backup_zip", None)
+            st.rerun()
+        except api.APIError as exc:
+            st.error(str(exc))
+
+with bk_cancel_col:
+    if st.button(
+        "Cancel",
+        key="workspace_backup_cancel_btn",
+        disabled=not backup_running,
+        use_container_width=True,
+    ):
+        try:
+            api.cancel_workspace_backup_job(backup_job_id)
+            st.rerun()
+        except api.APIError as exc:
+            st.error(str(exc))
+
+if backup_running:
+    _poll_backup_job()
 
 with bk_download_col:
     backup_payload = st.session_state.get("workspace_backup_zip")
@@ -899,9 +1097,11 @@ ex1.metric("Analyzed in scope", len(export_targets))
 ex2.metric("Ready to export", ready_count)
 ex3.metric("Missing lines", max(0, len(export_targets) - ready_count))
 
-build_col, download_col = st.columns([2, 2])
+bulk_xlsx_running = bool(st.session_state.get("bulk_xlsx_building"))
+
+build_col, cancel_col, download_col = st.columns([2, 1, 2])
 with build_col:
-    build_disabled = ready_count == 0
+    build_disabled = ready_count == 0 or bulk_xlsx_running
     if st.button(
         f"Build {ready_count} workbook(s)",
         key="bulk_xlsx_build_btn",
@@ -909,44 +1109,29 @@ with build_col:
         disabled=build_disabled,
         use_container_width=True,
     ):
-        progress = st.progress(0.0, text="Starting exports…")
-        status_box = st.empty()
-
-        def _on_export_progress(done: int, total: int, video: dict) -> None:
-            progress.progress(
-                done / max(total, 1),
-                text=f"Exporting {done}/{total}: {video.get('filename', '')}",
-            )
-            status_box.caption(f"Building workbook for {video.get('filename', '')}")
-
-        with st.spinner("Building Excel workbooks…"):
-            zip_bytes, summary = _bulk_export_xlsx_zip(
-                export_targets,
-                apply_timestamp_correction=apply_ts_correction,
-                progress_cb=_on_export_progress,
-            )
-        st.session_state["bulk_xlsx_zip"] = zip_bytes
-        st.session_state["bulk_xlsx_summary"] = summary
-        st.session_state["bulk_xlsx_label"] = (
-            f"counts-{_safe_zip_part(Path(sel_folder).name if export_scope == 'current_folder' else 'all')}"
-            f"{'-corrected' if apply_ts_correction else ''}.zip"
+        st.session_state["bulk_xlsx_folder_name"] = (
+            Path(sel_folder).name if export_scope == "current_folder" else "all"
         )
-        progress.empty()
-        status_box.empty()
-        if summary["exported"]:
-            st.success(f"Built {summary['exported']} workbook(s).")
-        else:
-            st.warning("No workbooks were built.")
-        if summary["skipped_no_lines"]:
-            st.caption(
-                f"Skipped {len(summary['skipped_no_lines'])} video(s) without counting lines."
-            )
-        if summary["failed"]:
-            st.warning(f"{len(summary['failed'])} export(s) failed:")
-            for item in summary["failed"][:5]:
-                st.caption(f"{item.get('filename')}: {item.get('error')}")
-            if len(summary["failed"]) > 5:
-                st.caption(f"…and {len(summary['failed']) - 5} more")
+        _start_bulk_xlsx_build(
+            export_targets,
+            apply_timestamp_correction=apply_ts_correction,
+        )
+        st.rerun()
+
+with cancel_col:
+    if st.button(
+        "Cancel",
+        key="bulk_xlsx_cancel_btn",
+        disabled=not bulk_xlsx_running,
+        use_container_width=True,
+    ):
+        cancel_event = st.session_state.get("bulk_xlsx_cancel")
+        if cancel_event:
+            cancel_event.set()
+        st.rerun()
+
+if bulk_xlsx_running:
+    _poll_bulk_xlsx_build()
 
 with download_col:
     zip_payload = st.session_state.get("bulk_xlsx_zip")
@@ -965,6 +1150,10 @@ with download_col:
         st.caption(f"Last build: {last_summary['exported']} file(s) in archive")
 
 st.markdown("### Folder Video List")
+st.caption(
+    "Use ✕ to prune a broken DB record. The source file stays on disk and is "
+    "re-indexed as uploaded so you can analyze again."
+)
 folder_videos = sorted(folders[sel_folder], key=lambda v: (v["status"], v["filename"]))
 status_chip = {
     "uploaded": "⬜ Uploaded",
@@ -977,7 +1166,7 @@ status_chip = {
 for v in folder_videos:
     q_item = queue_by_id.get(v["id"])
     with st.container(border=True):
-        c1, c2, c3 = st.columns([5, 2, 2])
+        c1, c2, c3, c4 = st.columns([5, 2, 2, 1])
         with c1:
             st.markdown(f"**🎞️ {v['filename']}**")
             if v.get("local_source_path"):
@@ -1022,6 +1211,20 @@ for v in folder_videos:
                         st.error(str(exc))
             else:
                 st.caption("Managed by queue")
+        with c4:
+            with st.popover("✕", use_container_width=True):
+                st.markdown(f"**Delete record for** `{v['filename']}`?")
+                st.caption(
+                    "Removes DB entry and derived artifacts. "
+                    "The video file on disk is kept and re-indexed as uploaded."
+                )
+                if st.button(
+                    "Confirm prune",
+                    key=f"prune_confirm_{v['id']}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    _prune_video_record(v)
 
         # Expandable segment breakdown (shown when segments exist)
         seg_count = v.get("total_segments") or 0

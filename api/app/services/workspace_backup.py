@@ -14,7 +14,7 @@ import tempfile
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,10 @@ from ..models import CountingLine, Project, TimestampScan, Video, VideoSegment
 from .storage import get_storage
 
 BACKUP_VERSION = 1
+
+
+class BackupCancelled(Exception):
+    """Raised when a backup job is cancelled mid-build."""
 
 
 def _serialize_value(value: Any) -> Any:
@@ -81,14 +85,20 @@ def _skip_storage_key(key: str, local_folder_video_ids: Set[str]) -> bool:
     return name.startswith("source.")
 
 
+def _iter_local_keys(prefix: str) -> Iterable[str]:
+    root = Path(settings.local_storage_root)
+    base = root / prefix
+    if not base.is_dir():
+        return
+    for path in base.rglob("*"):
+        if path.is_file():
+            yield str(path.relative_to(root))
+
+
 def _iter_storage_keys(project_ids: Sequence[str]) -> Iterable[str]:
-    storage = get_storage()
     if settings.storage_backend != "local":
         for project_id in project_ids:
-            prefix = f"projects/{project_id}/"
-            # GCS: list via client in storage class — use open_read path only for local.
-            # For GCS we'd need list_blobs; add minimal support via storage root if local only.
-            yield from _iter_local_keys(prefix)
+            yield from _iter_local_keys(f"projects/{project_id}/")
         return
     root = Path(settings.local_storage_root)
     for project_id in project_ids:
@@ -100,14 +110,9 @@ def _iter_storage_keys(project_ids: Sequence[str]) -> Iterable[str]:
                 yield str(path.relative_to(root))
 
 
-def _iter_local_keys(prefix: str) -> Iterable[str]:
-    root = Path(settings.local_storage_root)
-    base = root / prefix
-    if not base.is_dir():
-        return
-    for path in base.rglob("*"):
-        if path.is_file():
-            yield str(path.relative_to(root))
+def _check_cancel(cancel_cb: Callable[[], bool] | None) -> None:
+    if cancel_cb and cancel_cb():
+        raise BackupCancelled()
 
 
 def build_workspace_backup_zip(
@@ -115,8 +120,11 @@ def build_workspace_backup_zip(
     *,
     scope: str,
     folder: Optional[str] = None,
+    cancel_cb: Callable[[], bool] | None = None,
+    progress_cb: Callable[[int, int], None] | None = None,
 ) -> tuple[str, Dict[str, Any]]:
     """Write backup ZIP to a temp file; caller deletes the path after streaming."""
+    _check_cancel(cancel_cb)
     videos = _videos_for_scope(db, scope=scope, folder=folder)
     if not videos:
         raise ValueError("no watched-folder videos match the requested backup scope")
@@ -174,11 +182,26 @@ def build_workspace_backup_zip(
     included_files: List[str] = []
     skipped_sources: List[str] = []
 
+    seen_keys: Set[str] = set()
+    storage_keys: List[str] = []
+    for key in _iter_storage_keys(project_ids):
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        if _skip_storage_key(key, local_folder_ids):
+            skipped_sources.append(key)
+            continue
+        if not storage.exists(key):
+            continue
+        storage_keys.append(key)
+    total_storage = len(storage_keys)
+
     fd, tmp_path = tempfile.mkstemp(suffix=".zip", prefix="workspace-backup-")
     os.close(fd)
 
     try:
         with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            _check_cancel(cancel_cb)
             zf.writestr(
                 "manifest.json",
                 json.dumps(manifest, indent=2, ensure_ascii=False),
@@ -188,16 +211,10 @@ def build_workspace_backup_zip(
                 json.dumps(db_payload, indent=2, ensure_ascii=False),
             )
 
-            seen_keys: Set[str] = set()
-            for key in _iter_storage_keys(project_ids):
-                if key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                if _skip_storage_key(key, local_folder_ids):
-                    skipped_sources.append(key)
-                    continue
-                if not storage.exists(key):
-                    continue
+            for idx, key in enumerate(storage_keys, start=1):
+                _check_cancel(cancel_cb)
+                if progress_cb:
+                    progress_cb(idx, total_storage)
                 with storage.open_read(key) as fp:
                     zf.writestr(f"storage/{key}", fp.read())
                 included_files.append(key)
@@ -205,7 +222,6 @@ def build_workspace_backup_zip(
         manifest["storage_file_count"] = len(included_files)
         manifest["skipped_source_videos"] = skipped_sources
 
-        # Refresh manifest inside the zip with final counts.
         with zipfile.ZipFile(tmp_path, "a", compression=zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(
                 "manifest.json",
@@ -220,6 +236,9 @@ def build_workspace_backup_zip(
             "scope": manifest["scope"],
         }
         return tmp_path, summary
+    except BackupCancelled:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
     except Exception:
         Path(tmp_path).unlink(missing_ok=True)
         raise

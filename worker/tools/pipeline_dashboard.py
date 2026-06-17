@@ -25,6 +25,8 @@ import json
 import os
 import time
 from collections import deque
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import _health
 import _probe
@@ -43,6 +45,8 @@ except ImportError:
         "rich is required: pip install -r worker/tools/requirements-tools.txt"
     )
 
+
+ALMATY_TZ = ZoneInfo("Asia/Almaty")
 
 SEG_GLYPH = {"done": "🟩", "analyzing": "🟧", "error": "🟥"}
 EVENT_STYLE = {
@@ -102,13 +106,34 @@ def _fmt_eta(seconds) -> str:
     return f"{m}m {seconds % 60:02d}s"
 
 
-def _fmt_timestamp(ts) -> str:
-    """Format a datetime timestamp as HH:MM:SS."""
+def _parse_utc(ts) -> datetime | None:
+    """Parse API/logger timestamps (UTC) into an aware datetime."""
     if ts is None:
+        return None
+    if isinstance(ts, datetime):
+        if ts.tzinfo is None:
+            return ts.replace(tzinfo=timezone.utc)
+        return ts.astimezone(timezone.utc)
+    text = str(ts).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _fmt_timestamp(ts) -> str:
+    """Format a UTC timestamp as HH:MM:SS in Asia/Almaty local time."""
+    dt = _parse_utc(ts)
+    if dt is None:
         return "—"
-    if isinstance(ts, str):
-        return ts[11:19]  # ISO format: take HH:MM:SS
-    return ts.strftime("%H:%M:%S")
+    return dt.astimezone(ALMATY_TZ).strftime("%H:%M:%S")
 
 
 def _bar(used, total, width=20) -> Text:
@@ -221,7 +246,7 @@ def _events_panel(events: deque) -> Panel:
     for ev in events:
         etype = ev.get("type", "?")
         style = EVENT_STYLE.get(etype, "white")
-        ts = (ev.get("ts") or "")[11:19]
+        ts = _fmt_timestamp(ev.get("ts"))
         extra = ""
         if "segment_idx" in ev:
             extra += f" seg{ev['segment_idx']}"

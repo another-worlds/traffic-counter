@@ -49,7 +49,7 @@ services:
       # the same path so the absolute paths in sources.yaml resolve inside
       # the container without remapping. Override via .env if you mount
       # somewhere else.
-      - ${YADISK_HOST_PATH:-/mnt/d/yandex-videos}:${YADISK_HOST_PATH:-/mnt/d/yandex-videos}:ro
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
     depends_on:
       db:
         condition: service_healthy
@@ -97,7 +97,7 @@ services:
       - storage:/data
       - ./worker:/app
       - model_cache:/root/.cache
-      - ${YADISK_HOST_PATH:-/mnt/d/yandex-videos}:${YADISK_HOST_PATH:-/mnt/d/yandex-videos}:ro
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
     depends_on:
       db:
         condition: service_healthy
@@ -133,13 +133,13 @@ services:
       API_URL: http://api:8000
       SOURCES_CONFIG: /app/config/sources.yaml
       # WATCH_PATH is a legacy fallback used only when SOURCES_CONFIG is missing.
-      WATCH_PATH: ${YADISK_HOST_PATH:-/mnt/d/yandex-videos}
+      WATCH_PATH: ${YADISK_HOST_PATH:-/mnt/yandex-videos}
       AUTO_ANALYZE: "false"   # set to "true" to auto-queue new videos
       SCAN_INTERVAL: "60"     # full rescan every 60 s
       STABILITY_WAIT: "5"     # seconds to wait before registering a new file
     volumes:
       - ./config:/app/config:ro
-      - ${YADISK_HOST_PATH:-/mnt/d/yandex-videos}:${YADISK_HOST_PATH:-/mnt/d/yandex-videos}:ro
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
     depends_on:
       - api
     restart: unless-stopped
@@ -265,7 +265,7 @@ services:
     volumes:
       - storage:/data
       - ./timestamp_correction/backend:/app
-      - ${YADISK_HOST_PATH:-/mnt/d/yandex-videos}:${YADISK_HOST_PATH:-/mnt/d/yandex-videos}:ro
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
     depends_on:
       db:
         condition: service_healthy
@@ -306,7 +306,7 @@ services:
       - storage:/data
       - ./timestamp_correction/backend:/app
       - timestamp_model_cache:/root/.EasyOCR
-      - ${YADISK_HOST_PATH:-/mnt/d/yandex-videos}:${YADISK_HOST_PATH:-/mnt/d/yandex-videos}:ro
+      - ${YADISK_HOST_PATH:-/mnt/yandex-videos}:${YADISK_HOST_PATH:-/mnt/yandex-videos}:ro
     depends_on:
       db:
         condition: service_healthy

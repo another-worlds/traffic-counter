@@ -154,16 +154,28 @@ class Registrar:
     def __init__(self, cfg: WatcherConfig) -> None:
         self._cfg = cfg
         self._client = httpx.Client(base_url=API_URL, timeout=60)
-        self._seen: set[str] = set()        # in-memory dedup for this run
+        self._in_flight: set[str] = set()   # concurrent dedup only
         self._skipped_logged: set[str] = set()
         self._lock = threading.Lock()
+
+    def _fetch_registered_paths(self) -> set[str]:
+        try:
+            r = self._client.get("/local-folder/paths")
+            r.raise_for_status()
+            return set(r.json())
+        except Exception as exc:
+            log.warning("failed to fetch registered paths: %s", exc)
+            return set()
 
     def register(self, path: Path) -> None:
         key = str(path)
         with self._lock:
-            if key in self._seen:
+            if key in self._in_flight:
                 return
+            self._in_flight.add(key)
         if not is_video(path):
+            with self._lock:
+                self._in_flight.discard(key)
             return
 
         # Reject anything outside the configured workspace folders before we
@@ -174,10 +186,13 @@ class Registrar:
                 if key not in self._skipped_logged:
                     self._skipped_logged.add(key)
                     log.info("skip: outside any workspace folder: %s", key)
+                self._in_flight.discard(key)
             return
 
         if not is_stable(path):
             log.warning("skipping unstable file: %s", path.name)
+            with self._lock:
+                self._in_flight.discard(key)
             return
         try:
             r = self._client.post(
@@ -186,8 +201,6 @@ class Registrar:
             )
             r.raise_for_status()
             result = r.json()
-            with self._lock:
-                self._seen.add(key)
             metadata = extract_video_metadata(path)
             if metadata:
                 try:
@@ -207,10 +220,15 @@ class Registrar:
                       path.name, exc.response.status_code, exc.response.text[:200])
         except Exception as exc:
             log.error("failed to register %s: %s", path.name, exc)
+        finally:
+            with self._lock:
+                self._in_flight.discard(key)
 
     def full_scan(self) -> None:
-        """Walk every configured workspace root and register fresh videos."""
+        """Walk every configured workspace root and register paths missing from the DB."""
+        registered = self._fetch_registered_paths()
         scanned = 0
+        queued = 0
         for root in self._cfg.roots:
             if not root.abs_path.exists():
                 log.warning("workspace root missing on disk: %s (workspace=%s)",
@@ -219,9 +237,13 @@ class Registrar:
             for p in root.abs_path.rglob("*"):
                 if is_video(p):
                     scanned += 1
-                    threading.Thread(target=self.register, args=(p,), daemon=True).start()
-        log.info("scan complete — found %d video file(s) across %d workspace(s)",
-                 scanned, len(self._cfg.roots))
+                    if str(p) not in registered:
+                        queued += 1
+                        threading.Thread(target=self.register, args=(p,), daemon=True).start()
+        log.info(
+            "scan complete — found %d video file(s), queued %d unregistered across %d workspace(s)",
+            scanned, queued, len(self._cfg.roots),
+        )
 
 
 # ── watchdog event handler ────────────────────────────────────────────────────

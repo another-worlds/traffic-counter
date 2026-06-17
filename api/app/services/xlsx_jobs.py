@@ -127,11 +127,13 @@ def run_export_job(
                 {
                     "id": ln.id,
                     "name": ln.name,
+                    "color": ln.color or "#e24b4a",
                     "a": ln.points["a"],
                     "b": ln.points["b"],
                 }
                 for ln in lines
             ]
+            video = db.get(Video, video_id)
             tracks_df = load_tracks_for_video(project_id, video_id)
             gap_map = None
             rows_excluded = 0
@@ -196,6 +198,10 @@ def run_export_job(
                 rows_excluded=rows_excluded,
                 raw_tracks_df=raw_tracks_df,
                 wall_clock_segments=wall_clock_segments,
+                project_id=project_id,
+                video_id=video_id,
+                video_width=int(video.width) if video and video.width else None,
+                video_height=int(video.height) if video and video.height else None,
             )
 
             # Persist alongside other artifacts.

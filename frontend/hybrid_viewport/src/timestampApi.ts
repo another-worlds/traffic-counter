@@ -60,7 +60,6 @@ export type TimelineViz = {
   hour_presence?: HourPresence[];
   hour_coherence?: HourCoherence[];
   ideal_day_hours?: HourPresence[];
-  clock_hour_video_coverage?: ClockHourVideoCoverage[];
   ideal_day?: Record<string, unknown> | null;
   hour_presence_map_enabled?: boolean;
   coherence_map_enabled?: boolean;
@@ -110,25 +109,6 @@ export type HourCoherence = HourPresence & {
   minutes_coherent?: number;
   coherence_of_hour_percent?: number;
   gaps?: GapInterval[];
-};
-
-export type ClockHourVideoFragment = {
-  start_t_s: number;
-  end_t_s: number;
-  start_frame: number;
-  end_frame: number;
-  duration_s: number;
-};
-
-export type ClockHourVideoCoverage = {
-  hour_index: number;
-  hour_start_epoch: number;
-  hour_label: string;
-  video_duration_s: number;
-  video_duration_min: number;
-  video_duration_label: string;
-  fragment_count: number;
-  fragments: ClockHourVideoFragment[];
 };
 
 export function normalizeClockHourRows(
@@ -215,7 +195,6 @@ export type TimestampMap = {
   hour_presence?: HourPresence[] | null;
   hour_coherence?: HourCoherence[] | null;
   ideal_day_hours?: HourPresence[] | null;
-  clock_hour_video_coverage?: ClockHourVideoCoverage[] | null;
   ideal_day?: Record<string, unknown> | null;
   num_segments?: number | null;
 };

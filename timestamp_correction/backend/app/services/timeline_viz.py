@@ -103,7 +103,6 @@ def build_timeline_visualization(
     hour_presence: Optional[List[Dict[str, Any]]] = None,
     hour_coherence: Optional[List[Dict[str, Any]]] = None,
     ideal_day_hours: Optional[List[Dict[str, Any]]] = None,
-    clock_hour_video_coverage: Optional[List[Dict[str, Any]]] = None,
     ideal_day: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     total_duration_s = float(stats.get("total_duration_s") or 0)
@@ -122,9 +121,6 @@ def build_timeline_visualization(
     resolved_hour_presence = hour_presence or stats.get("hour_presence") or []
     resolved_hour_coherence = hour_coherence or stats.get("hour_coherence") or []
     resolved_ideal_day_hours = ideal_day_hours or stats.get("ideal_day_hours") or []
-    resolved_clock_hour_video = (
-        clock_hour_video_coverage or stats.get("clock_hour_video_coverage") or []
-    )
     return {
         "total_duration_s": total_duration_s,
         "total_frames": total_frames,
@@ -137,7 +133,6 @@ def build_timeline_visualization(
         "hour_presence": resolved_hour_presence,
         "hour_coherence": resolved_hour_coherence,
         "ideal_day_hours": resolved_ideal_day_hours,
-        "clock_hour_video_coverage": resolved_clock_hour_video,
         "ideal_day": ideal_day or stats.get("ideal_day"),
         "hour_presence_map_enabled": presence_enabled,
         "coherence_map_enabled": presence_enabled,

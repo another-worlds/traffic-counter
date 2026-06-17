@@ -146,16 +146,12 @@ def _load_gap_map_from_storage(project_id: str, video_id: str) -> Optional[Dict[
     hour_presence = gaps.get("hour_presence") or (sync_map or {}).get("hour_presence")
     hour_coherence = gaps.get("hour_coherence") or (sync_map or {}).get("hour_coherence")
     ideal_day_hours = gaps.get("ideal_day_hours") or (sync_map or {}).get("ideal_day_hours")
-    clock_hour_video_coverage = (
-        gaps.get("clock_hour_video_coverage") or (sync_map or {}).get("clock_hour_video_coverage")
-    )
     ideal_day = gaps.get("ideal_day") or (sync_map or {}).get("ideal_day")
     timeline_viz = build_timeline_visualization(
         gap_list, gap_stats, timeline_df,
         hour_presence=hour_presence,
         hour_coherence=hour_coherence,
         ideal_day_hours=ideal_day_hours,
-        clock_hour_video_coverage=clock_hour_video_coverage,
         ideal_day=ideal_day,
     )
     return {
@@ -168,7 +164,6 @@ def _load_gap_map_from_storage(project_id: str, video_id: str) -> Optional[Dict[
         "hour_presence": hour_presence,
         "hour_coherence": hour_coherence,
         "ideal_day_hours": ideal_day_hours,
-        "clock_hour_video_coverage": clock_hour_video_coverage,
         "ideal_day": ideal_day,
         "sync_map": sync_map,
         "num_segments": gaps.get("num_segments") or (sync_map or {}).get("num_segments"),
@@ -222,8 +217,6 @@ def _merge_presence_fields(result: Dict[str, Any], fresh: Optional[Dict[str, Any
         result["ideal_day"] = fresh["ideal_day"]
     if not result.get("ideal_day_hours") and fresh.get("ideal_day_hours"):
         result["ideal_day_hours"] = fresh["ideal_day_hours"]
-    if not result.get("clock_hour_video_coverage") and fresh.get("clock_hour_video_coverage"):
-        result["clock_hour_video_coverage"] = fresh["clock_hour_video_coverage"]
     stats = dict(result.get("stats") or {})
     fresh_stats = fresh.get("stats") or {}
     if (
@@ -235,7 +228,7 @@ def _merge_presence_fields(result: Dict[str, Any], fresh: Optional[Dict[str, Any
                 "hour_presence_map_enabled", "coherence_map_enabled",
                 "parsed_fraction", "parsed_bins", "coherent_fraction", "coherent_bins",
                 "hours_with_coverage", "hour_presence", "hour_coherence",
-                "ideal_day_hours", "clock_hour_video_coverage", "ideal_day",
+                "ideal_day_hours", "ideal_day",
             )
             if k in fresh_stats
         })
@@ -248,8 +241,6 @@ def _merge_presence_fields(result: Dict[str, Any], fresh: Optional[Dict[str, Any
             viz["hour_coherence"] = result["hour_coherence"]
         if result.get("ideal_day_hours"):
             viz["ideal_day_hours"] = result["ideal_day_hours"]
-        if result.get("clock_hour_video_coverage"):
-            viz["clock_hour_video_coverage"] = result["clock_hour_video_coverage"]
         viz["ideal_day"] = result.get("ideal_day")
         viz["hour_presence_map_enabled"] = bool(
             stats.get("hour_presence_map_enabled") or stats.get("coherence_map_enabled")
@@ -279,9 +270,6 @@ def load_gap_map(project_id: str, video_id: str) -> Optional[Dict[str, Any]]:
             "hour_presence": stats.get("hour_presence") or (fresh or {}).get("hour_presence"),
             "hour_coherence": stats.get("hour_coherence") or (fresh or {}).get("hour_coherence"),
             "ideal_day_hours": stats.get("ideal_day_hours") or (fresh or {}).get("ideal_day_hours"),
-            "clock_hour_video_coverage": (
-                stats.get("clock_hour_video_coverage") or (fresh or {}).get("clock_hour_video_coverage")
-            ),
             "ideal_day": stats.get("ideal_day") or (fresh or {}).get("ideal_day"),
             "num_segments": stats.get("num_segments"),
             "sync_map": (fresh or {}).get("sync_map"),

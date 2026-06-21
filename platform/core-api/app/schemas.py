@@ -169,3 +169,68 @@ class Feature(BaseModel):
 class FeatureCollection(BaseModel):
     type: Literal["FeatureCollection"] = "FeatureCollection"
     features: list[Feature] = Field(default_factory=list)
+
+
+# --------------------------------------------------------------------------- #
+# Classes (LinkType / NodeType / ZoneType) — defaults mirror the ORM columns  #
+# --------------------------------------------------------------------------- #
+class LinkTypeCreate(BaseModel):
+    name: str | None = None
+    rank: int = 3
+    num_lanes: int = 1
+    capacity_vph: float = 1800.0
+    free_speed_kmh: float = 50.0
+    allowed_modes: list[str] | None = None  # None -> column default ["PrT","PuT"]
+
+
+class LinkTypeRead(BaseModel):
+    id: str
+    scenario_id: str
+    name: str | None = None
+    rank: int = 3
+    num_lanes: int = 1
+    capacity_vph: float = 1800.0
+    free_speed_kmh: float = 50.0
+    allowed_modes: list[str] | None = None
+
+
+class NodeTypeCreate(BaseModel):
+    name: str | None = None
+    control: Literal["uncontrolled", "signalized", "roundabout", "twoway_stop"] = "uncontrolled"
+
+
+class NodeTypeRead(BaseModel):
+    id: str
+    scenario_id: str
+    name: str | None = None
+    control: str = "uncontrolled"
+
+
+class ZoneTypeCreate(BaseModel):
+    name: str | None = None
+    category: Literal["residential", "employment", "mixed"] = "mixed"
+
+
+class ZoneTypeRead(BaseModel):
+    id: str
+    scenario_id: str
+    name: str | None = None
+    category: str = "mixed"
+
+
+# --------------------------------------------------------------------------- #
+# Seed (demo-network builder result)                                          #
+# --------------------------------------------------------------------------- #
+class SeedResult(BaseModel):
+    scenario_id: str
+    nodes: int = 0
+    links: int = 0
+    zones: int = 0
+    connectors: int = 0
+    link_types: int = 0
+    node_types: int = 0
+    zone_types: int = 0
+    modes: int = 0
+    activities: int = 0
+    demand_layers: int = 0
+    zone_demand: int = 0

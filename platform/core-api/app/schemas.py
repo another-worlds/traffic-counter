@@ -139,6 +139,38 @@ class CounterRead(BaseModel):
     source_video_id: str | None = None
     source_line_id: str | None = None
     observed_vph: float | None = None
+    pcu_vph: float | None = None
+    hours: float | None = None
+
+
+# Counter→link bridge: ingest a traffic-counter count and snap it to a directed link.
+class CounterIngest(BaseModel):
+    lon: float = Field(..., description="WGS84 longitude of the counting line")
+    lat: float = Field(..., description="WGS84 latitude")
+    name: str | None = None
+    observed_vph: float | None = None
+    pcu_vph: float | None = None
+    hours: float | None = None
+    source_video_id: str | None = None
+    source_line_id: str | None = None
+    # Compass bearing (deg) of the count's positive crossing; resolves AB vs BA.
+    direction_hint_deg: float | None = None
+    max_snap_m: float = 50.0   # 422 if the nearest link is farther than this
+    max_candidates: int = 5    # GiST KNN candidates to consider
+
+
+class CounterResnap(BaseModel):
+    direction_hint_deg: float | None = None
+    max_snap_m: float = 50.0
+    max_candidates: int = 5
+
+
+class CounterSnapResult(BaseModel):
+    counter_id: str
+    snapped_link_id: str | None = None
+    link_direction: str
+    distance_m: float
+    created: bool = False
 
 
 # --------------------------------------------------------------------------- #

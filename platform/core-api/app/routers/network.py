@@ -46,6 +46,7 @@ def _counter_read(c: models.Counter) -> schemas.CounterRead:
         geometry=geo.geom_to_geojson(c.geom), snapped_link_id=c.snapped_link_id,
         link_direction=c.link_direction, source_video_id=c.source_video_id,
         source_line_id=c.source_line_id, observed_vph=c.observed_vph,
+        pcu_vph=c.pcu_vph, hours=c.hours,
     )
 
 

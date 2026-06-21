@@ -53,3 +53,15 @@ def line_length_m(coords: list[list[float]]) -> float:
 def straight_line(p1: tuple[float, float], p2: tuple[float, float]) -> dict[str, Any]:
     """A 2-point GeoJSON LineString between (lon,lat) endpoints."""
     return {"type": "LineString", "coordinates": [[p1[0], p1[1]], [p2[0], p2[1]]]}
+
+
+def bearing_deg(p1: tuple[float, float], p2: tuple[float, float]) -> float:
+    """Forward azimuth (compass bearing in degrees, 0=N / 90=E) from (lon,lat) p1 to p2."""
+    az, _, _ = _GEOD.inv(p1[0], p1[1], p2[0], p2[1])
+    return az % 360.0
+
+
+def linestring_bearing(geom) -> float:
+    """Forward bearing (deg) of a native LINESTRING geometry, first vertex -> last vertex."""
+    coords = list(to_shape(geom).coords)
+    return bearing_deg(coords[0], coords[-1])

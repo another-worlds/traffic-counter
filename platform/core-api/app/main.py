@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import settings
 from .db import init_db
-from .routers import classes, network, scenarios, seed
+from .routers import classes, counters, network, scenarios, seed
 
 
 @asynccontextmanager
@@ -40,6 +40,7 @@ def create_app() -> FastAPI:
     app.include_router(network.router)
     app.include_router(classes.router)
     app.include_router(seed.router)
+    app.include_router(counters.router)
     return app
 
 

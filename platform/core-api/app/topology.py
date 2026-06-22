@@ -208,3 +208,48 @@ def merge_links(db: Session, sid: str, a: models.Link, b: models.Link) -> dict:
         "removed_link_ids": removed,
         "removed_node_ids": [mid],
     }
+
+
+def move_node(db: Session, sid: str, node: models.Node, lon: float, lat: float) -> dict:
+    """Move ``node`` to (lon, lat): drag the matching endpoint vertex of every incident
+    link, recompute lengths, and re-snap counters on those links (direction preserved).
+    Links are reshaped in place (ids unchanged)."""
+    incident = db.execute(
+        select(models.Link).where(
+            models.Link.scenario_id == sid,
+            or_(models.Link.from_node_id == node.id, models.Link.to_node_id == node.id),
+        )
+    ).scalars().all()
+    incident_ids = {lk.id for lk in incident}
+
+    affected = list(db.execute(
+        select(models.Counter).where(
+            models.Counter.scenario_id == sid,
+            models.Counter.snapped_link_id.in_(incident_ids),
+        )
+    ).scalars()) if incident_ids else []
+
+    node.geom = geo.geojson_to_geom({"type": "Point", "coordinates": [lon, lat]})
+
+    for lk in incident:
+        coords = [list(c) for c in to_shape(lk.geom).coords]
+        if lk.from_node_id == node.id:
+            coords[0] = [lon, lat]
+        if lk.to_node_id == node.id:           # self-loop updates both ends
+            coords[-1] = [lon, lat]
+        lk.geom = geo.geojson_to_geom({"type": "LineString", "coordinates": coords})
+        lk.length_m = geo.line_length_m(coords)
+    db.flush()  # so the re-snap sees the reshaped geometry
+
+    resnapped = []
+    for counter in affected:
+        cp = Point(*geo.point_xy(counter.geom))
+        counter.snapped_link_id = min(incident, key=lambda lk: to_shape(lk.geom).distance(cp)).id
+        resnapped.append(counter.id)
+
+    db.commit()
+    return {
+        "node_id": node.id,
+        "updated_link_ids": [lk.id for lk in incident],
+        "resnapped_counter_ids": resnapped,
+    }

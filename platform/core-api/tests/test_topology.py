@@ -185,3 +185,61 @@ def test_merge_rejects_non_chaining_and_bad_count(client):
                        json={"link_ids": [ab, cd]}).status_code == 400
     assert client.post(f"/scenarios/{sid}/links/merge",
                        json={"link_ids": [ab]}).status_code == 422
+
+
+# --- move node ---
+def test_move_updates_incident_geometry_and_length(client):
+    sid = _new_scenario(client)
+    na, nb = _node(client, sid, *A), _node(client, sid, *B)
+    lk = _link(client, sid, na, nb)
+    l0 = _links(client, sid)[0]["length_m"]
+
+    r = client.post(f"/scenarios/{sid}/nodes/{nb}/move", json={"lon": 69.255, "lat": 41.311})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["node_id"] == nb
+    assert lk in body["updated_link_ids"]
+
+    link = {l["id"]: l for l in _links(client, sid)}[lk]
+    assert link["geometry"]["coordinates"][-1] == [69.255, 41.311]   # to-endpoint moved
+    assert link["length_m"] > l0
+
+
+def test_move_junction_updates_all_incident(client):
+    sid = _new_scenario(client)
+    na = _node(client, sid, *A)
+    nm = _node(client, sid, 69.245, 41.311)
+    nb = _node(client, sid, *B)
+    am = _link(client, sid, na, nm)
+    mb = _link(client, sid, nm, nb)
+
+    r = client.post(f"/scenarios/{sid}/nodes/{nm}/move", json={"lon": 69.245, "lat": 41.316})
+    assert r.status_code == 200, r.text
+    assert set(r.json()["updated_link_ids"]) == {am, mb}
+
+    by_id = {l["id"]: l for l in _links(client, sid)}
+    assert by_id[am]["geometry"]["coordinates"][-1] == [69.245, 41.316]   # A->M end moved
+    assert by_id[mb]["geometry"]["coordinates"][0] == [69.245, 41.316]    # M->B start moved
+
+
+def test_move_resnaps_counter(client):
+    sid = _new_scenario(client)
+    na, nb = _node(client, sid, *A), _node(client, sid, *B)
+    lk = _link(client, sid, na, nb)
+    ing = client.post(f"/scenarios/{sid}/counters/ingest",
+                      json={"lon": 69.245, "lat": 41.311, "direction_hint_deg": 90,
+                            "source_video_id": "v1", "source_line_id": "l1"}).json()
+    cid = ing["counter_id"]
+
+    body = client.post(f"/scenarios/{sid}/nodes/{nb}/move",
+                       json={"lon": 69.255, "lat": 41.311}).json()
+    assert cid in body["resnapped_counter_ids"]
+    c = client.get(f"/scenarios/{sid}/counters/{cid}").json()
+    assert c["snapped_link_id"] == lk            # still bound (single link reshaped)
+    assert c["link_direction"] == "AB"
+
+
+def test_move_missing_node_404(client):
+    sid = _new_scenario(client)
+    assert client.post(f"/scenarios/{sid}/nodes/nope/move",
+                       json={"lon": 69.25, "lat": 41.31}).status_code == 404

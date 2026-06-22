@@ -41,3 +41,12 @@ def merge_links(sid: str, payload: schemas.MergeLinksRequest, db: Session = Depe
         return topology.merge_links(db, sid, a, b)
     except topology.MergeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/scenarios/{sid}/nodes/{node_id}/move", response_model=schemas.MoveNodeResult)
+def move_node(sid: str, node_id: str, payload: schemas.LonLat, db: Session = Depends(get_db)):
+    get_scenario_or_404(db, sid)
+    node = db.get(models.Node, node_id)
+    if node is None or node.scenario_id != sid:
+        raise HTTPException(status_code=404, detail="node not found")
+    return topology.move_node(db, sid, node, payload.lon, payload.lat)

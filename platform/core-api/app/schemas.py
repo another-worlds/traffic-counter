@@ -290,3 +290,9 @@ class TopologyResult(BaseModel):
     link_ids: list[str] = Field(default_factory=list)
     removed_link_ids: list[str] = Field(default_factory=list)
     removed_node_ids: list[str] = Field(default_factory=list)
+
+
+class MoveNodeResult(BaseModel):
+    node_id: str
+    updated_link_ids: list[str] = Field(default_factory=list)
+    resnapped_counter_ids: list[str] = Field(default_factory=list)

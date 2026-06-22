@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from geoalchemy2.shape import to_shape
 from shapely.geometry import Point
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from . import geo, models
@@ -109,4 +109,102 @@ def split_link(db: Session, sid: str, link: models.Link, *,
         "new_node_id": mid.id,
         "link_ids": [lk.id for lk in new_links],
         "removed_link_ids": removed,
+    }
+
+
+class MergeError(Exception):
+    """The two links cannot be cleanly merged (validation failure → 400)."""
+
+
+def _concat_geojson(g1, g2) -> dict:
+    """Concatenate two native LINESTRINGs that meet end-to-start into one GeoJSON line."""
+    c1 = [list(c) for c in to_shape(g1).coords]
+    c2 = [list(c) for c in to_shape(g2).coords]
+    return {"type": "LineString", "coordinates": c1 + c2[1:]}
+
+
+def merge_links(db: Session, sid: str, a: models.Link, b: models.Link) -> dict:
+    """Merge two links that chain through a degree-2 node into one (inverse of split):
+    drop the middle node, concatenate geometry, recompute length, and merge the directed
+    twin pair too. Re-snaps counters onto the link that absorbed their old one."""
+    if a.id == b.id:
+        raise MergeError("cannot merge a link with itself")
+    # Orient so first -> mid -> second.
+    if a.to_node_id == b.from_node_id:
+        first, second = a, b
+    elif b.to_node_id == a.from_node_id:
+        first, second = b, a
+    else:
+        raise MergeError("links do not chain at a shared node")
+    mid = first.to_node_id
+    if first.from_node_id == second.to_node_id:
+        raise MergeError("merge would create a self-loop")
+
+    def _find(frm, to):
+        return db.execute(select(models.Link).where(
+            models.Link.scenario_id == sid,
+            models.Link.from_node_id == frm,
+            models.Link.to_node_id == to)).scalars().first()
+
+    first_twin = _find(mid, first.from_node_id)    # mid -> X
+    second_twin = _find(second.to_node_id, mid)    # Y -> mid
+    twins = [t for t in (first_twin, second_twin) if t is not None]
+    if len(twins) == 1:
+        raise MergeError("asymmetric twin links at the middle node")
+
+    # Degree-2: only the merge pair (+ its twins) may touch the middle node.
+    incident = db.execute(select(models.Link).where(
+        models.Link.scenario_id == sid,
+        or_(models.Link.from_node_id == mid, models.Link.to_node_id == mid))).scalars().all()
+    allowed = {first.id, second.id} | {t.id for t in twins}
+    if any(lk.id not in allowed for lk in incident):
+        raise MergeError("middle node is not degree-2 (other links attached)")
+
+    # The middle node must be a plain pass-through (no connector/stop/zone references).
+    used = (
+        db.execute(select(models.Connector.id).where(
+            models.Connector.scenario_id == sid, models.Connector.node_id == mid).limit(1)).first()
+        or db.execute(select(models.Stop.id).where(
+            models.Stop.scenario_id == sid, models.Stop.node_id == mid).limit(1)).first()
+        or db.execute(select(models.Zone.id).where(
+            models.Zone.scenario_id == sid, models.Zone.connector_node_id == mid).limit(1)).first()
+    )
+    if used:
+        raise MergeError("middle node is used by a connector/stop/zone")
+
+    merged = _child(first, sid, first.from_node_id, second.to_node_id,
+                    _concat_geojson(first.geom, second.geom))
+    new_links = [merged]
+    removed = [first.id, second.id]
+    absorbs = {first.id: merged, second.id: merged}
+    if twins:  # both present (len == 2)
+        merged_twin = _child(second_twin, sid, second_twin.from_node_id, first_twin.to_node_id,
+                             _concat_geojson(second_twin.geom, first_twin.geom))
+        new_links.append(merged_twin)
+        removed += [first_twin.id, second_twin.id]
+        absorbs[first_twin.id] = merged_twin
+        absorbs[second_twin.id] = merged_twin
+
+    affected = [(c, c.snapped_link_id) for c in db.execute(select(models.Counter).where(
+        models.Counter.scenario_id == sid,
+        models.Counter.snapped_link_id.in_(removed))).scalars()]
+
+    db.add_all(new_links)
+    db.flush()
+    for lid in removed:
+        db.delete(db.get(models.Link, lid))
+    db.flush()
+    mid_node = db.get(models.Node, mid)
+    if mid_node is not None:
+        db.delete(mid_node)
+
+    for counter, old_id in affected:
+        counter.snapped_link_id = absorbs[old_id].id
+
+    db.commit()
+    return {
+        "new_node_id": None,
+        "link_ids": [lk.id for lk in new_links],
+        "removed_link_ids": removed,
+        "removed_node_ids": [mid],
     }

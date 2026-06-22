@@ -281,7 +281,12 @@ class SplitLinkRequest(BaseModel):
     fraction: float | None = None   # …or at a 0..1 position along the link
 
 
+class MergeLinksRequest(BaseModel):
+    link_ids: list[str]   # exactly two links that chain through a degree-2 node
+
+
 class TopologyResult(BaseModel):
     new_node_id: str | None = None
     link_ids: list[str] = Field(default_factory=list)
     removed_link_ids: list[str] = Field(default_factory=list)
+    removed_node_ids: list[str] = Field(default_factory=list)

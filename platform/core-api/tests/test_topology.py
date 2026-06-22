@@ -100,3 +100,88 @@ def test_split_missing_link_404_and_no_target_422(client):
     assert client.post(f"/scenarios/{sid}/links/does-not-exist/split",
                        json={"fraction": 0.5}).status_code == 404
     assert client.post(f"/scenarios/{sid}/links/{lk}/split", json={}).status_code == 422
+
+
+# --- merge (inverse of split) ---
+C = (69.245, 41.316)
+D = (69.255, 41.316)
+
+
+def test_merge_inverts_split(client):
+    sid = _new_scenario(client)
+    na, nb = _node(client, sid, *A), _node(client, sid, *B)
+    lk = _link(client, sid, na, nb)
+    parent_len = _links(client, sid)[0]["length_m"]
+
+    sp = client.post(f"/scenarios/{sid}/links/{lk}/split", json={"fraction": 0.5}).json()
+    mid = sp["new_node_id"]
+    assert len(_links(client, sid)) == 2
+
+    r = client.post(f"/scenarios/{sid}/links/merge", json={"link_ids": sp["link_ids"]})
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert len(body["link_ids"]) == 1
+    assert sorted(body["removed_link_ids"]) == sorted(sp["link_ids"])
+    assert body["removed_node_ids"] == [mid]
+
+    after = _links(client, sid)
+    assert len(after) == 1
+    merged = after[0]
+    assert merged["from_node_id"] == na and merged["to_node_id"] == nb
+    assert abs(merged["length_m"] - parent_len) < 2.0                 # length restored
+    assert mid not in {n["id"] for n in client.get(f"/scenarios/{sid}/nodes").json()}
+
+
+def test_merge_directed_twin(client):
+    sid = _new_scenario(client)
+    na, nb = _node(client, sid, *A), _node(client, sid, *B)
+    ab = _link(client, sid, na, nb)
+    _link(client, sid, nb, na)
+    sp = client.post(f"/scenarios/{sid}/links/{ab}/split", json={"fraction": 0.5}).json()
+    assert len(_links(client, sid)) == 4
+    # merge the two forward children -> the twins merge too -> back to 2 links
+    r = client.post(f"/scenarios/{sid}/links/merge",
+                    json={"link_ids": [sp["link_ids"][0], sp["link_ids"][1]]})
+    assert r.status_code == 201, r.text
+    assert len(r.json()["link_ids"]) == 2
+    assert len(_links(client, sid)) == 2
+
+
+def test_merge_resnaps_counter(client):
+    sid = _new_scenario(client)
+    na, nb = _node(client, sid, *A), _node(client, sid, *B)
+    lk = _link(client, sid, na, nb)
+    ing = client.post(f"/scenarios/{sid}/counters/ingest",
+                      json={"lon": 69.2425, "lat": 41.311, "direction_hint_deg": 90,
+                            "source_video_id": "v1", "source_line_id": "l1"}).json()
+    cid = ing["counter_id"]
+    sp = client.post(f"/scenarios/{sid}/links/{lk}/split", json={"fraction": 0.5}).json()
+    mg = client.post(f"/scenarios/{sid}/links/merge", json={"link_ids": sp["link_ids"]}).json()
+    c = client.get(f"/scenarios/{sid}/counters/{cid}").json()
+    assert c["snapped_link_id"] == mg["link_ids"][0]
+    assert c["link_direction"] == "AB"
+
+
+def test_merge_rejects_non_degree2(client):
+    sid = _new_scenario(client)
+    na = _node(client, sid, *A)
+    nm = _node(client, sid, 69.245, 41.311)
+    nb = _node(client, sid, *B)
+    nc = _node(client, sid, 69.245, 41.316)
+    am = _link(client, sid, na, nm)
+    mb = _link(client, sid, nm, nb)
+    _link(client, sid, nm, nc)                       # a third link at M -> degree 3
+    r = client.post(f"/scenarios/{sid}/links/merge", json={"link_ids": [am, mb]})
+    assert r.status_code == 400, r.text
+
+
+def test_merge_rejects_non_chaining_and_bad_count(client):
+    sid = _new_scenario(client)
+    na, nb = _node(client, sid, *A), _node(client, sid, *B)
+    nc, nd = _node(client, sid, *C), _node(client, sid, *D)
+    ab = _link(client, sid, na, nb)
+    cd = _link(client, sid, nc, nd)
+    assert client.post(f"/scenarios/{sid}/links/merge",
+                       json={"link_ids": [ab, cd]}).status_code == 400
+    assert client.post(f"/scenarios/{sid}/links/merge",
+                       json={"link_ids": [ab]}).status_code == 422

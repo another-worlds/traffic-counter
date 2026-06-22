@@ -266,3 +266,22 @@ class SeedResult(BaseModel):
     activities: int = 0
     demand_layers: int = 0
     zone_demand: int = 0
+
+
+# --------------------------------------------------------------------------- #
+# Topology editing (split / merge / move)                                     #
+# --------------------------------------------------------------------------- #
+class LonLat(BaseModel):
+    lon: float
+    lat: float
+
+
+class SplitLinkRequest(BaseModel):
+    at: LonLat | None = None        # split at the point projected onto the link
+    fraction: float | None = None   # …or at a 0..1 position along the link
+
+
+class TopologyResult(BaseModel):
+    new_node_id: str | None = None
+    link_ids: list[str] = Field(default_factory=list)
+    removed_link_ids: list[str] = Field(default_factory=list)

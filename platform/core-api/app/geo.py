@@ -13,7 +13,8 @@ from typing import Any
 
 from geoalchemy2.shape import from_shape, to_shape
 from pyproj import Geod
-from shapely.geometry import mapping, shape
+from shapely.geometry import Point, mapping, shape
+from shapely.ops import substring
 
 _GEOD = Geod(ellps="WGS84")
 SRID = 4326
@@ -65,3 +66,19 @@ def linestring_bearing(geom) -> float:
     """Forward bearing (deg) of a native LINESTRING geometry, first vertex -> last vertex."""
     coords = list(to_shape(geom).coords)
     return bearing_deg(coords[0], coords[-1])
+
+
+def split_linestring(geom, *, lon: float | None = None, lat: float | None = None,
+                     fraction: float | None = None):
+    """Split a native LINESTRING into two GeoJSON LineStrings — at the point projected
+    onto the line (``lon``/``lat``) or at a 0..1 ``fraction`` along it. ``substring``
+    keeps intermediate vertices, so the two parts' geodesic lengths sum to the original.
+    Returns ``((split_lon, split_lat), geojson_a, geojson_b)``."""
+    line = to_shape(geom)
+    total = line.length
+    if fraction is not None:
+        d = max(0.0, min(1.0, fraction)) * total
+    else:
+        d = line.project(Point(lon, lat))
+    pt = line.interpolate(d)
+    return (pt.x, pt.y), mapping(substring(line, 0.0, d)), mapping(substring(line, d, total))

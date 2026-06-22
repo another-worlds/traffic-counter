@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+# throwaway local-verification artefacts (proxy CA / alt Dockerfile)
+_ca.crt
+Dockerfile.localverify

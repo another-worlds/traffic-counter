@@ -1,0 +1,29 @@
+# macromodel-api — backend dependencies
+# FastAPI service: model DB + UXsim engine + 4-step + ODME calibration + traffic-counter client.
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pydantic-settings==2.5.2
+SQLAlchemy==2.0.34
+psycopg[binary]==3.2.2
+
+# geometry / network / projection
+shapely==2.0.6
+pyproj==3.6.1
+networkx==3.3
+osmnx>=1.9,<2.0          # OSM network import (online only; demo path is offline)
+
+# macroscopic simulation engine
+uxsim>=1.7.0
+
+# numerics / IO
+numpy==1.26.4
+pandas==2.2.2
+pyarrow==17.0.0
+scipy==1.14.1
+
+# traffic-counter REST client
+httpx==0.27.2
+
+# tests
+pytest==8.3.3

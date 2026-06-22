@@ -1,0 +1,8 @@
+# macromodel-ui — Solara app hosting the ipyleaflet interactive map.
+solara>=1.30,<2
+ipyleaflet>=0.18,<0.21
+ipywidgets>=8,<9
+ipyevents>=2.0,<3  # keyboard shortcuts on the map (mode/tool hotkeys, Esc, Delete)
+httpx==0.27.2
+pandas==2.2.2  # Lists/Demand/Matrices sections render tables via solara.DataFrame
+matplotlib==3.9.2  # Procedures validation chart (observed-vs-modelled scatter + GEH)

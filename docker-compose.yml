@@ -168,7 +168,97 @@ services:
         reservations:
           memory: 2G
 
+  # ---------------------------------------------------------------------------
+  # macromodel: macroscopic 4-step modelling app (PTV Visum-like companion).
+  # Reads counts from the traffic-counter `api` service over REST; keeps its own
+  # PostGIS database so the counter's schema is never touched. See macromodel/.
+  # ---------------------------------------------------------------------------
+  macromodel-db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: macromodel
+      POSTGRES_PASSWORD: macromodel
+      POSTGRES_DB: macromodel
+    ports: ["5433:5432"]
+    volumes:
+      - macromodel_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U macromodel"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  macromodel-api:
+    build:
+      context: ./macromodel/backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://macromodel:macromodel@macromodel-db:5432/macromodel
+      # The only coupling to the counter app — its REST API (best-effort).
+      TRAFFIC_COUNTER_API_URL: http://api:8000
+      # Browser-reachable counter origins for the detector popup's <img> and the
+      # "Open video" deep link (the internal http://api:8000 isn't reachable from a browser).
+      TRAFFIC_COUNTER_PUBLIC_URL: http://localhost:8000
+      TRAFFIC_COUNTER_UI_URL: http://localhost:8501
+      STORAGE_ROOT: /data
+      CORS_ORIGINS: "*"
+      ENV: dev
+    ports: ["8100:8100"]
+    volumes:
+      - macromodel_storage:/data
+      - ./macromodel/backend:/app
+    depends_on:
+      macromodel-db:
+        condition: service_healthy
+
+  macromodel-ui:
+    build:
+      context: ./macromodel/frontend
+    environment:
+      MACROMODEL_API_URL: http://macromodel-api:8100
+    ports: ["8866:8866"]
+    volumes:
+      - ./macromodel/frontend:/app
+    depends_on:
+      - macromodel-api
+
+  # ---------------------------------------------------------------------------
+  # platform/: the ground-up rewrite onto the target architecture (native
+  # PostGIS geometry). Independent of the legacy macromodel-* services above.
+  # See platform/README.md and macromodel/docs/architecture/tooling-landscape.md.
+  # ---------------------------------------------------------------------------
+  model-db:
+    image: postgis/postgis:16-3.4
+    environment:
+      POSTGRES_USER: model
+      POSTGRES_PASSWORD: model
+      POSTGRES_DB: model
+    ports: ["5434:5432"]
+    volumes:
+      - model_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U model"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  core-api:
+    build:
+      context: ./platform/core-api
+    environment:
+      DATABASE_URL: postgresql+psycopg://model:model@model-db:5432/model
+      CORS_ORIGINS: "*"
+      ENV: dev
+    ports: ["8200:8200"]
+    volumes:
+      - ./platform/core-api:/app
+    depends_on:
+      model-db:
+        condition: service_healthy
+
 volumes:
   pgdata:
   storage:
   model_cache:
+  macromodel_pgdata:
+  macromodel_storage:
+  model_pgdata:

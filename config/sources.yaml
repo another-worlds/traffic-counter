@@ -50,6 +50,7 @@ workspaces:
   tashkent-MP: dop
   tashkent-ODD: Сшитые видео
   tashkent-MP2: Сшитые видео 2
+  tashkent-second: second_stage
   # Add more cameras / sources here, one entry per workspace, e.g.:
   #   samarkand-north:  samarkand/north-cam
   #   archive-2024:     archive/2024

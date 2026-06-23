@@ -135,7 +135,7 @@
     "duration_s": null
   },
   "/mnt/d/yandex-videos/\u0421\u0448\u0438\u0442\u044b\u0435 \u0432\u0438\u0434\u0435\u043e 2/T17.mp4": {
-    "mtime": 1780691089,
+    "mtime": 1780691090,
     "size": 19357153100,
     "duration_s": null
   },
@@ -247,6 +247,41 @@
   "/mnt/d/yandex-videos/\u0421\u0448\u0438\u0442\u044b\u0435 \u0432\u0438\u0434\u0435\u043e 2/T36R1.mp4": {
     "mtime": 1781644868,
     "size": 12428919645,
+    "duration_s": null
+  },
+  "/mnt/d/yandex-videos/second_stage/T34R2.mp4": {
+    "mtime": 1782128025,
+    "size": 8463601870,
+    "duration_s": null
+  },
+  "/mnt/d/yandex-videos/second_stage/T43.mp4": {
+    "mtime": 1782128634,
+    "size": 12749082754,
+    "duration_s": null
+  },
+  "/mnt/d/yandex-videos/second_stage/T42.mp4": {
+    "mtime": 1782129492,
+    "size": 12428959024,
+    "duration_s": null
+  },
+  "/mnt/d/yandex-videos/second_stage/T37R2.mp4": {
+    "mtime": 1782145984,
+    "size": 13227981477,
+    "duration_s": null
+  },
+  "/mnt/d/yandex-videos/second_stage/T34R1.mp4": {
+    "mtime": 1782159458,
+    "size": 13316858417,
+    "duration_s": null
+  },
+  "/mnt/d/yandex-videos/second_stage/T37R1.mp4": {
+    "mtime": 1782162715,
+    "size": 15045116794,
+    "duration_s": null
+  },
+  "/mnt/d/yandex-videos/second_stage/T28.mp4": {
+    "mtime": 1782154430,
+    "size": 14265612510,
     "duration_s": null
   }
 }

@@ -43,11 +43,11 @@
 # Current production layout — multiple cameras synced via Yandex.Disk to
 # one mounted disk, each camera's recordings landing in its own subfolder:
 
-yadisk: /mnt/d/yandex-videos
+yadisk: /mnt/yandex-videos
 
 workspaces:
   # Workspace name (shown in the sidebar)   →   subfolder under yadisk
-  tashkent-MP: dop
+  tashkent-MP: first_wave_check
   tashkent-ODD: Сшитые видео
   tashkent-MP2: Сшитые видео 2
   # Add more cameras / sources here, one entry per workspace, e.g.:
